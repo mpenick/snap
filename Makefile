@@ -8,4 +8,4 @@ lex.c: lex.rl lex.h
 
 clean:
 	rm -rf ${TARGET}.dSYM
-	rm -f ${TARGET} lex.c
+	rm -f ${TARGET} lex.c a.out

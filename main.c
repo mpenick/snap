@@ -7,7 +7,6 @@
 struct Cell_;
 
 enum {
-  TYPE_NIL,
   TYPE_INT,
   TYPE_FLOAT,
   TYPE_STR,
@@ -39,16 +38,29 @@ typedef struct Cell_ {
 inline Value car(Cell* c) { return c->value; }
 inline Cell* cdr(Cell* c) { return c->next;  }
 
+Cell* create_cell(Value value) {
+  Cell* cell = (Cell*)malloc(sizeof(Cell));
+  cell->value = value;
+  cell->next = NULL;
+  return cell;
+}
+
 Value parse_value(Lex* lex, int token);
 
 Cell* parse_list(Lex* lex) {
   int token = lex_next_token(lex);
-  Cell* c = NULL;
-  while (token != ')') {
-    c->v = parse_value(lex, token);
+  Cell* first = NULL;
+  Cell** cell = &first;
+  while (token != ')' && token != TK_EOF) {
+    *cell = create_cell(parse_value(lex, token));
+    cell = &(*cell)->next;
     token = lex_next_token(lex);
   }
-  return NULL;
+  if (token != ')') {
+    fprintf(stderr, "Parser error at %d\n", lex->line);
+    exit(-1);
+  }
+  return first;
 }
 
 Value parse_value(Lex* lex, int token) {
@@ -77,6 +89,7 @@ Value parse_value(Lex* lex, int token) {
       break;
     default:
       fprintf(stderr, "Parser error at %d\n", lex->line);
+      exit(-1);
       break;
   }
 
@@ -87,28 +100,72 @@ Value parse(Lex* lex) {
   return parse_value(lex, lex_next_token(lex));
 }
 
-int main() {
-  const char* buf = "( + a_b b c 123 1.2 1.0e10 10e-1 -.0 -0. \"hi\")";
+void print_cell(Cell* cell);
+
+void print_value(Value value) {
+  switch(type(value)) {
+    case TYPE_INT:
+      printf("%d", val_i(value));
+      break;
+    case TYPE_FLOAT:
+      printf("%f", val_f(value));
+      break;
+    case TYPE_STR:
+      printf("%s", val_s(value));
+      break;
+    case TYPE_ID:
+      printf("%s", val_s(value));
+      break;
+    case TYPE_CELL:
+      printf("\n(");
+      print_cell(val_c(value));
+      printf(")");
+      break;
+  }
+}
+
+void print_cell(Cell* cell) {
+  int space = 0;
+  while (cell != NULL) {
+    if (space) printf(" ");
+    space = 1;
+    print_value(cell->value);
+    cell = cell->next;
+  }
+}
+
+int main(int argc, char** argv) {
+  if (argc < 2) {
+    fprintf(stderr, "Usage: %s <str>\n", argv[0]);
+    exit(-1);
+  }
+
+  //const char* buf = "( + a_b b c 123 1.2 1.0e10 10e-1 -.0 -0. \"hi\")";
 
   Lex lex;
-  lex.buf = buf;
-  lex.buf_size = strlen(buf);
-  lex.p = buf;
+  lex.buf = argv[1];
+  lex.buf_size = strlen(lex.buf);
+  lex.p = lex.buf;
   lex.line = 0;
 
-  int token;
+  Value v = parse(&lex);
+  print_value(v);
+  printf("\n");
 
-  while ((token = lex_next_token(&lex)) != TK_EOF) {
-    if (token == TK_INT) {
-      printf("int(%s) %d\n", lex.value, atoi(lex.value));
-    } else if (token == TK_FLOAT) {
-      printf("float(%s) %f\n", lex.value, atof(lex.value));
-    } else if (token == TK_STR) {
-      printf("str %s\n", lex.value);
-    } else {
-      printf("other(%d) %s\n", token, lex.value);
-    }
-  }
+
+  //int token;
+
+  //while ((token = lex_next_token(&lex)) != TK_EOF) {
+  //  if (token == TK_INT) {
+  //    printf("int(%s) %d\n", lex.value, atoi(lex.value));
+  //  } else if (token == TK_FLOAT) {
+  //    printf("float(%s) %f\n", lex.value, atof(lex.value));
+  //  } else if (token == TK_STR) {
+  //    printf("str %s\n", lex.value);
+  //  } else {
+  //    printf("other(%d) %s\n", token, lex.value);
+  //  }
+  //}
 
   return 0;
 }
