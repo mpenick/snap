@@ -7,6 +7,16 @@
 #define SEMI_SPACE_SIZE 8 * 1024 * 1024
 #define STACK_SIZE 8 * 1024
 
+enum {
+  SNAP_ERROR_INDEX = 1,
+  SNAP_ERROR_TYPE,
+  SNAP_ERROR_PARAM,
+  //SNAP_ERROR_,
+  //SNAP_ERROR_,
+  //SNAP_ERROR_,
+  //SNAP_ERROR_,
+};
+
 uintptr_t round_to_alignment(uintptr_t value, uintptr_t alignment) {
   return (value + (alignment - 1)) & ~(alignment - 1);
 }
@@ -162,7 +172,7 @@ struct SnapCell_ {
     SnapObject* location;
     struct {
       SnapValue first;
-      SnapCell* rest;
+      SnapValue rest;
     };
   };
 };
@@ -203,7 +213,7 @@ struct SnapStr_ {
 
 struct SnapFrame_ {
   SnapFrame* prev_frame;
-  SnapValue* prev_stack_top;
+  SnapValue* stack_base;
   SnapValue* stack_top;
 };
 
@@ -212,10 +222,10 @@ struct Snap_ {
   void* data;
   SnapSemiSpace to_space;
   SnapSemiSpace from_space;
-  SnapValue* stack;
+  SnapFrame* frame;
+  SnapValue* stack_base;
   SnapValue* stack_top;
   SnapValue* stack_end;
-  SnapFrame* frame;
 };
 
 SnapObject* snapgc_alloc(Snap* snap, int type, size_t num_bytes);
@@ -292,7 +302,9 @@ void snapgc_mark_children(Snap* snap, SnapObject* object) {
       if (snap_is_gc(cell->first)) {
         snapgc_mark_value(snap, &cell->first);
       }
-      snapgc_mark_object(snap, (SnapObject**)&cell->rest);
+      if (snap_is_gc(cell->rest)) {
+        snapgc_mark_value(snap, &cell->rest);
+      }
     }
     break;
     case SNAP_TYPE_HASH:
@@ -319,13 +331,17 @@ void snapgc_mark_children(Snap* snap, SnapObject* object) {
   }
 }
 
-static inline SnapObject* snapgc_move_object(Snap* snap, SnapObject* old_object) {
-  size_t num_bytes = snapgc_alloc_size(old_object);
-  SnapObject* new_object = (SnapObject*)snapgc_semispace_allocate(&snap->to_space, num_bytes);
-  memcpy(new_object, old_object, num_bytes);
-  old_object->flags.is_relocated = true;
-  old_object->location = new_object;
-  return new_object;
+static inline SnapObject* snapgc_move_object(Snap* snap, SnapObject* object) {
+  if (object->flags.is_relocated) {
+    return object->location;
+  } else {
+    size_t num_bytes = snapgc_alloc_size(object);
+    SnapObject* new_object = (SnapObject*)snapgc_semispace_allocate(&snap->to_space, num_bytes);
+    memcpy(new_object, object, num_bytes);
+    object->flags.is_relocated = true;
+    object->location = new_object;
+    return new_object;
+  }
 }
 
 void snapgc_mark_value(Snap* snap, SnapValue* value) {
@@ -338,7 +354,7 @@ void snapgc_mark_object(Snap* snap, SnapObject** object) {
 }
 
 void snapgc_collect(Snap* snap) {
-  for (SnapValue* v = snap->stack; v < snap->stack_end; ++v) {
+  for (SnapValue* v = snap->stack_base; v < snap->stack_top; ++v) {
     if (snap_is_gc(*v)) {
       snapgc_mark_value(snap, v);
     }
@@ -392,16 +408,16 @@ void snapgc_semispace_reset(SnapSemiSpace* ss) {
 void snap_init(Snap* snap, SnapAlloc alloc, void* data) {
   snap->alloc = alloc;
   snap->data = data;
-  snap->stack = (SnapValue*)snap_alloc(STACK_SIZE * sizeof(SnapValue));
-  snap->stack_top = snap->stack;
-  snap->stack_end = snap->stack + STACK_SIZE * sizeof(SnapValue);
+  snap->stack_base = (SnapValue*)snap_alloc(STACK_SIZE * sizeof(SnapValue));
+  snap->stack_top = snap->stack_base;
+  snap->stack_end = snap->stack_base + STACK_SIZE * sizeof(SnapValue);
   snap->frame = NULL;
   snapgc_semispace_init(&snap->from_space, (char*)snap_alloc(SEMI_SPACE_SIZE), SEMI_SPACE_SIZE);
   snapgc_semispace_init(&snap->to_space, (char*)snap_alloc(SEMI_SPACE_SIZE), SEMI_SPACE_SIZE);
 }
 
 void snap_cleanup(Snap* snap) {
-  snap_free(snap->stack);
+  snap_free(snap->stack_base);
   snap_free(snap->from_space.start);
   snap_free(snap->to_space.start);
 }
@@ -410,7 +426,7 @@ bool snap_push_frame(Snap* snap, SnapFrame* frame, size_t size) {
   if (snap->stack_top + size >= snap->stack_end) return false;
 
   frame->prev_frame = snap->frame;
-  frame->prev_stack_top = snap->stack_top;
+  frame->stack_base = snap->stack_top;
   frame->stack_top = snap->stack_top + size;
 
   snap->frame = frame;
@@ -425,37 +441,110 @@ bool snap_push_frame(Snap* snap, SnapFrame* frame, size_t size) {
 
 void snap_pop_frame(Snap* snap, SnapFrame* frame) {
   snap->frame = frame->prev_frame;
-  snap->stack_top = frame->prev_stack_top;
+  snap->stack_top = frame->stack_base;
 }
 
-void snap_push_nil(Snap* snap) {
-  *snap->stack_top = snap_nil_value();
+void snap_push(Snap* snap, SnapValue value) {
+  *snap->stack_top = value;
   snap->stack_top++;
   assert(snap->stack_top <= snap->frame->stack_top);
 }
 
-void snap_push_bool(Snap* snap, bool b) {
-  *snap->stack_top = snap_bool_value(b);
-  snap->stack_top++;
-  assert(snap->stack_top <= snap->frame->stack_top);
+void snap_pop(Snap* snap) {
+  snap->stack_top--;
+  assert(snap->stack_top >= snap->frame->stack_base);
 }
 
-void snap_push_int(Snap* snap, int32_t i) {
-  *snap->stack_top = snap_int_value(i);
-  snap->stack_top++;
-  assert(snap->stack_top <= snap->frame->stack_top);
+int snap_at_index(Snap* snap, int index, SnapValue* value) {
+  if (index < 0) {
+    SnapValue* at_index = snap->stack_top + index;
+    if (at_index < snap->frame->stack_base) {
+      return SNAP_ERROR_INDEX;
+    }
+    *value = *at_index;
+  } else {
+    SnapValue* at_index = snap->stack_base + index;
+    if (at_index >= snap->frame->stack_top) {
+      return SNAP_ERROR_INDEX;
+    }
+    *value = *at_index;
+  }
+  return 0;
 }
 
-void snap_push_float(Snap* snap, int32_t f) {
-  *snap->stack_top = snap_float_value(f);
-  snap->stack_top++;
-  assert(snap->stack_top <= snap->frame->stack_top);
+void snap_push_nil(Snap* snap) { snap_push(snap, snap_nil_value()); }
+void snap_push_bool(Snap* snap, bool b) { snap_push(snap, snap_bool_value(b)); }
+void snap_push_int(Snap* snap, int32_t i) { snap_push(snap, snap_int_value(i)); }
+void snap_push_float(Snap* snap, int32_t f) { snap_push(snap, snap_float_value(f)); }
+void snap_push_ptr(Snap* snap, void* p) { snap_push(snap, snap_ptr_value(p)); }
+
+void snap_push_cell(Snap* snap) {
+  SnapCell* cell = (SnapCell*)snapgc_alloc(snap,
+                                           SNAP_TYPE_CELL,
+                                           sizeof(SnapCell));
+  cell->first = snap_nil_value();
+  cell->rest = snap_nil_value();
+  snap_push(snap, snap_object_value((SnapObject*)cell));
 }
 
-void snap_push_ptr(Snap* snap, void* p) {
-  *snap->stack_top = snap_ptr_value(p);
-  snap->stack_top++;
-  assert(snap->stack_top <= snap->frame->stack_top);
+int snap_object_at_index(Snap* snap, int index, int type, SnapObject** object) {
+  SnapValue value;
+  int rc = snap_at_index(snap, index, &value);
+  if (rc) return rc;
+  if (snap_type(value) != type) {
+    return SNAP_ERROR_TYPE;
+  }
+  *object = snap_object(value);
+  return 0;
+}
+
+int snap_cell_set_first(Snap* snap, int index) {
+  SnapCell* cell;
+  int rc = snap_object_at_index(snap, index, SNAP_TYPE_CELL, (SnapObject**)&cell);
+  if (rc) return rc;
+  if (snap->stack_top == snap->frame->stack_base) {
+    return SNAP_ERROR_PARAM;
+  }
+  cell->first = snap->stack_top[-1];
+  snap_pop(snap);
+  return 0;
+}
+
+int snap_cell_set_rest(Snap* snap, int index) {
+  SnapCell* cell;
+  int rc = snap_object_at_index(snap, index, SNAP_TYPE_CELL, (SnapObject**)&cell);
+  if (rc) return rc;
+  if (snap->stack_top == snap->frame->stack_base) {
+    return SNAP_ERROR_PARAM;
+  }
+  cell->rest = snap->stack_top[-1];
+  snap_pop(snap);
+  return 0;
+}
+
+int snap_cell_get_first(Snap* snap, int index) {
+  SnapCell* cell;
+  int rc = snap_object_at_index(snap, index, SNAP_TYPE_CELL, (SnapObject**)&cell);
+  if (rc) return rc;
+  snap_push(snap, cell->first);
+  return 0;
+}
+
+int snap_cell_get_rest(Snap* snap, int index) {
+  SnapCell* cell;
+  int rc = snap_object_at_index(snap, index, SNAP_TYPE_CELL, (SnapObject**)&cell);
+  if (rc) return rc;
+  snap_push(snap, cell->rest);
+  return 0;
+}
+
+int snap_duplicate(Snap* snap) {
+}
+
+int snap_replace(Snap* snap, int index) {
+  SnapValue value;
+  int rc = snap_at_index(snap, index, *value);
+  if (rc) return rc;
 }
 
 void snap_push_str_n(Snap* snap, const char* s, size_t len) {
@@ -464,42 +553,11 @@ void snap_push_str_n(Snap* snap, const char* s, size_t len) {
                                         sizeof(SnapStr) + len);
   memcpy(str->data, s, len);
   str->len = len;
-  *snap->stack_top = snap_object_value((SnapObject*)str);
-  snap->stack_top++;
-  assert(snap->stack_top <= snap->frame->stack_top);
+  snap_push(snap, snap_object_value((SnapObject*)str));
 }
 
 void snap_push_str(Snap* snap, const char* s) {
   snap_push_str_n(snap, s, strlen(s));
-}
-
-void snap_push_array(Snap* snap, size_t size) {
-  SnapArray* array = (SnapArray*)snapgc_alloc(snap,
-                                              SNAP_TYPE_ARRAY,
-                                              sizeof(SnapArray) + size * sizeof(SnapValue));
-  for (size_t i = 0; i < size; ++i) {
-    array->data[i] = snap_nil_value();
-  }
-  *snap->stack_top = snap_object_value((SnapObject*)array);
-  snap->stack_top++;
-  assert(snap->stack_top <= snap->frame->stack_top);
-}
-
-// Expects value on top of stack and array at index
-// Returns 0 on success and pops value off stack
-int snap_array_set(Snap* snap, int index, size_t pos) {
-  // Check valid index
-  if (index < 0) {
-
-  } else {
-  }
-  // Check position and is an array
-  // Check value top of stack
-}
-
-// Expects array at index
-// Returns 0 on success and pushes value at pos on stack
-int snap_array_get(Snap* snap, int index, size_t pos) {
 }
 
 void* alloc(void* data, void* ptr, size_t num_bytes) {
