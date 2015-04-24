@@ -1,10 +1,17 @@
-TARGET=a
+TARGET=snap
 
-all: main.c lex.c
+all: snap
+
+snap: snap.c
+	gcc -o ${TARGET} -g snap.c
+
+main: main.c lex.c
 	gcc -o ${TARGET} -g main.c lex.c
 
 lex.c: lex.rl lex.h
 	ragel lex.rl
+
+
 
 clean:
 	rm -rf ${TARGET}.dSYM
