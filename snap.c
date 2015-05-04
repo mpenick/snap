@@ -85,11 +85,13 @@ enum {
   SNAP_TYPE_INT,
   SNAP_TYPE_PTR,
   SNAP_TYPE_STR,
+  SNAP_TYPE_DATA,
   SNAP_TYPE_CELL,
   SNAP_TYPE_ARRAY,
   SNAP_TYPE_LIST,
   SNAP_TYPE_HASH,
   SNAP_TYPE_CODE,
+  SNAP_TYPE_FUNC,
 };
 
 #define snap_type(v) ((v).type > 0xfff00000 ? (((v).type >> 16) & 0x0f) : SNAP_TYPE_FLOAT)
@@ -105,13 +107,7 @@ enum {
 
 #define snap_is_forwared(o) ((SnapObject*)(o) != (o)->forward)
 #define snap_rb(o, type) ((type*)(o)->forward)
-#define snap_wb(o, type, field, value)    \
-{                                         \
-  ((type*)(o))->field = value;            \
-  if (snap_is_forwared(o)) {              \
-    ((type*)(o)->forward)->field = value; \
-  }                                       \
-}
+#define snap_wb(o, type, field, value) ((type*)(o)->forward)->field = value
 
 static inline SnapValue snap_nil_value() {
   SnapValue v;
@@ -204,6 +200,13 @@ struct SnapList_ {
 struct SnapStr_ {
   SNAP_OBJECT_FIELDS
   size_t len;
+  char data[0];
+
+};
+
+struct SnapBytes_ {
+  SNAP_OBJECT_FIELDS
+  size_t size;
   char data[0];
 };
 
