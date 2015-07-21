@@ -4,3 +4,4 @@ snap
 *.dSYM
 *.pyc
 snap_lex.c
+hash

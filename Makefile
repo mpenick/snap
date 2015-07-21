@@ -1,6 +1,9 @@
 TARGET=a
 
-all: snap
+all: hash
+
+hash: hash.c
+	gcc -o hash -g hash.c
 
 snap: snap.c snap_lex.c
 	gcc -o ${TARGET} -g snap.c snap_lex.c
