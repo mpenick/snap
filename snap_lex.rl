@@ -1,4 +1,4 @@
-#include "lex.h"
+#include "snap_lex.h"
 
 #include <string.h>
 

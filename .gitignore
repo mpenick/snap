@@ -1,4 +1,6 @@
 a.out*
+a
 snap
 *.dSYM
 *.pyc
+snap_lex.c
