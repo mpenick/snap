@@ -1,16 +1,28 @@
-TARGET=a
+CFLAGS=-g
 
-all: hash
+TARGET=snap
+SOURCES=$(filter-out snap_lex.c, $(wildcard *.c)) snap_lex.c
+OBJECTS=$(patsubst %.c,%.o,$(SOURCES))
 
-hash: hash.c
-	gcc -o hash -g hash.c
+all: $(TARGET)
 
-snap: snap.c snap_lex.c
-	gcc -o ${TARGET} -g snap.c snap_lex.c
+$(TARGET): $(OBJECTS)
+	gcc -o $(TARGET) $(OBJECTS)
 
-snap_lex.c: snap_lex.rl snap_lex.h
+ifneq ($(MAKECMDGOALS),clean)
+include $(SOURCES:%.c=.depends/%.d)
+endif
+
+.depends/%.d: %.c .depends
+	$(CC) $(CFLAGS) -MM -c $< -o $@
+
+.depends:
+	mkdir .depends
+
+snap_lex.c: snap_lex.rl
 	ragel snap_lex.rl
 
+.PHONY: clean
 clean:
-	rm -rf ${TARGET}.dSYM
-	rm -f ${TARGET} lex.c a.out
+	rm -rf $(TARGET).dSYM .depends
+	rm -f $(TARGET) *.o snap_lex.c a.out

@@ -1,5 +1,6 @@
+#include "snap_hash.h"
+
 #include <assert.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,27 +15,6 @@ size_t next_pow_of_2(size_t num) {
   while (i < num) i <<= 1;
   return i;
 }
-
-typedef struct {
-  int type;
-  union {
-    int i;
-    double f;
-    const char* s;
-    struct Cons_* c;
-  };
-} Value;
-
-typedef struct {
-  const char* key;
-  Value value;
-} Entry;
-
-typedef struct {
-  Entry* entries;
-  size_t capacity;
-  size_t count;
-} Hash;
 
 #ifdef BITS32
 static uint32_t calc_hash(const void* data, size_t length) {
@@ -145,33 +125,4 @@ bool hash_get(Hash* hash, const char* key, Value* value) {
   if (!entry->key) return false;
   *value = entry->value;
   return true;
-}
-
-int main() {
-  Hash h;
-
-  const char** key;
-  const char* keys[] = { "abcdefghijkl", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", NULL };
-
-  hash_init(&h);
-
-  int i = 0;
-  for (key = keys; *key; ++key) {
-    Value v;
-    v.i = i++;
-    hash_put(&h, *key, &v);
-  }
-
-  for (key = keys; *key; ++key) {
-    Value v;
-    hash_get(&h, *key, &v);
-    printf("%s %d\n", *key, v.i);
-  }
-
-  for (key = keys; *key; ++key) {
-    Value v;
-    hash_delete(&h, *key);
-  }
-
-  hash_destroy(&h);
 }

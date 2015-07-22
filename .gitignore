@@ -1,7 +1,7 @@
-a.out*
-a
+a.out
 snap
-*.dSYM
-*.pyc
 snap_lex.c
-hash
+*.dSYM
+*.o
+.ycm_extra_conf.pyc
+.depends

@@ -1,3 +1,5 @@
+#include "snap.h"
+#include "snap_hash.h"
 #include "snap_lex.h"
 
 #include <assert.h>
@@ -6,51 +8,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-
-struct Cons_;
-
-enum {
-  TYPE_INT,
-  TYPE_FLOAT,
-  TYPE_STR,
-  TYPE_ID,
-  TYPE_CONS
-};
-
-typedef struct {
-  int type;
-  union {
-    int i;
-    double f;
-    const char* s;
-    struct Cons_* c;
-  } v;
-} Value;
-
-#define type(X) (X).type
-#define val_i(X) (X).v.i
-#define val_f(X) (X).v.f
-#define val_s(X) (X).v.s
-#define val_c(X) (X).v.c
-
-typedef struct Cons_ {
-  Value value;
-  struct Cons_* next;
-} Cons;
-
-typedef struct Snap_ {
-} Snap;
-
-typedef struct Entry_ {
-  const char* key;
-  Value value;
-} Entry;
-
-typedef struct Hash_ {
-  Entry* entries;
-  size_t capacity;
-  size_t count;
-} Hash;
 
 inline Value car(Cons* c) { return c->value; }
 inline Cons* cdr(Cons* c) { return c->next;  }
@@ -168,6 +125,35 @@ int main(int argc, char** argv) {
   Value v = parse(&lex);
   print_value(v);
   printf("\n");
+
+  {
+    Hash h;
+
+    const char** key;
+    const char* keys[] = { "abcdefghijkl", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", NULL };
+
+    hash_init(&h);
+
+    int i = 0;
+    for (key = keys; *key; ++key) {
+      Value v;
+      v.i = i++;
+      hash_put(&h, *key, &v);
+    }
+
+    for (key = keys; *key; ++key) {
+      Value v;
+      hash_get(&h, *key, &v);
+      printf("%s %d\n", *key, v.i);
+    }
+
+    for (key = keys; *key; ++key) {
+      Value v;
+      hash_delete(&h, *key);
+    }
+
+    hash_destroy(&h);
+  }
 
 
   //int token;
