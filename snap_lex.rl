@@ -7,17 +7,17 @@
   write data;
 }%%
 
-static int copy_value(Lex* lex, const char* ts, const char* te, int token) {
+static int copy_value(SnapLex* lex, const char* ts, const char* te, int token) {
   size_t token_size = te - ts;
-  if (token_size >= sizeof(lex->value)) { // need space for '\0'
+  if (token_size >= sizeof(lex->val)) { // need space for '\0'
     return TK_TOO_BIG;
   }
-  memcpy(lex->value, ts, token_size);
-  lex->value[token_size] = '\0';
+  memcpy(lex->val, ts, token_size);
+  lex->val[token_size] = '\0';
   return token;
 }
 
-int lex_next_token(Lex* lex) {
+int snap_lex_next_token(SnapLex* lex) {
   int token = TK_INVALID;
 
   const char* p = lex->p;
@@ -29,7 +29,7 @@ int lex_next_token(Lex* lex) {
 
   if (p == eof) return TK_EOF;
 
-  lex->value[0] = '\0';
+  lex->val[0] = '\0';
 
   %%{
     ws = [ \t];

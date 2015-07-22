@@ -40,11 +40,11 @@ static uint64_t calc_hash(const void* data, size_t length) {
 }
 #endif
 
-static Entry* hash_lookup(Entry* entries, size_t capacity, const char* key) {
+static SEntry* hash_lookup(SEntry* entries, size_t capacity, const char* key) {
   size_t h = calc_hash(key, strlen(key));
   size_t mask = capacity - 1;
   for (size_t i = 0; i < capacity; ++i) {
-    Entry *entry = &entries[(h + ((i + i * i) >> 1)) & mask];
+    SEntry *entry = &entries[(h + ((i + i * i) >> 1)) & mask];
     if (entry->key == NULL || strcmp(key, entry->key) == 0) {
       return entry;
     }
@@ -53,19 +53,19 @@ static Entry* hash_lookup(Entry* entries, size_t capacity, const char* key) {
   return NULL;
 }
 
-static void hash_resize(Hash* hash, size_t new_capacity) {
+static void hash_resize(SnapHash* hash, size_t new_capacity) {
   size_t i;
-  Entry* new_entries;
+  SEntry* new_entries;
   assert(hash->capacity >= HASH_MIN_CAPACITY);
   new_capacity = next_pow_of_2(new_capacity);
   if (new_capacity < HASH_MIN_CAPACITY) {
     new_capacity = HASH_MIN_CAPACITY;
   }
-  new_entries = (Entry*)calloc(new_capacity, sizeof(Entry));
+  new_entries = (SEntry*)calloc(new_capacity, sizeof(SEntry));
   for (i = 0; i < hash->capacity; ++i) {
-    Entry* entry = &hash->entries[i];
+    SEntry* entry = &hash->entries[i];
     if (entry->key != NULL) {
-      Entry* new_entry = hash_lookup(new_entries, new_capacity, entry->key);
+      SEntry* new_entry = hash_lookup(new_entries, new_capacity, entry->key);
       *new_entry = *entry;
     }
   }
@@ -74,23 +74,23 @@ static void hash_resize(Hash* hash, size_t new_capacity) {
   hash->capacity = new_capacity;
 }
 
-void hash_init(Hash* hash) {
-  hash->entries = (Entry*)calloc(HASH_MIN_CAPACITY, sizeof(Entry));
+void snap_hash_init(SnapHash* hash) {
+  hash->entries = (SEntry*)calloc(HASH_MIN_CAPACITY, sizeof(SEntry));
   hash->capacity = HASH_MIN_CAPACITY;
   hash->count = 0;
 }
 
-void hash_destroy(Hash* hash) {
+void snap_hash_destroy(SnapHash* hash) {
   for (size_t i = 0; i < hash->capacity; ++i) {
-    Entry* entry = &hash->entries[i];
+    SEntry* entry = &hash->entries[i];
     if (entry->key != NULL) free((void*)entry->key);
   }
   free((void*)hash->entries);
 }
 
-bool hash_put(Hash* hash, const char* key, Value* value) {
+bool snap_hash_put(SnapHash* hash, const char* key, SValue val) {
   bool is_replaced;
-  Entry* entry = hash_lookup(hash->entries, hash->capacity, key);
+  SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
   if (entry->key) {
     is_replaced = true;
   } else {
@@ -103,12 +103,12 @@ bool hash_put(Hash* hash, const char* key, Value* value) {
     entry->key = strdup(key);
     is_replaced = false;
   }
-  entry->value = *value;
+  entry->val = val;
   return is_replaced;
 }
 
-bool hash_delete(Hash* hash, const char* key) {
-  Entry* entry = hash_lookup(hash->entries, hash->capacity, key);
+bool snap_hash_delete(SnapHash* hash, const char* key) {
+  SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
   if (!entry->key) return false;
   free((void*)entry->key);
   entry->key = NULL;
@@ -120,9 +120,9 @@ bool hash_delete(Hash* hash, const char* key) {
   return true;
 }
 
-bool hash_get(Hash* hash, const char* key, Value* value) {
-  Entry* entry = hash_lookup(hash->entries, hash->capacity, key);
+bool snap_hash_get(SnapHash* hash, const char* key, SValue* val) {
+  SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
   if (!entry->key) return false;
-  *value = entry->value;
+  *val = entry->val;
   return true;
 }

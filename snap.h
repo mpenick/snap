@@ -1,38 +1,89 @@
 #ifndef SNAP_H
 #define SNAP_H
 
-struct Cons_;
+#include "snap_hash.h"
+
+#include <stddef.h>
+#include <stdint.h>
 
 enum {
-  TYPE_INT,
-  TYPE_FLOAT,
-  TYPE_STR,
-  TYPE_ID,
-  TYPE_CONS
+  SERR_PARSE
+};
+
+#define SOBJECT_FIELDS     \
+  uint8_t type;            \
+  uint8_t mark;            \
+  struct SObject_* next;   \
+  struct SObject_* gc_next;
+
+struct SObject_ {
+  SOBJECT_FIELDS
 };
 
 typedef struct {
-  int type;
-  union {
-    int i;
-    double f;
-    const char* s;
-    struct Cons_* c;
-  };
-} Value;
+  SOBJECT_FIELDS
+  size_t len;
+  char data[0];
+} SSymStr;
 
-#define type(X) (X).type
-#define val_i(X) (X).i
-#define val_f(X) (X).f
-#define val_s(X) (X).s
-#define val_c(X) (X).c
+typedef struct {
+  SOBJECT_FIELDS
+  int code;
+  SSymStr* msg;
+} SErr;
 
-typedef struct Cons_ {
-  Value value;
-  struct Cons_* next;
-} Cons;
+struct SCons_ {
+  SOBJECT_FIELDS
+  SValue first;
+  struct SCons_* rest;
+};
 
-typedef struct Snap_ {
-} Snap;
+typedef struct {
+  SOBJECT_FIELDS
+  SnapHash table;
+} SHash;
+
+typedef struct SScope_ {
+  SOBJECT_FIELDS
+  SnapHash vars;
+  struct SScope_* up;
+} SScope;
+
+typedef struct SLambda_ {
+  SOBJECT_FIELDS
+  SCons* params;
+  SCons* exec;
+  SScope* scope;
+} SLambda;
+
+struct Snap_ {
+  SScope* scope;
+  SObject** anchored;
+  size_t anchored_capacity;
+  SObject** anchored_top;
+  size_t num_bytes_alloced;
+  size_t num_bytes_alloced_last_gc;
+  SObject* all;
+  SObject* gray;
+};
+
+void snap_init(Snap* snap);
+void snap_destroy(Snap* snap);
+
+void snap_define(Snap* snap, const char* name, SValue val);
+void snap_define_func(Snap* snap, const char* name, SFunc func);
+SValue snap_exec(Snap* snap, const char* expr);
+
+SSymStr* snap_str_new(Snap* snap, const char* str);
+SSymStr* snap_sym_new(Snap* snap, const char* sym);
+SErr* snap_err_new(Snap* snap, int code, const char* msg);
+SCons* snap_cons_new(Snap* snap);
+SHash* snap_hash_new(Snap* snap);
+SScope* snap_scope_new(Snap* snap);
+SLambda* snap_lambda_new(Snap* snap, SCons* exec, SCons* params);
+
+SObject* snap_push(Snap* snap, SObject* obj);
+void snap_pop(Snap* snap);
+
 
 #endif

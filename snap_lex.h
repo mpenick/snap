@@ -1,5 +1,5 @@
-#ifndef LEX_H
-#define LEX_H
+#ifndef SNAP_LEX_H
+#define SNAP_LEX_H
 
 #include <stddef.h>
 
@@ -18,9 +18,9 @@ typedef struct {
   size_t buf_size;
   const char* p;
   int line;
-  char value[128];
-} Lex;
+  char val[128];
+} SnapLex;
 
-int lex_next_token(Lex* lex);
+int snap_lex_next_token(SnapLex* lex);
 
 #endif

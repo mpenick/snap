@@ -1,26 +1,26 @@
 #ifndef SNAP_HASH_H
 #define SNAP_HASH_H
 
-#include "snap.h"
+#include "snap_val.h"
 
 #include <stddef.h>
 #include <stdbool.h>
 
 typedef struct {
   const char* key;
-  Value value;
-} Entry;
+  SValue val;
+} SEntry;
 
 typedef struct {
-  Entry* entries;
+  SEntry* entries;
   size_t capacity;
   size_t count;
-} Hash;
+} SnapHash;
 
-void hash_init(Hash* hash);
-void hash_destroy(Hash* hash);
-bool hash_put(Hash* hash, const char* key, Value* value);
-bool hash_delete(Hash* hash, const char* key);
-bool hash_get(Hash* hash, const char* key, Value* value);
+void snap_hash_init(SnapHash* hash);
+void snap_hash_destroy(SnapHash* hash);
+bool snap_hash_put(SnapHash* hash, const char* key, SValue val);
+bool snap_hash_delete(SnapHash* hash, const char* key);
+bool snap_hash_get(SnapHash* hash, const char* key, SValue* val);
 
 #endif

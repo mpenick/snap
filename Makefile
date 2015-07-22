@@ -7,7 +7,7 @@ OBJECTS=$(patsubst %.c,%.o,$(SOURCES))
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	gcc -o $(TARGET) $(OBJECTS)
+	$(CC) $(CFLAGS) -o $(TARGET) $(OBJECTS)
 
 ifneq ($(MAKECMDGOALS),clean)
 include $(SOURCES:%.c=.depends/%.d)
