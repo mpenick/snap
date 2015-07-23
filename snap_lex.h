@@ -19,6 +19,7 @@ enum {
   TK_FN,
   TK_LET,
   TK_QUOTE,
+  TK_RECUR,
   TK_SET,
   TK_EOF
 };

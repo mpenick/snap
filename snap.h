@@ -42,6 +42,7 @@ typedef struct {
 typedef struct SScope_ {
   SOBJECT_FIELDS
   SnapHash vars;
+  SCons* cons;
   struct SScope_* up;
 } SScope;
 
