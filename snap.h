@@ -49,12 +49,12 @@ typedef struct SScope_ {
   struct SScope_* up;
 } SScope;
 
-typedef struct SLambda_ {
+typedef struct SFn_ {
   SOBJECT_FIELDS
   SCons* params;
-  SCons* exec;
+  SCons* body;
   SScope* scope;
-} SLambda;
+} SFn;
 
 struct Snap_ {
   SScope* scope;
@@ -70,8 +70,8 @@ struct Snap_ {
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);
 
-void snap_define(Snap* snap, const char* name, SValue val);
-void snap_define_func(Snap* snap, const char* name, SFunc func);
+void snap_def(Snap* snap, const char* name, SValue val);
+void snap_def_func(Snap* snap, const char* name, SCFunc func);
 SValue snap_exec(Snap* snap, const char* expr);
 
 SSymStr* snap_str_new(Snap* snap, const char* str);
@@ -80,7 +80,7 @@ SErr* snap_err_new(Snap* snap, int code, const char* msg);
 SCons* snap_cons_new(Snap* snap);
 SHash* snap_hash_new(Snap* snap);
 SScope* snap_scope_new(Snap* snap);
-SLambda* snap_lambda_new(Snap* snap, SCons* exec, SCons* params);
+SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body);
 
 SObject* snap_push(Snap* snap, SObject* obj);
 void snap_pop(Snap* snap);

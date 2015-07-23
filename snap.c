@@ -19,15 +19,16 @@ enum {
 };
 
 #define check(a, e) (assert(a), (e))
-
-#define is_gc(v) ((v).type > STYPE_FLOAT)
-
+#define is_gc(v) ((v).type > STYPE_CFUNC)
 #define as_sym(v) check((v).type == STYPE_SYM, (SSymStr*)(v).o)
 #define as_str(v) check((v).type == STYPE_STR, (SSymStr*)(v).o)
 #define as_err(v) check((v).type == STYPE_ERR, (SErr*)(v).o)
 #define as_cons(v) check((v).type == STYPE_CONS, (SCons*)(v).o)
 #define as_hash(v) check((v).type == STYPE_HASH, (SHash*)(v).o)
-#define as_lambda(v) check((v).type == STYPE_LAMBDA, (SLambda*)(v).o)
+#define as_fn(v) check((v).type == STYPE_FN, (SFn*)(v).o)
+
+SValue read(Snap* snap, SnapLex* lex);
+SValue exec(Snap* snap, SValue val);
 
 __attribute__((__format__(__printf__, 3, 4)))
 static inline SValue create_error(Snap* snap, int code, const char* format, ...) {
@@ -62,11 +63,21 @@ static inline SValue create_float(int f) {
   return val;
 }
 
+static SValue create_object(uint8_t type, SObject* o) {
+  SValue val;
+  val.type = type;
+  val.o = o;
+  return val;
+}
+
 static void gc_free(Snap* snap, SObject* obj) {
   switch (obj->type) {
     case STYPE_SYM:
     case STYPE_STR:
       snap->num_bytes_alloced -= (sizeof(SSymStr) + ((SSymStr*)obj)->len + 1);
+      break;
+    case STYPE_ERR:
+      snap->num_bytes_alloced -= sizeof(SErr);
       break;
     case STYPE_CONS:
       snap->num_bytes_alloced -= sizeof(SCons);
@@ -80,8 +91,8 @@ static void gc_free(Snap* snap, SObject* obj) {
       snap->num_bytes_alloced -= sizeof(SScope);
       snap_hash_destroy(&((SScope*)obj)->vars);
       break;
-    case STYPE_LAMBDA:
-      snap->num_bytes_alloced -= sizeof(SLambda);
+    case STYPE_FN:
+      snap->num_bytes_alloced -= sizeof(SFn);
       break;
     default:
       assert(0 && "Not a GC object");
@@ -101,7 +112,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_CONS:
     case STYPE_HASH:
     case STYPE_SCOPE:
-    case STYPE_LAMBDA:
+    case STYPE_FN:
       if (obj->mark == WHITE) {
         obj->mark = GRAY;
         obj->gc_next = snap->gray;
@@ -142,10 +153,10 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark_hash(snap, &((SScope*)obj)->vars);
       gc_mark(snap, (SObject*)((SScope*)obj)->up);
       break;
-    case STYPE_LAMBDA:
-      gc_mark(snap, (SObject*)((SLambda*)obj)->params);
-      gc_mark(snap, (SObject*)((SLambda*)obj)->exec);
-      gc_mark(snap, (SObject*)((SLambda*)obj)->scope);
+    case STYPE_FN:
+      gc_mark(snap, (SObject*)((SFn*)obj)->params);
+      gc_mark(snap, (SObject*)((SFn*)obj)->body);
+      gc_mark(snap, (SObject*)((SFn*)obj)->scope);
       break;
     default:
       assert(0 && "Not a valid gray object");
@@ -219,19 +230,16 @@ void snap_destroy(Snap* snap) {
   }
 }
 
-void snap_define(Snap* snap, const char* name, SValue val) {
+void snap_def(Snap* snap, const char* name, SValue val) {
   snap_hash_put(&snap->scope->vars, name, val);
 }
 
-void snap_define_func(Snap* snap, const char* name, SFunc func) {
+void snap_def_func(Snap* snap, const char* name, SCFunc func) {
   SValue val;
   val.type = STYPE_CFUNC;
   val.c = func;
-  snap_define(snap, name, val);
+  snap_def(snap, name, val);
 }
-
-SValue read(Snap* snap, SnapLex* lex);
-SValue exec(Snap* snap, SValue val);
 
 SValue snap_exec(Snap* snap, const char* expr) {
   SnapLex lex;
@@ -288,10 +296,10 @@ SScope* snap_scope_new(Snap* snap) {
   return s;
 }
 
-SLambda* snap_lambda_new(Snap* snap, SCons* exec, SCons* params) {
-  SLambda* l = (SLambda*)gc_new(snap, STYPE_LAMBDA, sizeof(SLambda));
+SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
+  SFn* l = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
   l->params = params;
-  l->exec = exec;
+  l->body = body;
   l->scope = NULL;
   return l;
 }
@@ -380,45 +388,115 @@ bool lookup(Snap* snap, const char* sym, SValue* val) {
   return false;
 }
 
-SValue exec_list(Snap* snap, SCons* cons);
+SValue def(Snap* snap, SCons* args) {
+  SCons* a = args;
+  SCons* b;
+  if (!args || !args->rest) {
+    return create_error(snap, SERR_PARSE, "Invalid def");
+  }
+  b = args->rest;
+  if (a->type != STYPE_SYM) {
+    return create_error(snap, SERR_PARSE, "First parameter must be a symbol");
+  }
+  snap_def(snap,  as_str(a->first)->data, b->first);
+  return create_nil();
+}
 
-SValue exec_lambda(Snap* snap, SLambda* lambda, SCons* args) {
-  SValue res;
-  SCons* param = lambda->params;
+SValue fn(Snap* snap, SCons* args) {
+  SCons* param;
+  if (!args || !args->rest || args->first.type != STYPE_CONS) {
+    return create_error(snap, SERR_PARSE, "Invalid fn");
+  }
+  for (param = as_cons(args->first); param; param = param->rest) {
+    if (param->first.type != STYPE_SYM) {
+      return create_error(snap, SERR_PARSE, "Fn parameter is not a symbol");
+    }
+  }
+  return create_object(STYPE_FN,
+                       (SObject*)snap_fn_new(snap,
+                                             as_cons(args->first),
+                                             args->rest));
+}
+
+SValue let(Snap* snap, SCons* args) {
+  SScope* scope = snap_scope_new(snap);
+  scope->up = snap->scope;
+  snap->scope = scope;
+
+  snap->scope = snap->scope->up;
+}
+
+SValue exec_cons(Snap* snap, SCons* cons);
+
+SValue exec_cfunc(Snap* snap, SCFunc cfunc, SCons* args) {
   SCons* arg = args;
+  SCons* first = NULL;
+  SCons** cons = &first;
+  for (; arg; arg = arg->rest) {
+    *cons = snap_cons_new(snap);
+    (*cons)->first = exec(snap, arg->first);
+    cons = &(*cons)->rest;
+  }
+  return cfunc(snap, first);
+}
+
+SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
+  SValue res;
+  SCons* param = fn->params;
+  SCons* arg = args;
+  SCons* cons = fn->body;
   SScope* scope = snap_scope_new(snap);
   scope->up = snap->scope;
   snap->scope = scope;
   for (; param; param = param->rest) {
     if (arg) {
-      snap_hash_put(&scope->vars, as_str(param->first)->data, arg->first);
+      snap_hash_put(&scope->vars, as_str(param->first)->data, exec(snap, arg->first));
     } else {
       snap_hash_put(&scope->vars, as_str(param->first)->data, create_nil());
     }
   }
-  res = exec_list(snap, lambda->exec);
+  for (; cons; cons = cons->rest) {
+    res = exec(snap, cons->first);
+  }
   snap->scope = snap->scope->up;
   return res;
 }
 
-SValue exec_list(Snap* snap, SCons* cons) {
+SValue exec_sym(Snap* snap, SSymStr* sym, SCons* args) {
   SValue exec;
-  if (cons->first.type != STYPE_SYM) {
-    return create_error(snap, SERR_PARSE, "Expected symbol");
+  char* id = sym->data;
+  if (strcmp(id, "def") == 0) {
+    return def(snap, args);
+  } else if (strcmp(id, "fn") == 0) {
+    return fn(snap, args);
+  } else if (strcmp(id, "let") == 0) {
+    return let(snap, args);
+  } else if (strcmp(id, "quote") == 0) {
+    return args->rest->first;
+  } else if (lookup(snap, sym->data, &exec)) {
+    switch(exec.type) {
+      case STYPE_CFUNC:
+        return exec_cfunc(snap, exec.c, args);
+      case STYPE_FN:
+        return exec_fn(snap, as_fn(exec), args);
+      default:
+        return create_error(snap, SERR_PARSE, "Expected a C function or fn");
+    }
   }
+  return create_error(snap, SERR_PARSE, "Unable to find symbol %s",
+                      sym->data);
+}
 
-  if (!lookup(snap, as_sym(cons->first)->data, &exec)) {
-    return create_error(snap, SERR_PARSE, "Unable to find symbol %s",
-                        as_sym(cons->first)->data);
-  }
-
-  switch(exec.type) {
-    case STYPE_CFUNC:
-      return exec.c(snap, cons->rest);
-    case STYPE_LAMBDA:
-      return exec_lambda(snap, as_lambda(exec), cons->rest);
+SValue exec_cons(Snap* snap, SCons* cons) {
+  SValue first = exec(snap, cons->first);
+  switch (first.type) {
+    case STYPE_SYM:
+      return exec_sym(snap, as_sym(first), cons->rest);
+    case STYPE_FN:
+      return exec_fn(snap, as_fn(first), cons->rest);
     default:
-      return create_error(snap, SERR_PARSE, "Expected a C function or lambda");
+      return create_error(snap, SERR_PARSE, "Expected symbol or fn");
+      break;
   }
 }
 
@@ -433,7 +511,7 @@ SValue exec(Snap* snap, SValue val) {
     case STYPE_HASH:
       return val;
     case STYPE_CONS:
-        return exec_list(snap, as_cons(val));
+        return exec_cons(snap, as_cons(val));
     default:
       return create_error(snap, SERR_PARSE, "Invalid type");
   }
@@ -471,26 +549,6 @@ void print_list(SCons* cons) {
     print(cons->first);
     cons = cons->rest;
   }
-}
-
-SValue define_(Snap* snap, SCons* args) {
-  SCons* a = args;
-  SCons* b;
-  if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Binary function requires two parameters");
-  }
-  b = args->rest;
-  if (a->type != STYPE_STR) {
-    return create_error(snap, SERR_PARSE, "First parameter must be a string");
-  }
-  snap_define(snap,  as_str(a->first)->data, b->first);
-  return create_nil();
-}
-
-SValue lambda_(Snap* snap, SCons* args) {
-}
-
-SValue let_(Snap* snap, SCons* args) {
 }
 
 SValue add_(Snap* snap, SCons* args) {
@@ -578,16 +636,13 @@ int main(int argc, char** argv) {
     Snap snap;
 
     snap_init(&snap);
-    snap_define_func(&snap, "define", define_);
-    snap_define_func(&snap, "lamba", lambda_);
-    snap_define_func(&snap, "let", let_);
-    snap_define_func(&snap, "add", add_);
-    snap_define_func(&snap, "sub", sub_);
-    snap_define_func(&snap, "mul", mul_);
-    snap_define_func(&snap, "div", div_);
-    snap_define_func(&snap, "mod", mod_);
+    snap_def_func(&snap, "add", add_);
+    snap_def_func(&snap, "sub", sub_);
+    snap_def_func(&snap, "mul", mul_);
+    snap_def_func(&snap, "div", div_);
+    snap_def_func(&snap, "mod", mod_);
 
-    print(snap_exec(&snap, "(add 1 2)"));
+    print(snap_exec(&snap, "((fn () (add 1 2)))"));
     puts("\n");
 
     snap_destroy(&snap);

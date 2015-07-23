@@ -6,15 +6,15 @@
 enum {
   STYPE_NIL,
   STYPE_INT,
-  STYPE_CFUNC,
   STYPE_FLOAT,
+  STYPE_CFUNC,
   STYPE_SYM,
   STYPE_STR,
   STYPE_ERR,
   STYPE_CONS,
   STYPE_HASH,
   STYPE_SCOPE,
-  STYPE_LAMBDA
+  STYPE_FN
 };
 
 typedef struct Snap_ Snap;
@@ -31,7 +31,7 @@ typedef struct SValue_ {
   };
 } SValue;
 
-typedef SValue (*SFunc)(Snap* snap, SCons* args);
+typedef SValue (*SCFunc)(Snap* snap, SCons* args);
 
 #endif
 
