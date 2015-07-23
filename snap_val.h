@@ -1,12 +1,15 @@
 #ifndef SNAP_VAL_H
 #define SNAP_VAL_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 enum {
   STYPE_NIL,
+  STYPE_BOOL,
   STYPE_INT,
   STYPE_FLOAT,
+  STYPE_FORM,
   STYPE_CFUNC,
   STYPE_SYM,
   STYPE_STR,
@@ -24,6 +27,7 @@ typedef struct SCons_ SCons;
 typedef struct SValue_ {
   uint8_t type;
   union {
+    bool b;
     int i;
     double f;
     SObject* o;

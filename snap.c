@@ -27,8 +27,9 @@ enum {
 #define as_hash(v) check((v).type == STYPE_HASH, (SHash*)(v).o)
 #define as_fn(v) check((v).type == STYPE_FN, (SFn*)(v).o)
 
-SValue read(Snap* snap, SnapLex* lex);
+bool read(Snap* snap, SnapLex* lex, SValue* val);
 SValue exec(Snap* snap, SValue val);
+SValue* lookup(Snap* snap, const char* name);
 
 __attribute__((__format__(__printf__, 3, 4)))
 static inline SValue create_error(Snap* snap, int code, const char* format, ...) {
@@ -49,6 +50,13 @@ static inline SValue create_nil() {
   return val;
 }
 
+static inline SValue create_bool(bool b) {
+  SValue val;
+  val.type = STYPE_BOOL;
+  val.b = b;
+  return val;
+}
+
 static inline SValue create_int(int i) {
   SValue val;
   val.type = STYPE_INT;
@@ -63,7 +71,14 @@ static inline SValue create_float(int f) {
   return val;
 }
 
-static SValue create_object(uint8_t type, SObject* o) {
+static inline SValue create_cfunc(SCFunc c) {
+  SValue val;
+  val.type = STYPE_CFUNC;
+  val.c = c;
+  return val;
+}
+
+static SValue create_obj(uint8_t type, SObject* o) {
   SValue val;
   val.type = type;
   val.o = o;
@@ -154,9 +169,9 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark(snap, (SObject*)((SScope*)obj)->up);
       break;
     case STYPE_FN:
+      gc_mark(snap, (SObject*)((SFn*)obj)->name);
       gc_mark(snap, (SObject*)((SFn*)obj)->params);
       gc_mark(snap, (SObject*)((SFn*)obj)->body);
-      gc_mark(snap, (SObject*)((SFn*)obj)->scope);
       break;
     default:
       assert(0 && "Not a valid gray object");
@@ -234,20 +249,22 @@ void snap_def(Snap* snap, const char* name, SValue val) {
   snap_hash_put(&snap->scope->vars, name, val);
 }
 
-void snap_def_func(Snap* snap, const char* name, SCFunc func) {
-  SValue val;
-  val.type = STYPE_CFUNC;
-  val.c = func;
-  snap_def(snap, name, val);
+void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
+  snap_def(snap, name, create_cfunc(cfunc));
 }
 
 SValue snap_exec(Snap* snap, const char* expr) {
+  SValue res;
+  SValue val;
   SnapLex lex;
   lex.buf = expr;
   lex.buf_size = strlen(lex.buf);
   lex.p = lex.buf;
   lex.line = 0;
-  return exec(snap, read(snap, &lex));
+  while (read(snap, &lex, &val)) {
+    res = exec(snap, val);
+  }
+  return res;
 }
 
 
@@ -297,11 +314,11 @@ SScope* snap_scope_new(Snap* snap) {
 }
 
 SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
-  SFn* l = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
-  l->params = params;
-  l->body = body;
-  l->scope = NULL;
-  return l;
+  SFn* fn = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
+  fn->name = NULL;
+  fn->params = params;
+  fn->body = body;
+  return fn;
 }
 
 SObject* snap_push(Snap* snap, SObject* obj) {
@@ -320,15 +337,20 @@ void snap_pop(Snap* snap) {
   snap->anchored_top--;
 }
 
-SValue read_val(Snap* snap, SnapLex* lex, int token);
+bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val);
 
 SCons* read_list(Snap* snap, SnapLex* lex) {
   int token = snap_lex_next_token(lex);
   SCons* first = NULL;
   SCons** cons = &first;
   while (token != ')' && token != TK_EOF) {
+    SValue val;
     *cons = (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
-    (*cons)->first = read_val(snap, lex, token);
+    if (!read_val(snap, lex, token, &val)) {
+      fprintf(stderr, "Premature EOF at %d\n", lex->line);
+      exit(-1);
+    }
+    (*cons)->first = val;
     snap_pop(snap);
     cons = &(*cons)->rest;
     token = snap_lex_next_token(lex);
@@ -340,90 +362,145 @@ SCons* read_list(Snap* snap, SnapLex* lex) {
   return first;
 }
 
-SValue read_val(Snap* snap, SnapLex* lex, int token) {
-  SValue v;
-
+bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val) {
   switch(token) {
     case '(':
-      v.type = STYPE_CONS;
-      v.o = (SObject*)read_list(snap, lex);
+      val->type = STYPE_CONS;
+      val->o = (SObject*)read_list(snap, lex);
       break;
     case TK_INT:
-      v.type = STYPE_INT;
-      v.i = atoi(lex->val);
+      *val = create_int(atoi(lex->val));
       break;
     case TK_FLOAT:
-      v.type = STYPE_FLOAT;
-      v.f = atof(lex->val);
+      *val = create_float(atof(lex->val));
       break;
     case TK_STR:
-      v.type = STYPE_STR;
-      v.o = (SObject*)snap_str_new(snap, lex->val);
+      *val = create_obj(STYPE_STR, (SObject*)snap_str_new(snap, lex->val));
       break;
     case TK_ID:
-      v.type = STYPE_SYM;
-      v.o = (SObject*)snap_sym_new(snap, lex->val);
+      *val = create_obj(STYPE_SYM, (SObject*)snap_sym_new(snap, lex->val));
       break;
+    case TK_TRUE:
+    case TK_FALSE:
+      *val = create_bool(token == TK_TRUE);
+      break;
+    case TK_NIL:
+      *val = create_nil();
+      break;
+    case TK_DO:
+    case TK_DEF:
+    case TK_IF:
+    case TK_FN:
+    case TK_LET:
+    case TK_QUOTE:
+    case TK_SET:
+      val->type = STYPE_FORM;
+      val->i = token;
+      break;
+    case TK_EOF:
+      return false;
     default:
       fprintf(stderr, "Parser error at %d\n", lex->line);
       exit(-1);
       break;
   }
 
-  return v;
+  return true;
 }
 
-SValue read(Snap* snap, SnapLex* lex) {
-  return read_val(snap, lex, snap_lex_next_token(lex));
+bool read(Snap* snap, SnapLex* lex, SValue* val) {
+  return read_val(snap, lex, snap_lex_next_token(lex), val);
 }
 
-bool lookup(Snap* snap, const char* sym, SValue* val) {
-  SScope* scope = snap->scope;
-  while (scope) {
-    if (snap_hash_get(&scope->vars, sym, val)) {
-      return true;
-    }
-    scope = scope->up;
+SValue do_(Snap* snap, SCons* args) {
+  SValue res;
+  SCons* cons;
+  for (cons = args; cons; cons = cons->rest) {
+    res = exec(snap, cons->first);
   }
-  return false;
+  return res;
 }
 
-SValue def(Snap* snap, SCons* args) {
-  SCons* a = args;
-  SCons* b;
-  if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Invalid def");
+SValue def_(Snap* snap, SCons* args) {
+  SValue res;
+  if (!args || args->first.type != STYPE_SYM || !args->rest) {
+    return create_error(snap, 0, "Invalid def");
   }
-  b = args->rest;
-  if (a->type != STYPE_SYM) {
-    return create_error(snap, SERR_PARSE, "First parameter must be a symbol");
+  res = exec(snap, args->rest->first);
+  if (res.type == STYPE_FN) {
+    as_fn(res)->name = as_sym(args->first);
   }
-  snap_def(snap,  as_str(a->first)->data, b->first);
+  snap_def(snap,  as_sym(args->first)->data, res);
   return create_nil();
 }
 
-SValue fn(Snap* snap, SCons* args) {
+SValue if_(Snap* snap, SCons* args) {
+  if (!args || !args->rest || !args->rest->rest) {
+    return create_error(snap, 0, "Invalid if");
+  }
+  if (args->first.type == STYPE_NIL ||
+      (args->first.type == STYPE_BOOL && !args->first.b)) {
+    return exec(snap, args->rest->rest->first);
+  } else {
+    return exec(snap, args->rest->first);
+  }
+}
+
+SValue fn_(Snap* snap, SCons* args) {
   SCons* param;
   if (!args || !args->rest || args->first.type != STYPE_CONS) {
-    return create_error(snap, SERR_PARSE, "Invalid fn");
+    return create_error(snap, 0, "Invalid fn");
   }
   for (param = as_cons(args->first); param; param = param->rest) {
     if (param->first.type != STYPE_SYM) {
-      return create_error(snap, SERR_PARSE, "Fn parameter is not a symbol");
+      return create_error(snap, 0, "Fn parameter is not a symbol");
     }
   }
-  return create_object(STYPE_FN,
+  return create_obj(STYPE_FN,
                        (SObject*)snap_fn_new(snap,
                                              as_cons(args->first),
                                              args->rest));
 }
 
-SValue let(Snap* snap, SCons* args) {
+SValue let_(Snap* snap, SCons* args) {
+  SValue res;
+  SCons* arg;
+  SCons* cons;
   SScope* scope = snap_scope_new(snap);
   scope->up = snap->scope;
   snap->scope = scope;
-
+  if (!args || args->first.type != STYPE_CONS || !args->rest) {
+    return create_error(snap, 0, "Invalid let");
+  }
+  for (arg = as_cons(args->first); arg; arg = arg->rest) {
+    if (arg->first.type != STYPE_CONS ||
+        as_cons(arg->first)->first.type != STYPE_SYM ||
+        !as_cons(arg->first)->rest) {
+      return create_error(snap, 0, "Invalid let binding");
+    }
+    snap_hash_put(&scope->vars,
+                  as_sym(as_cons(arg->first)->first)->data,
+                  exec(snap, as_cons(arg->first)->rest->first));
+  }
+  for (cons = args->rest; cons; cons = cons->rest) {
+    res = exec(snap, cons->first);
+  }
   snap->scope = snap->scope->up;
+  return res;
+}
+
+SValue set_(Snap* snap, SCons* args) {
+  SValue* val;
+  if (!args || args->first.type != STYPE_SYM || !args->rest) {
+    return create_error(snap, 0, "Invalid set!");
+  }
+  val = lookup(snap, as_sym(args->first)->data);
+  if (!val) {
+    return create_error(snap, 0, "Variable '%s' is not defined",
+                        as_sym(args->first)->data);
+  }
+  *val = exec(snap, args->rest->first);
+  return create_nil();
 }
 
 SValue exec_cons(Snap* snap, SCons* cons);
@@ -462,70 +539,97 @@ SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
   return res;
 }
 
-SValue exec_sym(Snap* snap, SSymStr* sym, SCons* args) {
-  SValue exec;
-  char* id = sym->data;
-  if (strcmp(id, "def") == 0) {
-    return def(snap, args);
-  } else if (strcmp(id, "fn") == 0) {
-    return fn(snap, args);
-  } else if (strcmp(id, "let") == 0) {
-    return let(snap, args);
-  } else if (strcmp(id, "quote") == 0) {
-    return args->rest->first;
-  } else if (lookup(snap, sym->data, &exec)) {
-    switch(exec.type) {
-      case STYPE_CFUNC:
-        return exec_cfunc(snap, exec.c, args);
-      case STYPE_FN:
-        return exec_fn(snap, as_fn(exec), args);
-      default:
-        return create_error(snap, SERR_PARSE, "Expected a C function or fn");
-    }
+SValue exec_form(Snap* snap, int form, SCons *args) {
+  switch (form) {
+    case TK_DO:
+      return do_(snap, args);
+    case TK_DEF:
+      return def_(snap, args);
+    case TK_IF:
+      return if_(snap, args);
+    case TK_FN:
+      return fn_(snap, args);
+    case TK_LET:
+      return let_(snap, args);
+    case TK_QUOTE:
+      return args->rest->first;
+    case TK_SET:
+      return set_(snap, args);
+    default:
+      return create_error(snap, 0, "Invalid primitive form");
   }
-  return create_error(snap, SERR_PARSE, "Unable to find symbol %s",
-                      sym->data);
 }
 
 SValue exec_cons(Snap* snap, SCons* cons) {
   SValue first = exec(snap, cons->first);
   switch (first.type) {
-    case STYPE_SYM:
-      return exec_sym(snap, as_sym(first), cons->rest);
+    case STYPE_FORM:
+      return exec_form(snap, first.i, cons->rest);
+    case STYPE_CFUNC:
+      return exec_cfunc(snap,first.c, cons->rest);
     case STYPE_FN:
       return exec_fn(snap, as_fn(first), cons->rest);
+    case STYPE_ERR:
+      return first;
     default:
-      return create_error(snap, SERR_PARSE, "Expected symbol or fn");
-      break;
+      return create_error(snap, 0, "Expected special form, C func or fn");
   }
+}
+
+SValue* lookup(Snap* snap, const char* name) {
+  SScope* scope = snap->scope;
+  while (scope) {
+    SValue* val = snap_hash_get(&scope->vars, name);
+    if (val) return val;
+    scope = scope->up;
+  }
+  return NULL;
+}
+
+SValue lookup_sym(Snap* snap, SSymStr* sym) {
+  SValue* val = lookup(snap, sym->data);
+  if (val) return *val;
+  return create_error(snap, 0, "Unable to find symbol %s", sym->data);
 }
 
 SValue exec(Snap* snap, SValue val) {
   switch (val.type) {
     case STYPE_NIL:
+    case STYPE_BOOL:
     case STYPE_INT:
     case STYPE_FLOAT:
-    case STYPE_SYM:
+    case STYPE_FORM:
     case STYPE_STR:
     case STYPE_ERR:
     case STYPE_HASH:
       return val;
+    case STYPE_SYM:
+      return lookup_sym(snap, as_sym(val));
     case STYPE_CONS:
-        return exec_cons(snap, as_cons(val));
+      return exec_cons(snap, as_cons(val));
     default:
-      return create_error(snap, SERR_PARSE, "Invalid type");
+      return create_error(snap, 0, "Invalid type");
   }
 }
 
-void print_list(SCons* cons);
+void print_cons(SCons* cons);
 
-void print(SValue val) {
+void print_val(SValue val) {
   switch(val.type) {
+    case STYPE_NIL:
+      printf("nil");
+      break;
+    case STYPE_BOOL:
+      printf("%s", val.b ? "true" : "false");
+      break;
     case STYPE_INT:
       printf("%d", val.i);
       break;
     case STYPE_FLOAT:
       printf("%f", val.f);
+      break;
+    case STYPE_CFUNC:
+      printf("<cfunc> %p", val.c);
       break;
     case STYPE_STR:
       printf("%s", as_str(val)->data);
@@ -533,29 +637,46 @@ void print(SValue val) {
     case STYPE_SYM:
       printf("%s", as_sym(val)->data);
       break;
+    case STYPE_ERR:
+      printf("<err> %d '%s'", as_err(val)->code, as_err(val)->msg->data);
+      break;
+    case STYPE_FN:
+      printf("<fn> %s(%p)",
+             as_fn(val)->name != NULL ? as_fn(val)->name->data : "",
+             val.o);
+      break;
     case STYPE_CONS:
       printf("\n(");
-      print_list(as_cons(val));
+      print_cons(as_cons(val));
       printf(")");
       break;
   }
 }
 
-void print_list(SCons* cons) {
+void print_cons(SCons* cons) {
   int space = 0;
   while (cons != NULL) {
     if (space) printf(" ");
     space = 1;
-    print(cons->first);
+    print_val(cons->first);
     cons = cons->rest;
   }
+}
+
+SValue print_(Snap* snap, SCons* args) {
+  SCons* arg;
+  for (arg = args; arg; arg = arg->rest) {
+    print_val(arg->first);
+  }
+  printf("\n");
+  return create_nil();
 }
 
 SValue add_(Snap* snap, SCons* args) {
   SCons* a = args;
   SCons* b;
   if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Binary function requires two parameters");
+    return create_error(snap, 0, "Binary function requires two parameters");
   }
   b = args->rest;
   if (a->first.type == STYPE_INT && b->first.type == STYPE_INT) {
@@ -563,7 +684,7 @@ SValue add_(Snap* snap, SCons* args) {
   } else if (a->first.type == STYPE_FLOAT && b->first.type == STYPE_FLOAT) {
     return create_float(a->first.f + b->first.f);
   } else {
-    return create_error(snap, SERR_PARSE, "Incompatible types");
+    return create_error(snap, 0, "Incompatible types");
   }
 }
 
@@ -571,7 +692,7 @@ SValue sub_(Snap* snap, SCons* args) {
   SCons* a = args;
   SCons* b;
   if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Binary function requires two parameters");
+    return create_error(snap, 0, "Binary function requires two parameters");
   }
   b = args->rest;
   if (a->first.type == STYPE_INT && b->first.type == STYPE_INT) {
@@ -579,7 +700,7 @@ SValue sub_(Snap* snap, SCons* args) {
   } else if (a->first.type == STYPE_FLOAT && b->first.type == STYPE_FLOAT) {
     return create_float(a->first.f - b->first.f);
   } else {
-    return create_error(snap, SERR_PARSE, "Incompatible types");
+    return create_error(snap, 0, "Incompatible types");
   }
 }
 
@@ -587,7 +708,7 @@ SValue mul_(Snap* snap, SCons* args) {
   SCons* a = args;
   SCons* b;
   if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Binary function requires two parameters");
+    return create_error(snap, 0, "Binary function requires two parameters");
   }
   b = args->rest;
   if (a->first.type == STYPE_INT && b->first.type == STYPE_INT) {
@@ -595,7 +716,7 @@ SValue mul_(Snap* snap, SCons* args) {
   } else if (a->first.type == STYPE_FLOAT && b->first.type == STYPE_FLOAT) {
     return create_float(a->first.f * b->first.f);
   } else {
-    return create_error(snap, SERR_PARSE, "Incompatible types");
+    return create_error(snap, 0, "Incompatible types");
   }
 }
 
@@ -603,7 +724,7 @@ SValue div_(Snap* snap, SCons* args) {
   SCons* a = args;
   SCons* b;
   if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Binary function requires two parameters");
+    return create_error(snap, 0, "Binary function requires two parameters");
   }
   b = args->rest;
   if (a->first.type == STYPE_INT && b->first.type == STYPE_INT) {
@@ -611,7 +732,7 @@ SValue div_(Snap* snap, SCons* args) {
   } else if (a->first.type == STYPE_FLOAT && b->first.type == STYPE_FLOAT) {
     return create_float(a->first.f / b->first.f);
   } else {
-    return create_error(snap, SERR_PARSE, "Incompatible types");
+    return create_error(snap, 0, "Incompatible types");
   }
 }
 
@@ -619,7 +740,7 @@ SValue mod_(Snap* snap, SCons* args) {
   SCons* a = args;
   SCons* b;
   if (!args || !args->rest) {
-    return create_error(snap, SERR_PARSE, "Binary function requires two parameters");
+    return create_error(snap, 0, "Binary function requires two parameters");
   }
   b = args->rest;
   if (a->first.type == STYPE_INT && b->first.type == STYPE_INT) {
@@ -627,7 +748,7 @@ SValue mod_(Snap* snap, SCons* args) {
   } else if (a->first.type == STYPE_FLOAT && b->first.type == STYPE_FLOAT) {
     return create_float(fmod(a->first.f,  b->first.f));
   } else {
-    return create_error(snap, SERR_PARSE, "Incompatible types");
+    return create_error(snap, 0, "Incompatible types");
   }
 }
 
@@ -636,14 +757,19 @@ int main(int argc, char** argv) {
     Snap snap;
 
     snap_init(&snap);
-    snap_def_func(&snap, "add", add_);
-    snap_def_func(&snap, "sub", sub_);
-    snap_def_func(&snap, "mul", mul_);
-    snap_def_func(&snap, "div", div_);
-    snap_def_func(&snap, "mod", mod_);
+    snap_def_cfunc(&snap, "print", print_);
+    snap_def_cfunc(&snap, "add", add_);
+    snap_def_cfunc(&snap, "sub", sub_);
+    snap_def_cfunc(&snap, "mul", mul_);
+    snap_def_cfunc(&snap, "div", div_);
+    snap_def_cfunc(&snap, "mod", mod_);
 
-    print(snap_exec(&snap, "((fn () (add 1 2)))"));
-    puts("\n");
+    //print_val(snap_exec(&snap, "((fn () (add 1 2)))"));
+    print_val(snap_exec(&snap, "(def foo (fn () (add 1 2)))(print foo)(print (foo))"));
+    //print_val(snap_exec(&snap, "(let ((a 1) (b 2)) (add a b))"));
+    //print_val(snap_exec(&snap, "(def x 1)\n(set! x 2)(add x 1)"));
+    //print_val(snap_exec(&snap, "(do (if nil (add 1 1) (add 2 3)) (sub 2 1) (print 1))"));
+    printf("\n");
 
     snap_destroy(&snap);
   }

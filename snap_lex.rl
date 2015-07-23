@@ -43,6 +43,16 @@ int snap_lex_next_token(SnapLex* lex) {
     main := |*
       '(' => { token = (int)'('; fbreak; };
       ')' => { token = (int)')'; fbreak; };
+      'do' => { token = TK_DO; fbreak; };
+      'def' => { token = TK_DEF; fbreak; };
+      'if' => { token = TK_IF; fbreak; };
+      'fn' => { token = TK_FN; fbreak; };
+      'let' => { token = TK_LET; fbreak; };
+      'quote' => { token = TK_QUOTE; fbreak; };
+      'set!' => { token = TK_SET; fbreak; };
+      'true' => { token = TK_TRUE; fbreak; };
+      'false' => { token = TK_FALSE; fbreak; };
+      'nil' => { token = TK_NIL; fbreak; };
       integer => { token = copy_value(lex, ts, te, TK_INT); fbreak; };
       floating => { token = copy_value(lex, ts, te, TK_FLOAT); fbreak; };
       string => { token = copy_value(lex, ts + 1, te - 1, TK_STR); fbreak; };

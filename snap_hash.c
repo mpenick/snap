@@ -120,9 +120,8 @@ bool snap_hash_delete(SnapHash* hash, const char* key) {
   return true;
 }
 
-bool snap_hash_get(SnapHash* hash, const char* key, SValue* val) {
+SValue* snap_hash_get(SnapHash* hash, const char* key) {
   SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
-  if (!entry->key) return false;
-  *val = entry->val;
-  return true;
+  if (!entry->key) return NULL;
+  return &entry->val;
 }

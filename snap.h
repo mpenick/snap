@@ -6,10 +6,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-enum {
-  SERR_PARSE
-};
-
 #define SOBJECT_FIELDS     \
   uint8_t type;            \
   uint8_t mark;            \
@@ -51,9 +47,9 @@ typedef struct SScope_ {
 
 typedef struct SFn_ {
   SOBJECT_FIELDS
+  SSymStr* name;
   SCons* params;
   SCons* body;
-  SScope* scope;
 } SFn;
 
 struct Snap_ {
@@ -71,7 +67,7 @@ void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);
 
 void snap_def(Snap* snap, const char* name, SValue val);
-void snap_def_func(Snap* snap, const char* name, SCFunc func);
+void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
 SValue snap_exec(Snap* snap, const char* expr);
 
 SSymStr* snap_str_new(Snap* snap, const char* str);

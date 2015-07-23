@@ -10,6 +10,16 @@ enum {
   TK_FLOAT,
   TK_STR,
   TK_ID,
+  TK_TRUE,
+  TK_FALSE,
+  TK_NIL,
+  TK_DO,
+  TK_DEF,
+  TK_IF,
+  TK_FN,
+  TK_LET,
+  TK_QUOTE,
+  TK_SET,
   TK_EOF
 };
 
