@@ -31,7 +31,7 @@ typedef struct {
 struct SCons_ {
   SOBJECT_FIELDS
   SValue first;
-  struct SCons_* rest;
+  SValue rest;
 };
 
 typedef struct {

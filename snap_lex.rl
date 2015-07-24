@@ -46,7 +46,7 @@ int snap_lex_next_token(SnapLex* lex) {
       '(' => { token = (int)'('; fbreak; };
       ')' => { token = (int)')'; fbreak; };
       'do' => { token = TK_DO; fbreak; };
-      'def' => { token = TK_DEF; fbreak; };
+      'def' | 'define' => { token = TK_DEF; fbreak; };
       'if' => { token = TK_IF; fbreak; };
       'fn' => { token = TK_FN; fbreak; };
       'let' => { token = TK_LET; fbreak; };
