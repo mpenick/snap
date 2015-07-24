@@ -1,11 +1,31 @@
 ; vi: filetype=scheme
-(print (def countdown (fn (x)
+
+(print
+  (def countdown (fn (x)
              (if (> x 0)
                (do (print x) (recur (sub x 1)))
                0)
              )))
-(print (countdown 10))
+(print
+  (countdown 10))
 
-(print (let ((a 1)
-             (b 2))
-         (add a b)))
+(print
+  (let ((a 1)
+        (b 2))
+    (add a b)))
+
+(print
+  (def inc (fn (x)
+               (fn ()
+                   (do
+                     (set! x (add x 1))
+                     x)
+                   )
+               )))
+
+(def inc1 (inc 0))
+
+(print (inc1))
+(print (inc1))
+(print (inc1))
+(print (inc1))

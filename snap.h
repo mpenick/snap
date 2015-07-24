@@ -49,12 +49,14 @@ typedef struct SScope_ {
 typedef struct SFn_ {
   SOBJECT_FIELDS
   SSymStr* name;
+  SScope* scope;
   SCons* params;
   SCons* body;
 } SFn;
 
 struct Snap_ {
   SScope* scope;
+  SnapHash globals;
   SCons* tail;
   SObject** anchored;
   size_t anchored_capacity;
