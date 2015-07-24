@@ -1,0 +1,10 @@
+(print (def countdown (fn (x)
+             (if (> x 0)
+               (do (print x) (recur (sub x 1)))
+               0)
+             )))
+(print (countdown 10))
+
+(print (let ((a 1)
+             (b 2))
+         (add a b)))

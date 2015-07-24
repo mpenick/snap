@@ -55,6 +55,7 @@ typedef struct SFn_ {
 
 struct Snap_ {
   SScope* scope;
+  SCons* tail;
   SObject** anchored;
   size_t anchored_capacity;
   SObject** anchored_top;
