@@ -64,13 +64,6 @@ struct Snap_ {
   SObject* gray;
 };
 
-void snap_init(Snap* snap);
-void snap_destroy(Snap* snap);
-
-void snap_def(Snap* snap, const char* name, SValue val);
-void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
-SValue snap_exec(Snap* snap, const char* expr);
-
 SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
 SErr* snap_err_new(Snap* snap, int code, const char* msg);
@@ -82,5 +75,12 @@ SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body);
 SObject* snap_push(Snap* snap, SObject* obj);
 void snap_pop(Snap* snap);
 
+void snap_def(Snap* snap, const char* name, SValue val);
+void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
+SValue snap_exec(Snap* snap, const char* expr);
+void snap_print(SValue value);
+
+void snap_init(Snap* snap);
+void snap_destroy(Snap* snap);
 
 #endif

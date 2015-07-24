@@ -34,7 +34,7 @@ int snap_lex_next_token(SnapLex* lex) {
   %%{
     ws = [ \t];
     nl = '\r\n' | '\n';
-    id = (alnum | [_\+\-\*/=,])+;
+    id = (alnum | [_\+\-\*/=,<>])+;
     integer = [\+\-]? digit+;
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
     #string = ("\"" ([^\r\n\"] | "\\\"")* "\"") | ("'" ([^\r\n'] | "\\'")* "'");
@@ -66,6 +66,8 @@ int snap_lex_next_token(SnapLex* lex) {
     write init;
     write exec;
   }%%
+
+  if (token == TK_INVALID && p == eof) return TK_EOF;
 
   lex->p = p;
 

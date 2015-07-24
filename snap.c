@@ -32,7 +32,7 @@ SValue* lookup(Snap* snap, const char* name);
 SValue exec(Snap* snap, SValue val, SCons** tail);
 
 __attribute__((__format__(__printf__, 3, 4)))
-static inline SValue create_error(Snap* snap, int code, const char* format, ...) {
+static SValue create_error(Snap* snap, int code, const char* format, ...) {
   SValue val;
   char buf[256];
   val.type = STYPE_ERR;
@@ -44,34 +44,34 @@ static inline SValue create_error(Snap* snap, int code, const char* format, ...)
   return val;
 }
 
-static inline SValue create_nil() {
+static SValue create_nil() {
   SValue val;
   val.type = STYPE_NIL;
   return val;
 }
 
-static inline SValue create_bool(bool b) {
+static SValue create_bool(bool b) {
   SValue val;
   val.type = STYPE_BOOL;
   val.b = b;
   return val;
 }
 
-static inline SValue create_int(int i) {
+static SValue create_int(int i) {
   SValue val;
   val.type = STYPE_INT;
   val.i = i;
   return val;
 }
 
-static inline SValue create_float(int f) {
+static SValue create_float(int f) {
   SValue val;
   val.type = STYPE_FLOAT;
   val.f = f;
   return val;
 }
 
-static inline SValue create_cfunc(SCFunc c) {
+static SValue create_cfunc(SCFunc c) {
   SValue val;
   val.type = STYPE_CFUNC;
   val.c = c;
@@ -140,7 +140,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
   }
 }
 
-static inline  void gc_mark_val(Snap* snap, SValue val) {
+static void gc_mark_val(Snap* snap, SValue val) {
   if (is_gc(val)) gc_mark(snap, val.o);
 }
 
@@ -227,24 +227,6 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   snap->num_bytes_alloced += size;
   snap->num_bytes_alloced_last_gc += size;
   return obj;
-}
-
-void snap_init(Snap* snap) {
-  snap->anchored = (SObject**)malloc(32 * sizeof(SObject*));
-  snap->anchored_capacity = 32;
-  snap->anchored_top = snap->anchored;
-  snap->num_bytes_alloced_last_gc = 0;
-  snap->all = NULL;
-  snap->gray = NULL;
-  snap->scope = snap_scope_new(snap);
-}
-
-void snap_destroy(Snap* snap) {
-  SObject* o;
-  free((void*)snap->anchored);
-  for (o = snap->all; o; o = o->next) {
-    gc_free(snap, o);
-  }
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
@@ -413,7 +395,7 @@ bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val) {
   return true;
 }
 
-static inline bool is_recur(SCons* cons) {
+static bool is_recur(SCons* cons) {
   return !cons->rest &&
       cons->first.type == STYPE_CONS &&
       as_cons(cons->first)->first.type == STYPE_FORM &&
@@ -612,8 +594,6 @@ SValue exec_cons(Snap* snap, SCons* cons, SCons** tail) {
       return exec_cfunc(snap,first.c, cons->rest);
     case STYPE_FN:
       return exec_fn(snap, as_fn(first), cons->rest);
-    case STYPE_ERR:
-      return first;
     default:
       return create_error(snap, 0, "Expected special form, C func or fn");
   }
@@ -643,7 +623,7 @@ SValue exec(Snap* snap, SValue val, SCons** tail) {
 
 void print_cons(SCons* cons);
 
-void print_val(SValue val) {
+void snap_print(SValue val) {
   switch(val.type) {
     case STYPE_NIL:
       printf("nil");
@@ -661,7 +641,7 @@ void print_val(SValue val) {
       printf("<cfunc> %p", val.c);
       break;
     case STYPE_STR:
-      printf("%s", as_str(val)->data);
+      printf("\"%s\"", as_str(val)->data);
       break;
     case STYPE_SYM:
       printf("%s", as_sym(val)->data);
@@ -687,7 +667,7 @@ void print_cons(SCons* cons) {
   while (cons != NULL) {
     if (space) printf(" ");
     space = 1;
-    print_val(cons->first);
+    snap_print(cons->first);
     cons = cons->rest;
   }
 }
@@ -695,7 +675,7 @@ void print_cons(SCons* cons) {
 SValue builtin_print(Snap* snap, SCons* args) {
   SCons* arg;
   for (arg = args; arg; arg = arg->rest) {
-    print_val(arg->first);
+    snap_print(arg->first);
   }
   printf("\n");
   return create_nil();
@@ -761,37 +741,32 @@ builtin_binop(div, div_iop, div_fop)
 #define mod_fop(a, b) create_float(fmod(a->first.f, b->first.f))
 builtin_binop(mod, mod_iop, mod_fop)
 
-int main(int argc, char** argv) {
-  {
-    Snap snap;
+void snap_init(Snap* snap) {
+  snap->anchored = (SObject**)malloc(32 * sizeof(SObject*));
+  snap->anchored_capacity = 32;
+  snap->anchored_top = snap->anchored;
+  snap->num_bytes_alloced_last_gc = 0;
+  snap->all = NULL;
+  snap->gray = NULL;
+  snap->scope = snap_scope_new(snap);
 
-    snap_init(&snap);
-    snap_def_cfunc(&snap, "print", builtin_print);
+  snap_def_cfunc(snap, "print", builtin_print);
+  snap_def_cfunc(snap, "<", builtin_lt);
+  snap_def_cfunc(snap, ">", builtin_gt);
+  snap_def_cfunc(snap, "<=", builtin_le);
+  snap_def_cfunc(snap, ">=", builtin_ge);
+  snap_def_cfunc(snap, "=", builtin_eq);
+  snap_def_cfunc(snap, "add", builtin_add);
+  snap_def_cfunc(snap, "sub", builtin_sub);
+  snap_def_cfunc(snap, "mul", builtin_mul);
+  snap_def_cfunc(snap, "div", builtin_div);
+  snap_def_cfunc(snap, "mod", builtin_mod);
+}
 
-    snap_def_cfunc(&snap, "lt", builtin_lt);
-    snap_def_cfunc(&snap, "gt", builtin_gt);
-    snap_def_cfunc(&snap, "le", builtin_le);
-    snap_def_cfunc(&snap, "ge", builtin_ge);
-    snap_def_cfunc(&snap, "eq", builtin_eq);
-
-    snap_def_cfunc(&snap, "add", builtin_add);
-    snap_def_cfunc(&snap, "sub", builtin_sub);
-    snap_def_cfunc(&snap, "mul", builtin_mul);
-    snap_def_cfunc(&snap, "div", builtin_div);
-    snap_def_cfunc(&snap, "mod", builtin_mod);
-
-    //print_val(snap_exec(&snap, "((fn () (add 1 2)))"));
-    //print_val(snap_exec(&snap, "(def foo (fn () (add 1 2)))(print foo)(print (foo))"));
-    //print_val(snap_exec(&snap, "(let ((a 1) (b 2)) (add a b))"));
-    //print_val(snap_exec(&snap, "(def x 1)\n(set! x 2)(add x 1)"));
-    //print_val(snap_exec(&snap, "(do (if nil (add 1 1) (add 2 3)) (sub 2 1) (print 1))"));
-    //print_val(snap_exec(&snap, "(do (if nil (add 1 1) (add 2 3)) (sub 2 1) (print 1))"));
-
-    print_val(snap_exec(&snap, "(def foo (fn (i) (do (print i) (recur (add i 1)))))(print (foo 1))"));
-    printf("\n");
-
-    snap_destroy(&snap);
+void snap_destroy(Snap* snap) {
+  SObject* o;
+  free((void*)snap->anchored);
+  for (o = snap->all; o; o = o->next) {
+    gc_free(snap, o);
   }
-
-  return 0;
 }

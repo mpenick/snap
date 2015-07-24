@@ -1,4 +1,4 @@
-CFLAGS=-g
+CFLAGS=-g -std=c89
 
 TARGET=snap
 SOURCES=$(filter-out snap_lex.c, $(wildcard *.c)) snap_lex.c
@@ -10,7 +10,7 @@ $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(OBJECTS)
 
 ifneq ($(MAKECMDGOALS),clean)
-include $(SOURCES:%.c=.depends/%.d)
+-include $(SOURCES:%.c=.depends/%.d)
 endif
 
 .depends/%.d: %.c .depends
