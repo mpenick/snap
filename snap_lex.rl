@@ -1,6 +1,7 @@
 #include "snap_lex.h"
 
 #include <string.h>
+#include <stdio.h>
 
 %%{
   machine lex;
@@ -33,6 +34,7 @@ int snap_lex_next_token(SnapLex* lex) {
 
   %%{
     ws = [ \t];
+    comment = ";" [^\r\n]*;
     nl = '\r\n' | '\n';
     id = (alnum | [_\+\-\*/=,<>])+;
     integer = [\+\-]? digit+;
@@ -60,6 +62,7 @@ int snap_lex_next_token(SnapLex* lex) {
       id => { token = copy_value(lex, ts, te, TK_ID); fbreak; };
       nl => { lex->line++; };
       ws => { /* Skip */ };
+      comment => { /* Skip */ };
       any => { token = TK_INVALID; fbreak; };
     *|;
 
