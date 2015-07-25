@@ -1,7 +1,8 @@
 ; vi: filetype=scheme
-(print (cons 1 nil))
+(print (cons 1 false))
 (print (cons 1 ()))
 (def x (cons 1 (quote (2))))
 (print x)
 (print (car x))
 (print (cdr x))
+

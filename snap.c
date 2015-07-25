@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define GC_EVERY_NUM_BYTES (1 * 1024 * 1024)
+#define GC_EVERY_NUM_BYTES (2 * 1024 * 1024)
 
 enum {
   WHITE,
@@ -204,6 +204,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
 }
 
 static void gc_collect(Snap* snap) {
+  int i;
   SScope* scope = snap->scope;
   SObject** obj;
 
@@ -214,8 +215,8 @@ static void gc_collect(Snap* snap) {
 
   gc_mark_hash(snap, &snap->globals);
 
-  for (obj = snap->anchored; obj < snap->anchored_top; ++obj) {
-    gc_mark(snap, *obj);
+  for (i = 0; i < snap->anchored_top; ++i) {
+    gc_mark(snap, snap->anchored[i]);
   }
 
   while (snap->gray) {
@@ -334,18 +335,18 @@ SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
 }
 
 SObject* snap_push(Snap* snap, SObject* obj) {
-  uintptr_t used = snap->anchored_top - snap->anchored;
-  if (used >= snap->anchored_capacity) {
+  if (snap->anchored_top >= snap->anchored_capacity) {
     snap->anchored_capacity *= 2;
-    snap->anchored = (SObject**)realloc(snap->anchored, snap->anchored_capacity);
-    snap->anchored_top = snap->anchored + used;
+    snap->anchored
+        = (SObject**)realloc(snap->anchored,
+                             snap->anchored_capacity * sizeof(SObject*));
   }
-  *snap->anchored_top++ =  obj;
+  snap->anchored[snap->anchored_top++] = obj;
   return obj;
 }
 
 void snap_pop(Snap* snap) {
-  assert(snap->anchored_top >= snap->anchored);
+  assert(snap->anchored_top > 0);
   snap->anchored_top--;
 }
 
@@ -446,6 +447,12 @@ static bool is_recur(SCons* cons) {
   return is_cons(cons->first) &&
       is_form(as_cons(cons->first)->first) &&
       as_cons(cons->first)->first.i == TK_RECUR;
+}
+
+static int arity(SCons* cons) {
+  int n = 0;
+  for (; cons; cons = as_cons(cons->rest)) n++;
+  return n;
 }
 
 static SValue exec_body(Snap* snap, SCons* body) {
@@ -575,33 +582,40 @@ static SValue exec_cfunc(Snap* snap, SCFunc cfunc, SCons* args) {
   return cfunc(snap, first);
 }
 
-static int arity(SCons* cons) {
-  int n = 0;
-  for (; cons; cons = as_cons(cons->rest)) n++;
-  return n;
+bool bind_params(Snap* snap, SCons* params, SCons* args, SScope* scope) {
+  SCons* param;
+  if(arity(params) != arity(args)) return false;
+  for (param = params; param; param = as_cons(param->rest)) {
+    snap_hash_put(&scope->vars,
+                  as_sym(param->first)->data,
+                  exec(snap, args->first));
+    args = as_cons(args->rest);
+  }
+  return true;
 }
 
 static SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
   SValue res;
-  SCons* arg = args;
   SScope* prev_scope = snap->scope;
-  SScope* scope = snap_scope_new(snap);
-  scope->up = fn->scope; // Enclosed scope
-  snap->scope = scope;
+  SScope* this_scope = snap_scope_new(snap);
+  /* Bind params in current scope into the new scope */
+  if (!bind_params(snap, fn->params, args, this_scope)) {
+    return create_err(snap, 0, "Invalid number of arguments");
+  }
+  this_scope->up = fn->scope; /* Enclosed scope */
+  snap->scope = this_scope;
   for (;;) {
-    SCons* param = fn->params;
     snap->tail = NULL;
-    if (arity(param) != arity(arg)) {
-      return create_err(snap, 0, "Invalid number of arguments");
-    }
-    for (; param; param = as_cons(param->rest)) {
-      snap_hash_put(&scope->vars, as_sym(param->first)->data, exec(snap, arg->first));
-      arg = as_cons(arg->rest);
-    }
     res = exec_body(snap, fn->body);
     if (!snap->tail) break;
-    arg = as_cons(as_cons(snap->tail->first)->rest);
+    if (!bind_params(snap, fn->params,
+                     as_cons(as_cons(snap->tail->first)->rest),
+                     this_scope)) {
+      res = create_err(snap, 0, "Invalid number of arguments (recur)");
+      goto err;
+    }
   }
+err:
   snap->scope = prev_scope;
   return res;
 }
@@ -743,14 +757,14 @@ static SValue builtin_cons(Snap* snap, SCons* args) {
 }
 
 static SValue builtin_first(Snap* snap, SCons* args) {
-  if (!args) {
+  if (!args || !is_cons(args->first)) {
     return create_err(snap, 0, "Invalid first");
   }
   return as_cons(args->first)->first;
 }
 
 static SValue builtin_rest(Snap* snap, SCons* args) {
-  if (!args) {
+  if (!args || !is_cons(args->first)) {
     return create_err(snap, 0, "Invalid rest");
   }
   return as_cons(args->first)->rest;
@@ -787,7 +801,7 @@ builtin_binop(gt, gt_iop, gt_fop)
 builtin_binop(le, le_iop, le_fop)
 
 #define ge_iop(a, b) create_bool(a->first.i >= b->first.i)
-#define ge_fop(a, b) create_bool(a->first.f >- b->first.f)
+#define ge_fop(a, b) create_bool(a->first.f >= b->first.f)
 builtin_binop(ge, ge_iop, ge_fop)
 
 #define eq_iop(a, b) create_bool(a->first.i == b->first.i)
@@ -817,7 +831,7 @@ builtin_binop(mod, mod_iop, mod_fop)
 void snap_init(Snap* snap) {
   snap->anchored = (SObject**)malloc(32 * sizeof(SObject*));
   snap->anchored_capacity = 32;
-  snap->anchored_top = snap->anchored;
+  snap->anchored_top = 0;
   snap->num_bytes_alloced_last_gc = 0;
   snap->all = NULL;
   snap->gray = NULL;
@@ -844,10 +858,10 @@ void snap_init(Snap* snap) {
 
 void snap_destroy(Snap* snap) {
   SObject* o;
-  free((void*)snap->anchored);
   for (o = snap->all; o; o = o->next) {
     gc_free(snap, o);
   }
+  free((void*)snap->anchored);
   snap_hash_destroy(&snap->globals);
   assert(snap->num_bytes_alloced == 0);
 }

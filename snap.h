@@ -59,8 +59,8 @@ struct Snap_ {
   SnapHash globals;
   SCons* tail;
   SObject** anchored;
-  size_t anchored_capacity;
-  SObject** anchored_top;
+  int anchored_capacity;
+  int anchored_top;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;

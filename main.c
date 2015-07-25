@@ -33,16 +33,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  //snap_print(snap_exec(&snap, "((fn () (add 1 2)))"));
-  //snap_print(snap_exec(&snap, "(def foo (fn () (add 1 2)))(print foo)(print (foo))"));
-  //snap_print(snap_exec(&snap, "(let ((a 1) (b 2)) (add a b))"));
-  //snap_print(snap_exec(&snap, "(def x 1)\n(set! x 2)(add x 1)"));
-  //snap_print(snap_exec(&snap, "(do (if nil (add 1 1) (add 2 3)) (sub 2 1) (print 1))"));
-  //snap_print(snap_exec(&snap, "(do (if nil (add 1 1) (add 2 3)) (sub 2 1) (print 1))"));
-
-  //snap_print(snap_exec(&snap, "(def foo (fn (i) (do (print i) (recur (add i 1)))))(print (foo 1))"));
-  //printf("\n");
-
   snap_destroy(&snap);
 
   return 0;

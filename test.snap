@@ -1,19 +1,23 @@
 ; vi: filetype=scheme
 
+; tail recursion
 (print
   (def countdown (fn (x)
              (if (> x 0)
                (do (print x) (recur (sub x 1)))
                0)
              )))
+
 (print
   (countdown 10))
 
+; let
 (print
   (let ((a 1)
         (b 2))
     (add a b)))
 
+; closure
 (print
   (def inc (fn (x)
                (fn ()
@@ -24,8 +28,26 @@
                )))
 
 (def inc1 (inc 0))
+(print (inc1))
+(print (inc1))
+(print (inc1))
+(print (inc1))
 
-(print (inc1))
-(print (inc1))
-(print (inc1))
-(print (inc1))
+; recursion
+(print
+  (def fact (fn (n)
+                (if (= n 1) 1
+                  (mul n (fact (sub n 1)))
+                  )
+                )))
+(print (fact 12))
+
+; loop
+(def i 0)
+(print
+  ((fn (n)
+        (print n) (set! i (add i 10)) (if (< n 9) (recur (add n 1)) n)
+        ) 0)
+  )
+(print "i")
+(print i)
