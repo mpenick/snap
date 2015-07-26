@@ -23,10 +23,11 @@ typedef struct {
   char data[0];
 } SSymStr;
 
-typedef struct {
+typedef struct SErr_ {
   SOBJECT_FIELDS
   int code;
   SSymStr* msg;
+  struct SErr_* inner;
 } SErr;
 
 struct SCons_ {
@@ -56,21 +57,22 @@ typedef struct {
   SCons* body;
 } SFn;
 
-typedef struct STry_ {
+typedef struct SAttempt_ {
   jmp_buf buf;
   int anchored_pos;
   SScope* scope;
-  struct STry_* up;
-} STry;
+  struct SAttempt_* up;
+} SAttempt;
 
 struct Snap_ {
-  SScope* scopes;
+  SScope* scope;
   SnapHash globals;
   SCons* tail;
   SObject** anchored;
   int anchored_capacity;
   int anchored_top;
-  STry* trys;
+  SAttempt* attempt;
+  SErr* cause;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;
@@ -90,9 +92,9 @@ void snap_pop(Snap* snap);
 
 void snap_def(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
+void snap_throw(Snap* snap, int code, const char* format, ...);
 SValue snap_exec(Snap* snap, const char* expr);
 void snap_print(SValue value);
-void snap_throw(Snap* snap, SValue err);
 
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);

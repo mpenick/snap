@@ -1,0 +1,6 @@
+; vi: filetype=scheme
+
+(try
+  (throw 1 "Error happened")
+  (fn (e) (print "Handle error"))
+  )
