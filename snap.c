@@ -205,7 +205,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
 
 static void gc_collect(Snap* snap) {
   int i;
-  SScope* scope = snap->scope;
+  SScope* scope = snap->scopes;
   SObject** obj;
 
   while (scope) {
@@ -257,7 +257,7 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
-  snap_hash_put(snap->scope ? &snap->scope->vars : &snap->globals, name, val);
+  snap_hash_put(snap->scopes ? &snap->scopes->vars : &snap->globals, name, val);
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
@@ -328,7 +328,7 @@ SScope* snap_scope_new(Snap* snap) {
 SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
   SFn* fn = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
   fn->name = NULL;
-  fn->scope = snap->scope;
+  fn->scope = snap->scopes;
   fn->params = params;
   fn->body = body;
   return fn;
@@ -408,6 +408,8 @@ static bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val) {
     case TK_QUOTE:
     case TK_RECUR:
     case TK_SET:
+    case TK_THROW:
+    case TK_TRY:
       val->type = STYPE_FORM;
       val->i = token;
       break;
@@ -428,7 +430,7 @@ static bool read(Snap* snap, SnapLex* lex, SValue* val) {
 
 static SValue* lookup(Snap* snap, const char* name) {
   SValue* res;
-  SScope* scope = snap->scope;
+  SScope* scope = snap->scopes;
   while (scope) {
     res = snap_hash_get(&scope->vars, name);
     if (res) return res;
@@ -529,8 +531,8 @@ static SValue form_let(Snap* snap, SCons* args) {
   SValue res;
   SCons* arg;
   SScope* scope = snap_scope_new(snap);
-  scope->up = snap->scope;
-  snap->scope = scope;
+  scope->up = snap->scopes;
+  snap->scopes = scope;
   if (!args ||
       !is_cons(args->first) ||
       !is_cons(args->rest)) {
@@ -547,7 +549,47 @@ static SValue form_let(Snap* snap, SCons* args) {
                   exec(snap, as_cons(as_cons(arg->first)->rest)->first));
   }
   res = exec_body(snap, as_cons(args->rest));
-  snap->scope = snap->scope->up;
+  snap->scopes = snap->scopes->up;
+  return res;
+}
+
+static SValue form_try(Snap* snap, SCons* args) {
+  SValue res;
+  STry saved;
+  if (!args ||
+      !is_cons(args->rest) || !as_cons(args->rest)) {
+    return create_err(snap, 0, "Invalid try");
+  }
+  saved.scope = snap->scopes;
+  saved.up = snap->trys;
+  snap->trys = &saved;
+
+  if(setjmp(saved.buf) == 0) {
+    res = exec(snap, args->first);
+  } else {
+    SValue handler = exec(snap, as_cons(args->rest)->first);
+    if (!is_fn(handler)) {
+      snap_throw(snap, create_nil());
+    }
+    /* Throw */
+  }
+
+  SCons* arg;
+  SScope* scope = snap_scope_new(snap);
+  scope->up = snap->scopes;
+  snap->scopes = scope;
+  for (arg = as_cons(args->first); arg; arg = as_cons(arg->rest)) {
+    if (!is_cons(arg->first) ||
+        !is_sym(as_cons(arg->first)->first) ||
+        !is_cons(as_cons(arg->first)->rest)) {
+      return create_err(snap, 0, "Invalid let binding");
+    }
+    snap_hash_put(&scope->vars,
+                  as_sym(as_cons(arg->first)->first)->data,
+                  exec(snap, as_cons(as_cons(arg->first)->rest)->first));
+  }
+  res = exec_body(snap, as_cons(args->rest));
+  snap->scopes = snap->scopes->up;
   return res;
 }
 
@@ -596,14 +638,14 @@ bool bind_params(Snap* snap, SCons* params, SCons* args, SScope* scope) {
 
 static SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
   SValue res;
-  SScope* prev_scope = snap->scope;
+  SScope* prev_scope = snap->scopes;
   SScope* this_scope = snap_scope_new(snap);
   /* Bind params in current scope into the new scope */
   if (!bind_params(snap, fn->params, args, this_scope)) {
     return create_err(snap, 0, "Invalid number of arguments");
   }
   this_scope->up = fn->scope; /* Enclosed scope */
-  snap->scope = this_scope;
+  snap->scopes = this_scope;
   for (;;) {
     snap->tail = NULL;
     res = exec_body(snap, fn->body);
@@ -616,7 +658,7 @@ static SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
     }
   }
 err:
-  snap->scope = prev_scope;
+  snap->scopes = prev_scope;
   return res;
 }
 
@@ -835,7 +877,8 @@ void snap_init(Snap* snap) {
   snap->num_bytes_alloced_last_gc = 0;
   snap->all = NULL;
   snap->gray = NULL;
-  snap->scope = NULL;
+  snap->scopes = NULL;
+  snap->trys = NULL;
   snap_hash_init(&snap->globals);
 
   snap_def_cfunc(snap, "print", builtin_print);

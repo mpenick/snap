@@ -21,6 +21,8 @@ enum {
   TK_QUOTE,
   TK_RECUR,
   TK_SET,
+  TK_THROW,
+  TK_TRY,
   TK_EOF
 };
 

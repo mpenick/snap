@@ -3,6 +3,7 @@
 
 #include "snap_hash.h"
 
+#include <setjmp.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -46,7 +47,8 @@ typedef struct SScope_ {
   struct SScope_* up;
 } SScope;
 
-typedef struct SFn_ {
+
+typedef struct {
   SOBJECT_FIELDS
   SSymStr* name;
   SScope* scope;
@@ -54,13 +56,21 @@ typedef struct SFn_ {
   SCons* body;
 } SFn;
 
-struct Snap_ {
+typedef struct STry_ {
+  jmp_buf buf;
+  int anchored_pos;
   SScope* scope;
+  struct STry_* up;
+} STry;
+
+struct Snap_ {
+  SScope* scopes;
   SnapHash globals;
   SCons* tail;
   SObject** anchored;
   int anchored_capacity;
   int anchored_top;
+  STry* trys;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;
@@ -82,6 +92,7 @@ void snap_def(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
 SValue snap_exec(Snap* snap, const char* expr);
 void snap_print(SValue value);
+void snap_throw(Snap* snap, SValue err);
 
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);

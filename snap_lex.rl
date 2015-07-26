@@ -51,8 +51,10 @@ int snap_lex_next_token(SnapLex* lex) {
       'fn' => { token = TK_FN; fbreak; };
       'let' => { token = TK_LET; fbreak; };
       'quote' => { token = TK_QUOTE; fbreak; };
-      'set!' => { token = TK_SET; fbreak; };
       'recur' => { token = TK_RECUR; fbreak; };
+      'set!' => { token = TK_SET; fbreak; };
+      'throw' => { token = TK_THROW; fbreak; };
+      'try' => { token = TK_TRY; fbreak; };
       'true' => { token = TK_TRUE; fbreak; };
       'false' => { token = TK_FALSE; fbreak; };
       'nil' => { token = TK_NIL; fbreak; };
