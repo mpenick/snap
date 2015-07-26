@@ -48,7 +48,6 @@ typedef struct SScope_ {
   struct SScope_* up;
 } SScope;
 
-
 typedef struct {
   SOBJECT_FIELDS
   SSymStr* name;
@@ -57,12 +56,10 @@ typedef struct {
   SCons* body;
 } SFn;
 
-typedef struct SAttempt_ {
+typedef struct STry_ {
   jmp_buf buf;
-  int anchored_pos;
-  SScope* scope;
-  struct SAttempt_* up;
-} SAttempt;
+  struct STry_* up;
+} SnapTry;
 
 struct Snap_ {
   SScope* scope;
@@ -71,7 +68,7 @@ struct Snap_ {
   SObject** anchored;
   int anchored_capacity;
   int anchored_top;
-  SAttempt* attempt;
+  SnapTry* trying;
   SErr* cause;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
