@@ -56,24 +56,30 @@ typedef struct {
   SCons* body;
 } SFn;
 
-typedef struct STry_ {
+typedef struct SnapTry_ {
   jmp_buf buf;
-  struct STry_* up;
+  struct SnapTry_* up;
 } SnapTry;
 
-struct Snap_ {
+typedef struct SnapFrame_ {
   SScope* scope;
+  struct SnapFrame_* up;
+} SnapFrame;
+
+struct Snap_ {
   SnapHash globals;
   SCons* tail;
   SObject** anchored;
   int anchored_capacity;
   int anchored_top;
+  SnapFrame* frame;
   SnapTry* trying;
   SErr* cause;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;
   SObject* gray;
+  SnapFrame bottom_frame;
 };
 
 SSymStr* snap_str_new(Snap* snap, const char* str);

@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define GC_EVERY_NUM_BYTES (2 * 1024 * 1024)
+#define GC_EVERY_NUM_BYTES 8
 
 enum {
   WHITE,
@@ -67,14 +67,14 @@ static SValue create_bool(bool b) {
   return val;
 }
 
-static SValue create_int(int i) {
+static SValue create_int(SnapInt i) {
   SValue val;
   val.type = STYPE_INT;
   val.i = i;
   return val;
 }
 
-static SValue create_float(int f) {
+static SValue create_float(SnapFloat f) {
   SValue val;
   val.type = STYPE_FLOAT;
   val.f = f;
@@ -117,12 +117,15 @@ static void gc_free(Snap* snap, SObject* obj) {
       snap_hash_destroy(&((SScope*)obj)->vars);
       break;
     case STYPE_FN:
+      printf("free fn %p\n", obj);
       snap->num_bytes_alloced -= sizeof(SFn);
       break;
     default:
       assert(0 && "Not a GC object");
       break;
   }
+  // TODO: Remove
+  obj->type = 0xFF;
   free(obj);
 }
 
@@ -193,20 +196,21 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
 
 static void gc_collect(Snap* snap) {
   int i;
-  SScope* scope = snap->scope;
+  SnapFrame* frame;
   SObject** obj;
 
-  while (scope) {
-    gc_mark(snap, (SObject*)scope);
-    scope = scope->up;
+  frame = snap->frame;
+  while (frame) {
+    gc_mark(snap, (SObject*)frame->scope);
+    frame = frame->up;
   }
-
-  gc_mark_hash(snap, &snap->globals);
-  gc_mark(snap, (SObject*)snap->cause);
 
   for (i = 0; i < snap->anchored_top; ++i) {
     gc_mark(snap, snap->anchored[i]);
   }
+
+  gc_mark_hash(snap, &snap->globals);
+  gc_mark(snap, (SObject*)snap->cause);
 
   while (snap->gray) {
     SObject* temp = snap->gray;
@@ -246,7 +250,7 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
-  snap_hash_put(snap->scope ? &snap->scope->vars : &snap->globals, name, val);
+  snap_hash_put(snap->frame->scope ? &snap->frame->scope->vars : &snap->globals, name, val);
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
@@ -307,10 +311,11 @@ SSymStr* snap_sym_new(Snap* snap, const char* sym) {
 
 SErr* snap_err_new(Snap* snap, int code, const char* msg) {
   SErr* e = (SErr*)gc_new(snap, STYPE_ERR, sizeof(SErr));
-  snap_push(snap, (SObject*)e);
   e->code = code;
-  e->msg = snap_str_new(snap, msg);
+  e->msg = NULL;
   e->inner = snap->cause;
+  snap_push(snap, (SObject*)e);
+  e->msg = snap_str_new(snap, msg);
   snap_pop(snap);
   return e;
 }
@@ -338,9 +343,10 @@ SScope* snap_scope_new(Snap* snap) {
 SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
   SFn* fn = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
   fn->name = NULL;
-  fn->scope = snap->scope;
+  fn->scope = snap->frame->scope;
   fn->params = params;
   fn->body = body;
+  printf("fn %p\n", fn);
   return fn;
 }
 
@@ -368,18 +374,19 @@ static SCons* read_cons(Snap* snap, SnapLex* lex) {
   SCons** cons = &first;
   while (token != ')' && token != TK_EOF) {
     SValue val;
-    *cons = (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
+    *cons = first ? snap_cons_new(snap)
+                  : (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
     if (!read_val(snap, lex, token, &val)) {
       snap_throw(snap, 1, "Premature EOF at %d", lex->line);
     }
     (*cons)->first = val;
     cons = (SCons**)&(*cons)->rest.o;
     token = snap_lex_next_token(lex);
-    snap_pop(snap);
   }
   if (token != ')') {
     snap_throw(snap, 1, "Expected ')' at line %d", lex->line);
   }
+  if (first) snap_pop(snap);
   return first;
 }
 
@@ -390,7 +397,7 @@ static bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val) {
       val->o = (SObject*)read_cons(snap, lex);
       break;
     case TK_INT:
-      *val = create_int(atoi(lex->val));
+      *val = create_int(atol(lex->val));
       break;
     case TK_FLOAT:
       *val = create_float(atof(lex->val));
@@ -437,7 +444,7 @@ static bool read(Snap* snap, SnapLex* lex, SValue* val) {
 
 static SValue* lookup(Snap* snap, const char* name) {
   SValue* res;
-  SScope* scope = snap->scope;
+  SScope* scope = snap->frame->scope;
   while (scope) {
     res = snap_hash_get(&scope->vars, name);
     if (res) return res;
@@ -455,6 +462,7 @@ static SValue lookup_sym(Snap* snap, SSymStr* sym) {
 
 static bool is_recur(SCons* cons) {
   return is_cons(cons->first) &&
+      as_cons(cons->first) &&
       is_form(as_cons(cons->first)->first) &&
       as_cons(cons->first)->first.i == TK_RECUR;
 }
@@ -541,8 +549,8 @@ static SValue form_let(Snap* snap, SCons* args) {
   SValue res;
   SCons* arg;
   SScope* scope = snap_scope_new(snap);
-  scope->up = snap->scope;
-  snap->scope = scope;
+  scope->up = snap->frame->scope;
+  snap->frame->scope = scope;
   if (!args ||
       !is_cons(args->first) ||
       !is_cons(args->rest)) {
@@ -559,7 +567,7 @@ static SValue form_let(Snap* snap, SCons* args) {
                   exec(snap, as_cons(as_cons(arg->first)->rest)->first));
   }
   res = exec_body(snap, as_cons(args->rest));
-  snap->scope = snap->scope->up;
+  snap->frame->scope = snap->frame->scope->up;
   return res;
 }
 
@@ -590,7 +598,7 @@ static SValue form_try(Snap* snap, SCons* args) {
       !is_cons(as_cons(args->rest)->first)) {
     snap_throw(snap, 0, "Invalid try");
   }
-  prev_scope = snap->scope;
+  prev_scope = snap->frame->scope;
   prev_anchored_top = snap->anchored_top;
   trying.up = snap->trying;
   snap->trying = &trying;
@@ -600,7 +608,7 @@ static SValue form_try(Snap* snap, SCons* args) {
   } else {
     SValue handler;
     SCons* cons;
-    snap->scope = prev_scope;
+    snap->frame->scope = prev_scope;
     snap->anchored_top = prev_anchored_top;
     snap->trying = trying.up;
     handler = exec(snap, as_cons(args->rest)->first);
@@ -640,50 +648,60 @@ static SValue form_set(Snap* snap, SCons* args) {
 }
 
 static SValue exec_cfunc(Snap* snap, SCFunc cfunc, SCons* args) {
+  SValue res;
   SCons* arg = args;
   SCons* first = NULL;
   SCons** cons = &first;
   for (; arg; arg = as_cons(arg->rest)) {
-    *cons = (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
+    *cons = first ? snap_cons_new(snap)
+                  : (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
     (*cons)->first = exec(snap, arg->first);
     cons = (SCons**)&(*cons)->rest.o;
-    snap_pop(snap);
   }
-  return cfunc(snap, first);
+  res = cfunc(snap, first);
+  if (first) snap_pop(snap);
+  return res;
 }
 
-bool bind_params(Snap* snap, SCons* params, SCons* args, SScope* scope) {
+bool bind_params(Snap* snap, SCons* params, SCons* args,
+                 SScope* enclosed_scope) {
   SCons* param;
+  SScope* new_scope = (SScope*)snap_push(snap,
+                                         (SObject*)snap_scope_new(snap));
+  new_scope->up = enclosed_scope;
   if(arity(params) != arity(args)) return false;
   for (param = params; param; param = as_cons(param->rest)) {
-    snap_hash_put(&scope->vars,
+    snap_hash_put(&new_scope->vars,
                   as_sym(param->first)->data,
                   exec(snap, args->first));
     args = as_cons(args->rest);
   }
+  snap->frame->scope = new_scope;
+  snap_pop(snap);
   return true;
 }
 
 static SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
   SValue res;
-  SScope* prev_scope = snap->scope;
-  SScope* this_scope = snap_scope_new(snap);
+  SnapFrame frame;
+  frame.scope = snap->frame->scope;
+  frame.up = snap->frame;
+  snap->frame = &frame;
   /* Bind params in current scope into the new scope */
-  if (!bind_params(snap, fn->params, args, this_scope)) {
+  if (!bind_params(snap, fn->params, args, fn->scope)) {
     snap_throw(snap, 0, "Invalid number of arguments");
   }
-  this_scope->up = fn->scope; /* Enclosed scope */
-  snap->scope = this_scope;
   for (;;) {
     snap->tail = NULL;
     res = exec_body(snap, fn->body);
     if (!snap->tail) break;
     if (!bind_params(snap, fn->params,
                      as_cons(as_cons(snap->tail->first)->rest),
-                     this_scope)) {
+                     fn->scope)) {
       snap_throw(snap, 0, "Invalid number of arguments (recur)");
     }
   }
+  snap->frame = snap->frame->up;
   return res;
 }
 
@@ -763,7 +781,7 @@ void snap_print(SValue val) {
       printf("%s", val.b ? "true" : "false");
       break;
     case STYPE_INT:
-      printf("%d", val.i);
+      printf("%ld", val.i);
       break;
     case STYPE_FLOAT:
       printf("%f", val.f);
@@ -811,7 +829,10 @@ static void print_cons(SCons* cons) {
 
 static SValue builtin_print(Snap* snap, SCons* args) {
   SCons* arg;
+  int space = 0;
   for (arg = args; arg; arg = as_cons(arg->rest)) {
+    if (space) printf(" ");
+    space = 1;
     snap_print(arg->first);
   }
   printf("\n");
@@ -908,12 +929,15 @@ void snap_init(Snap* snap) {
   snap->anchored = (SObject**)malloc(32 * sizeof(SObject*));
   snap->anchored_capacity = 32;
   snap->anchored_top = 0;
+  snap->num_bytes_alloced = 0;
   snap->num_bytes_alloced_last_gc = 0;
   snap->all = NULL;
   snap->gray = NULL;
-  snap->scope = NULL;
   snap->trying = NULL;
   snap->cause = NULL;
+  snap->frame = &snap->bottom_frame;
+  snap->frame->scope = NULL;
+  snap->frame->up = NULL;
   snap_hash_init(&snap->globals);
 
   snap_def_cfunc(snap, "print", builtin_print);

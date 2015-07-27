@@ -33,14 +33,13 @@
 (print (inc1))
 (print (inc1))
 
-; recursion
-(print
-  (def fact (fn (n)
-                (if (= n 1) 1
-                  (mul n (fact (sub n 1)))
-                  )
-                )))
-(print (fact 12))
+ recursion
+(def fact (fn (n)
+              (if (= n 1) 1
+                (mul n (fact (sub n 1)))
+                )
+              ))
+(print (fact 20))
 
 ; loop
 (def i 0)
@@ -49,5 +48,17 @@
         (print n) (set! i (add i 10)) (if (< n 9) (recur (add n 1)) n)
         ) 0)
   )
-(print "i")
 (print i)
+
+; fibonacci
+(def fib
+     (fn (c p n)
+         (print c)
+         (if (> n 0)
+           (recur p (add c p) (sub n 1))
+            nil
+           )
+         )
+     )
+
+(fib 1 1 10)

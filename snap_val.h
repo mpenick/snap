@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+typedef long SnapInt;
+typedef double SnapFloat;
+
 enum {
   STYPE_NIL,
   STYPE_BOOL,
@@ -28,8 +31,8 @@ typedef struct SValue_ {
   uint8_t type;
   union {
     bool b;
-    int i;
-    double f;
+    SnapInt i;
+    SnapFloat f;
     SObject* o;
     struct SValue_ (*c)(Snap* snap, SCons* args);
   };
