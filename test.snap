@@ -1,31 +1,31 @@
 ; vi: filetype=scheme
 
 ; tail recursion
-(print
-  (def countdown (fn (x)
-             (if (> x 0)
-               (do (print x) (recur (sub x 1)))
-               0)
-             )))
+(print "tail recursion:")
+(def countdown (fn (x)
+           (if (> x 0)
+             (do (print x) (recur (sub x 1)))
+             0)
+           ))
 
 (print
   (countdown 10))
 
 ; let
-(print
-  (let ((a 1)
-        (b 2))
-    (add a b)))
+(print "let:")
+(print (let ((a 1)
+             (b 2))
+         (add a b)))
 
 ; closure
-(print
-  (def inc (fn (x)
-               (fn ()
-                   (do
-                     (set! x (add x 1))
-                     x)
-                   )
-               )))
+(print "closure:")
+(def inc (fn (x)
+             (fn ()
+                 (do
+                   (set! x (add x 1))
+                   x)
+                 )
+             ))
 
 (def inc1 (inc 0))
 (print (inc1))
@@ -33,7 +33,8 @@
 (print (inc1))
 (print (inc1))
 
- recursion
+; recursion
+(print "recursion:")
 (def fact (fn (n)
               (if (= n 1) 1
                 (mul n (fact (sub n 1)))
@@ -42,6 +43,7 @@
 (print (fact 20))
 
 ; loop
+(print "loop:")
 (def i 0)
 (print
   ((fn (n)
@@ -51,6 +53,7 @@
 (print i)
 
 ; fibonacci
+(print "fibonacci:")
 (def fib
      (fn (c p n)
          (print c)
@@ -60,5 +63,4 @@
            )
          )
      )
-
 (fib 1 1 10)

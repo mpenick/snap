@@ -19,8 +19,8 @@ enum {
 };
 
 #define check(a, e) (assert(a), (e))
-#define is_obj(v) ((v).type > STYPE_CFUNC)
 
+#define is_obj(v) ((v).type > STYPE_CFUNC)
 #define is_nil(v) ((v).type == STYPE_NIL)
 #define is_bool(v) ((v).type == STYPE_BOOL)
 #define is_int(v) ((v).type == STYPE_INT)
@@ -45,6 +45,17 @@ enum {
 static bool read(Snap* snap, SnapLex* lex, SValue* val);
 static SValue* lookup(Snap* snap, const char* name);
 static SValue exec(Snap* snap, SValue val);
+
+static void push_val(Snap* snap, SValue val) {
+  if (is_obj(val)) snap_push(snap, val.o);
+}
+
+static void pop_val(Snap* snap, SValue val) {
+  if (is_obj(val)) {
+    assert(snap->anchored[snap->anchored_top - 1] == val.o);
+    snap_pop(snap);
+  }
+}
 
 static SValue create_nil() {
   SValue val;
@@ -117,15 +128,12 @@ static void gc_free(Snap* snap, SObject* obj) {
       snap_hash_destroy(&((SScope*)obj)->vars);
       break;
     case STYPE_FN:
-      printf("free fn %p\n", obj);
       snap->num_bytes_alloced -= sizeof(SFn);
       break;
     default:
       assert(0 && "Not a GC object");
       break;
   }
-  // TODO: Remove
-  obj->type = 0xFF;
   free(obj);
 }
 
@@ -280,9 +288,9 @@ SValue snap_exec(Snap* snap, const char* expr) {
   snap->trying = &trying;
   if (!setjmp(trying.buf)) {
     while (read(snap, &lex, &val)) {
-      if (is_obj(val)) snap_push(snap, val.o);
+      push_val(snap, val);
       res = exec(snap, val);
-      if (is_obj(val)) snap_pop(snap);
+      pop_val(snap, val);
     }
   } else {
     fprintf(stderr, "Error '%s' (code: %d)\n",
@@ -346,7 +354,6 @@ SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
   fn->scope = snap->frame->scope;
   fn->params = params;
   fn->body = body;
-  printf("fn %p\n", fn);
   return fn;
 }
 
@@ -735,18 +742,24 @@ static SValue exec_form(Snap* snap, int form, SCons* args) {
 }
 
 static SValue exec_cons(Snap* snap, SCons* cons) {
+  SValue res;
   SValue first = exec(snap, cons->first);
+  push_val(snap, first);
   switch (first.type) {
     case STYPE_FORM:
-      return exec_form(snap, first.i, as_cons(cons->rest));
+      res = exec_form(snap, first.i, as_cons(cons->rest));
+      break;
     case STYPE_CFUNC:
-      return exec_cfunc(snap,first.c, as_cons(cons->rest));
+      res = exec_cfunc(snap, first.c, as_cons(cons->rest));
+      break;
     case STYPE_FN:
-      return exec_fn(snap, as_fn(first), as_cons(cons->rest));
+      res = exec_fn(snap, as_fn(first), as_cons(cons->rest));
+      break;
     default:
       snap_throw(snap, 0, "Expected special form, C func or fn");
-      return create_nil();
   }
+  pop_val(snap, first);
+  return res;
 }
 
 static SValue exec(Snap* snap, SValue val) {
