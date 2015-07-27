@@ -88,7 +88,7 @@
              (print n)
              (if (= n 1)
                (do (print "Going to throw") (throw 4 "Inside a recursive func"))
-               (err (sub n 1)))
+               (recerr (sub n 1)))
              )
      )
 
