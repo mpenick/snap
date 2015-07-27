@@ -4,36 +4,51 @@
 #include <stdlib.h>
 
 int main(int argc, char** argv) {
-  int i;
+  const char* filename;
   Snap snap;
   snap_init(&snap);
 
   if (argc < 2) {
-    fprintf(stderr, "%s <files>\n", argv[0]);
+    fprintf(stderr, "%s <file> <arg_1>...<arg_n>\n", argv[0]);
     exit(-1);
   }
 
-  for (i = 1; i < argc; ++i) {
-    FILE* file = fopen(argv[i], "r");
-    if (file) {
-      long int end;
-      size_t num_bytes;
-      char* buf;
-      fseek(file, 0, SEEK_END);
-      end = ftell(file);
-      fseek(file, 0, SEEK_SET);
-      buf = malloc(end + 1);
-      if ((num_bytes = fread(buf, 1, end, file)) > 0) {
-        buf[num_bytes] = '\0';
-        snap_exec(&snap, buf);
-      } else {
-        fprintf(stderr, "Unable to read %s\n", argv[i]);
+  filename = argv[1];
+  FILE* file = fopen(filename, "r");
+  if (file) {
+    long int end;
+    size_t num_bytes;
+    char* buf;
+    fseek(file, 0, SEEK_END);
+    end = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    buf = malloc(end + 1);
+    if ((num_bytes = fread(buf, 1, end, file)) > 0) {
+      int i;
+      SValue val;
+      SCons* first = NULL;
+      SCons** args = &first;
+      for (i = 2; i < argc; ++i) {
+        *args = first ? snap_cons_new(&snap)
+                      : (SCons*)snap_push(&snap, (SObject*)snap_cons_new(&snap));
+        val.type = STYPE_STR;
+        val.o = (SObject*)snap_str_new(&snap, argv[i]);
+        (*args)->first = val;
+        args = (SCons**)&(*args)->rest.o;
       }
-      fclose(file);
-      free(buf);
+      val.type = STYPE_CONS;
+      val.o = (SObject*)first;
+      snap_def(&snap, "args", val);
+      if (first) snap_pop(&snap);
+      buf[num_bytes] = '\0';
+      snap_exec(&snap, buf);
     } else {
-      fprintf(stderr, "'%s' not found\n", argv[i]);
+      fprintf(stderr, "Unable to read %s\n", filename);
     }
+    fclose(file);
+    free(buf);
+  } else {
+    fprintf(stderr, "'%s' not found\n", argv[1]);
   }
 
   snap_destroy(&snap);

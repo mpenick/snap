@@ -1,5 +1,8 @@
 ; vi: filetype=scheme
 
+; args
+(print "args:" args)
+
 ; tail recursion
 (print "tail recursion:")
 (def countdown (fn (x)
