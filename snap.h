@@ -50,6 +50,7 @@ typedef struct SScope_ {
 
 typedef struct {
   SOBJECT_FIELDS
+  int n;
   SSymStr* name;
   SScope* scope;
   SCons* params;

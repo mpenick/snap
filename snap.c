@@ -46,6 +46,12 @@ static bool read(Snap* snap, SnapLex* lex, SValue* val);
 static SValue* lookup(Snap* snap, const char* name);
 static SValue exec(Snap* snap, SValue val);
 
+static int arity(SCons* cons) {
+  int n = 0;
+  for (; cons; cons = as_cons(cons->rest)) n++;
+  return n;
+}
+
 static void push_val(Snap* snap, SValue val) {
   if (is_obj(val)) snap_push(snap, val.o);
 }
@@ -350,6 +356,7 @@ SScope* snap_scope_new(Snap* snap) {
 
 SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
   SFn* fn = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
+  fn->n = arity(params);
   fn->name = NULL;
   fn->scope = snap->frame->scope;
   fn->params = params;
@@ -472,12 +479,6 @@ static bool is_recur(SCons* cons) {
       as_cons(cons->first) &&
       is_form(as_cons(cons->first)->first) &&
       as_cons(cons->first)->first.i == TK_RECUR;
-}
-
-static int arity(SCons* cons) {
-  int n = 0;
-  for (; cons; cons = as_cons(cons->rest)) n++;
-  return n;
 }
 
 static SValue exec_cons(Snap* snap, SCons* cons);
@@ -672,14 +673,13 @@ static SValue exec_cfunc(Snap* snap, SCFunc cfunc, SCons* args) {
   return res;
 }
 
-bool bind_params(Snap* snap, SCons* params, SCons* args,
-                 SScope* enclosed_scope) {
+bool bind_params(Snap* snap, SFn* fn, SCons* args) {
   SCons* param;
   SScope* new_scope = (SScope*)snap_push(snap,
                                          (SObject*)snap_scope_new(snap));
-  new_scope->up = enclosed_scope;
-  if(arity(params) != arity(args)) return false;
-  for (param = params; param; param = as_cons(param->rest)) {
+  new_scope->up = fn->scope;
+  if(fn->n != arity(args)) return false;
+  for (param = fn->params; param; param = as_cons(param->rest)) {
     snap_hash_put(&new_scope->vars,
                   as_sym(param->first)->data,
                   exec(snap, args->first));
@@ -697,16 +697,15 @@ static SValue exec_fn(Snap* snap, SFn* fn, SCons* args) {
   frame.up = snap->frame;
   snap->frame = &frame;
   /* Bind params in current scope into the new scope */
-  if (!bind_params(snap, fn->params, args, fn->scope)) {
+  if (!bind_params(snap, fn, args)) {
     snap_throw(snap, 0, "Invalid number of arguments");
   }
   for (;;) {
     snap->tail = NULL;
     res = exec_body(snap, fn->body);
     if (!snap->tail) break;
-    if (!bind_params(snap, fn->params,
-                     as_cons(as_cons(snap->tail->first)->rest),
-                     fn->scope)) {
+    if (!bind_params(snap, fn,
+                     as_cons(as_cons(snap->tail->first)->rest))) {
       snap_throw(snap, 0, "Invalid number of arguments (recur)");
     }
   }
