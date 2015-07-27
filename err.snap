@@ -1,9 +1,0 @@
-; vi: filetype=scheme
-
-(try
-  (try
-    (throw 1 "Error happened")
-    (fn (e) (do (print "Inner handler") (throw 2 "Error in inner handler happened")))
-    )
-  (fn (e) (do (print "Outer handler") (throw 3 "Error in outer handler happened")))
-)

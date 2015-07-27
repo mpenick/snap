@@ -67,3 +67,32 @@
          )
      )
 (fib 1 1 10)
+
+; error
+(print "errors:")
+(def nested (fn ()
+             (try
+               (try
+                 (throw 1 "Error happened")
+                 (fn (e) (do (print "Inner handler") (throw 2 "Error in inner handler happened")))
+                 )
+               (fn (e) (do (print "Outer handler") (throw 3 "Error in outer handler happened")))
+               )
+             ))
+(try
+  (nested)
+  (fn (e) (print "Error calling func"))
+  )
+
+(def recerr (fn (n)
+             (print n)
+             (if (= n 1)
+               (do (print "Going to throw") (throw 4 "Inside a recursive func"))
+               (err (sub n 1)))
+             )
+     )
+
+(try
+  (recerr 10)
+  (fn (e) (print "From a recursive func"))
+  )

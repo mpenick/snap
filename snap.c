@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define GC_EVERY_NUM_BYTES 8
+#define GC_EVERY_NUM_BYTES 2 * 1024 * 1024
 
 enum {
   WHITE,
@@ -598,14 +598,14 @@ static SValue form_throw(Snap* snap, SCons* args) {
 static SValue form_try(Snap* snap, SCons* args) {
   SValue res;
   SnapTry trying;
-  SScope* prev_scope;
+  SnapFrame* prev_frame;
   size_t prev_anchored_top;
   if (!args ||
       !is_cons(args->rest) || !as_cons(args->rest) ||
       !is_cons(as_cons(args->rest)->first)) {
     snap_throw(snap, 0, "Invalid try");
   }
-  prev_scope = snap->frame->scope;
+  prev_frame = snap->frame;
   prev_anchored_top = snap->anchored_top;
   trying.up = snap->trying;
   snap->trying = &trying;
@@ -615,10 +615,11 @@ static SValue form_try(Snap* snap, SCons* args) {
   } else {
     SValue handler;
     SCons* cons;
-    snap->frame->scope = prev_scope;
+    snap->frame = prev_frame;
     snap->anchored_top = prev_anchored_top;
     snap->trying = trying.up;
     handler = exec(snap, as_cons(args->rest)->first);
+    push_val(snap, handler);
     cons = (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
     cons->first = create_obj((SObject*)snap->cause);
     snap->cause = snap->cause->inner;
@@ -634,6 +635,7 @@ static SValue form_try(Snap* snap, SCons* args) {
         break;
     }
     snap_pop(snap);
+    pop_val(snap, handler);
   }
   return res;
 }
@@ -852,6 +854,11 @@ static SValue builtin_print(Snap* snap, SCons* args) {
   return create_nil();
 }
 
+static SValue builtin_gc(Snap* snap, SCons* args) {
+  gc_collect(snap);
+  return create_nil();
+}
+
 static SValue builtin_cons(Snap* snap, SCons* args) {
   SCons* res;
   if (!args ||
@@ -954,6 +961,7 @@ void snap_init(Snap* snap) {
   snap_hash_init(&snap->globals);
 
   snap_def_cfunc(snap, "print", builtin_print);
+  snap_def_cfunc(snap, "gc", builtin_gc);
   snap_def_cfunc(snap, "cons", builtin_cons);
   snap_def_cfunc(snap, "first", builtin_first);
   snap_def_cfunc(snap, "car", builtin_first);
