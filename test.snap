@@ -96,3 +96,8 @@
   (recerr 10)
   (fn (e) (print "From a recursive func"))
   )
+
+; varargs
+(print "varargs:")
+((fn (a b c...)
+    (print a b c)) 1 2 3 4)

@@ -354,9 +354,9 @@ SScope* snap_scope_new(Snap* snap) {
   return s;
 }
 
-SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body) {
+SFn* snap_fn_new(Snap* snap, int n, SCons* params, SCons* body) {
   SFn* fn = (SFn*)gc_new(snap, STYPE_FN, sizeof(SFn));
-  fn->n = arity(params);
+  fn->n = n;
   fn->name = NULL;
   fn->scope = snap->frame->scope;
   fn->params = params;
@@ -431,6 +431,7 @@ static bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val) {
       break;
     case TK_DO:
     case TK_DEF:
+    case TK_ELLIPSIS:
     case TK_IF:
     case TK_FN:
     case TK_LET:
@@ -537,6 +538,8 @@ static SValue form_if(Snap* snap, SCons* args) {
 }
 
 static SValue form_fn(Snap* snap, SCons* args) {
+  int n = 0;
+  bool is_vararg = false;
   SCons* param;
   if (!args ||
       !is_cons(args->first) ||
@@ -544,11 +547,18 @@ static SValue form_fn(Snap* snap, SCons* args) {
     snap_throw(snap, 0, "Invalid fn");
   }
   for (param = as_cons(args->first); param; param = as_cons(param->rest)) {
-    if (param->first.type != STYPE_SYM) {
-      snap_throw(snap, 0, "Fn parameter is not a symbol");
+    if (!as_cons(param->rest) &&
+        param->first.type == STYPE_FORM &&
+        param->first.i == TK_ELLIPSIS) {
+      is_vararg = true;
+    } else if (param->first.type == STYPE_SYM) {
+      n++;
+    } else {
+      snap_throw(snap, 0, "Fn parameter is invalid");
     }
   }
   return create_obj((SObject*)snap_fn_new(snap,
+                                          is_vararg ? -n : n,
                                           as_cons(args->first),
                                           as_cons(args->rest)));
 }
@@ -673,17 +683,47 @@ static SValue exec_cfunc(Snap* snap, SCFunc cfunc, SCons* args) {
   return res;
 }
 
+void bind_param(Snap* snap, SScope* scope, SValue sym, SValue val) {
+  const char* name = as_sym(sym)->data;
+  if (snap_hash_put(&scope->vars, name, val)) {
+    snap_throw(snap, 0, "Duplicate parameter %s", name);
+  }
+}
+
 bool bind_params(Snap* snap, SFn* fn, SCons* args) {
   SCons* param;
+  int n = arity(args);
   SScope* new_scope = (SScope*)snap_push(snap,
                                          (SObject*)snap_scope_new(snap));
   new_scope->up = fn->scope;
-  if(fn->n != arity(args)) return false;
-  for (param = fn->params; param; param = as_cons(param->rest)) {
-    snap_hash_put(&new_scope->vars,
-                  as_sym(param->first)->data,
-                  exec(snap, args->first));
-    args = as_cons(args->rest);
+  if(fn->n >= 0) {
+    if(n != fn->n) return false;
+    for (param = fn->params; param; param = as_cons(param->rest)) {
+      bind_param(snap, new_scope,
+                 param->first, exec(snap, args->first));
+      args = as_cons(args->rest);
+    }
+  } else {
+    SCons* first = NULL;
+    SCons** cons = &first;
+    int p = -fn->n;
+    if (n < p) return false;
+    for (param = fn->params; param && p > 1; param = as_cons(param->rest)) {
+      bind_param(snap, new_scope,
+                 param->first, exec(snap, args->first));
+      args = as_cons(args->rest);
+      p--;
+    }
+    for (; args; args = as_cons(args->rest)) {
+      *cons = first ? snap_cons_new(snap)
+                    : (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
+      (*cons)->first = exec(snap, args->first);
+      cons = (SCons**)&(*cons)->rest.o;
+    }
+    bind_param(snap, new_scope,
+               param->first,
+               create_obj((SObject*)first));
+    snap_pop(snap);
   }
   snap->frame->scope = new_scope;
   snap_pop(snap);

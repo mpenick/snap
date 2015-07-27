@@ -89,7 +89,7 @@ SErr* snap_err_new(Snap* snap, int code, const char* msg);
 SCons* snap_cons_new(Snap* snap);
 SHash* snap_hash_new(Snap* snap);
 SScope* snap_scope_new(Snap* snap);
-SFn* snap_fn_new(Snap* snap, SCons* params, SCons* body);
+SFn* snap_fn_new(Snap* snap, int n, SCons* params, SCons* body);
 
 SObject* snap_push(Snap* snap, SObject* obj);
 void snap_pop(Snap* snap);

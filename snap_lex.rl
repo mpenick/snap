@@ -58,6 +58,7 @@ int snap_lex_next_token(SnapLex* lex) {
       'true' => { token = TK_TRUE; fbreak; };
       'false' => { token = TK_FALSE; fbreak; };
       'nil' => { token = TK_NIL; fbreak; };
+      '...' => { token = TK_ELLIPSIS; fbreak; };
       integer => { token = copy_value(lex, ts, te, TK_INT); fbreak; };
       floating => { token = copy_value(lex, ts, te, TK_FLOAT); fbreak; };
       string => { token = copy_value(lex, ts + 1, te - 1, TK_STR); fbreak; };

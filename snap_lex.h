@@ -15,6 +15,7 @@ enum {
   TK_NIL,
   TK_DO,
   TK_DEF,
+  TK_ELLIPSIS,
   TK_IF,
   TK_FN,
   TK_LET,
