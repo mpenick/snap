@@ -590,18 +590,26 @@ static SValue form_let(Snap* snap, SCons* args) {
 }
 
 static SValue form_throw(Snap* snap, SCons* args) {
+  SValue res;
   SErr* err;
   if (!args ||
-      !is_int(args->first) ||
-      !is_cons(args->rest) || !as_cons(args->rest) ||
-      !is_str(as_cons(args->rest)->first)) {
+      !is_cons(args->rest) || !as_cons(args->rest)) {
     snap_throw(snap, 0, "Invalid throw");
   }
-  err = (SErr*)gc_new(snap, STYPE_ERR, sizeof(SErr));
-  err->code = args->first.i;
-  err->msg = as_str(as_cons(args->rest)->first);
+  err = (SErr*)snap_push(snap, gc_new(snap, STYPE_ERR, sizeof(SErr)));
+  res = exec(snap, args->first);
+  if (!is_int(res)) {
+    snap_throw(snap, 0, "Expected an int for first argument to throw");
+  }
+  err->code = res.i;
+  res = exec(snap, as_cons(args->rest)->first);
+  if (!is_str(res)) {
+    snap_throw(snap, 0, "Expected a str for second argument to throw");
+  }
+  err->msg = as_str(res);
   err->inner = snap->cause;
   snap->cause = err;
+  snap_pop(snap);
   longjmp(snap->trying->buf, 1);
   return create_nil(); /* Never happens */
 }
@@ -893,6 +901,13 @@ static SValue builtin_print(Snap* snap, SCons* args) {
   return create_nil();
 }
 
+static SValue builtin_isnil(Snap* snap, SCons* args) {
+  if (!args) {
+    snap_throw(snap, 0, "Invalid isnil");
+  }
+  return create_bool(is_nil(args->first));
+}
+
 static SValue builtin_gc(Snap* snap, SCons* args) {
   gc_collect(snap);
   return create_nil();
@@ -1001,6 +1016,7 @@ void snap_init(Snap* snap) {
 
   snap_def_cfunc(snap, "print", builtin_print);
   snap_def_cfunc(snap, "gc", builtin_gc);
+  snap_def_cfunc(snap, "isnil?", builtin_isnil);
   snap_def_cfunc(snap, "cons", builtin_cons);
   snap_def_cfunc(snap, "first", builtin_first);
   snap_def_cfunc(snap, "car", builtin_first);

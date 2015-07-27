@@ -101,3 +101,31 @@
 (print "varargs:")
 ((fn (a b c...)
     (print a b c)) 1 2 3 4)
+
+
+(def counter (fn (n)
+                 (let ((s 0))
+                   (fn ()
+                       (let ((c s))
+                         (if (< s n)
+                           (do (set! s (add s 1)) c)
+                           nil
+                           )
+                         )
+                       )
+                   )
+                 ))
+
+(def a (counter 10))
+((fn ()
+     (let ((r (a)))
+           (if (isnil? r) nil (do (print r) (recur)))
+           )
+     ))
+
+(def assert (fn (check msg)
+                (if check nil (throw 1 msg))
+                )
+     )
+
+(assert false "This assertion is false")

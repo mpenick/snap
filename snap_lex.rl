@@ -36,7 +36,7 @@ int snap_lex_next_token(SnapLex* lex) {
     ws = [ \t];
     comment = ";" [^\r\n]*;
     nl = '\r\n' | '\n';
-    id = (alnum | [_\+\-\*/=,<>])+;
+    id = (alnum | [_\+\-\*\?/=,<>])+;
     integer = [\+\-]? digit+;
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
     #string = ("\"" ([^\r\n\"] | "\\\"")* "\"") | ("'" ([^\r\n'] | "\\'")* "'");
