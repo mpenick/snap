@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 int main(int argc, char** argv) {
+  int i;
   Snap snap;
   snap_init(&snap);
 
@@ -12,7 +13,7 @@ int main(int argc, char** argv) {
     exit(-1);
   }
 
-  for (int i = 1; i < argc; ++i) {
+  for (i = 1; i < argc; ++i) {
     FILE* file = fopen(argv[i], "r");
     if (file) {
       long int end;

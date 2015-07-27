@@ -41,9 +41,10 @@ static uint64_t calc_hash(const void* data, size_t length) {
 #endif
 
 static SEntry* hash_lookup(SEntry* entries, size_t capacity, const char* key) {
+  size_t i;
   size_t h = calc_hash(key, strlen(key));
   size_t mask = capacity - 1;
-  for (size_t i = 0; i < capacity; ++i) {
+  for (i = 0; i < capacity; ++i) {
     SEntry *entry = &entries[(h + ((i + i * i) >> 1)) & mask];
     if (entry->key == NULL || strcmp(key, entry->key) == 0) {
       return entry;
@@ -81,7 +82,8 @@ void snap_hash_init(SnapHash* hash) {
 }
 
 void snap_hash_destroy(SnapHash* hash) {
-  for (size_t i = 0; i < hash->capacity; ++i) {
+  size_t i;
+  for (i = 0; i < hash->capacity; ++i) {
     SEntry* entry = &hash->entries[i];
     if (entry->key != NULL) free((void*)entry->key);
   }

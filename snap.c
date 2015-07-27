@@ -972,9 +972,11 @@ void snap_init(Snap* snap) {
 }
 
 void snap_destroy(Snap* snap) {
-  SObject* o;
-  for (o = snap->all; o; o = o->next) {
-    gc_free(snap, o);
+  SObject* obj = snap->all;
+  while (obj) {
+    SObject* temp = obj;
+    obj = obj->next;
+    gc_free(snap, temp);
   }
   free((void*)snap->anchored);
   snap_hash_destroy(&snap->globals);
