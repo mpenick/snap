@@ -1,0 +1,26 @@
+; vi: filetype=scheme
+
+(def assert (fn (check msg)
+                (if check nil (throw 1 msg))
+                )
+     )
+
+(def list (fn (args...) args))
+
+(def add_
+     (fn (args)
+         (let ((a (car args))
+               (b (cdr args)))
+           (if (isempty? b)
+             a
+             (add (car args)
+                  (add_ (cdr args)))
+             )
+           )
+         )
+     )
+
+(def + (fn (args...) (add_ args)))
+
+(print (list 1 2 3 4))
+(print (+ 1 2 3 4))

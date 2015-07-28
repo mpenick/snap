@@ -908,6 +908,13 @@ static SValue builtin_isnil(Snap* snap, SCons* args) {
   return create_bool(is_nil(args->first));
 }
 
+static SValue builtin_isempty(Snap* snap, SCons* args) {
+  if (!args) {
+    snap_throw(snap, 0, "Invalid isempty");
+  }
+  return create_bool(is_cons(args->first) && !as_cons(args->first));
+}
+
 static SValue builtin_gc(Snap* snap, SCons* args) {
   gc_collect(snap);
   return create_nil();
@@ -926,14 +933,14 @@ static SValue builtin_cons(Snap* snap, SCons* args) {
 }
 
 static SValue builtin_first(Snap* snap, SCons* args) {
-  if (!args || !is_cons(args->first)) {
+  if (!args || !as_cons(args->first)) {
     snap_throw(snap, 0, "Invalid first");
   }
   return as_cons(args->first)->first;
 }
 
 static SValue builtin_rest(Snap* snap, SCons* args) {
-  if (!args || !is_cons(args->first)) {
+  if (!args || !as_cons(args->first)) {
     snap_throw(snap, 0, "Invalid rest");
   }
   return as_cons(args->first)->rest;
@@ -1016,7 +1023,8 @@ void snap_init(Snap* snap) {
 
   snap_def_cfunc(snap, "print", builtin_print);
   snap_def_cfunc(snap, "gc", builtin_gc);
-  snap_def_cfunc(snap, "isnil?", builtin_isnil);
+  snap_def_cfunc(snap, "nil?", builtin_isnil);
+  snap_def_cfunc(snap, "empty?", builtin_isempty);
   snap_def_cfunc(snap, "cons", builtin_cons);
   snap_def_cfunc(snap, "first", builtin_first);
   snap_def_cfunc(snap, "car", builtin_first);

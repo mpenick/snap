@@ -119,7 +119,7 @@
 (def a (counter 10))
 ((fn ()
      (let ((r (a)))
-           (if (isnil? r) nil (do (print r) (recur)))
+           (if (nil? r) nil (do (print r) (recur)))
            )
      ))
 
