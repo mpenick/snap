@@ -404,12 +404,26 @@ static SCons* read_cons(Snap* snap, SnapLex* lex) {
   return first;
 }
 
+static bool read_quote(Snap* snap, SnapLex* lex, SValue* val) {
+  bool res;
+  SCons* cons = (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
+  cons->first.type = STYPE_FORM;
+  cons->first.i = TK_QUOTE;
+  cons->rest = create_obj((SObject*)snap_cons_new(snap));
+  *val = create_obj((SObject*)cons);
+  res = read_val(snap, lex,
+                  snap_lex_next_token(lex), &as_cons(cons->rest)->first);
+  snap_pop(snap);
+  return res;
+}
+
 static bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val) {
   switch(token) {
     case '(':
-      val->type = STYPE_CONS;
-      val->o = (SObject*)read_cons(snap, lex);
+      *val = create_obj((SObject*)read_cons(snap, lex));
       break;
+    case '\'':
+      return read_quote(snap, lex, val);
     case TK_INT:
       *val = create_int(atol(lex->val));
       break;
@@ -817,10 +831,12 @@ static SValue exec(Snap* snap, SValue val) {
     case STYPE_BOOL:
     case STYPE_INT:
     case STYPE_FLOAT:
+    case STYPE_CFUNC:
     case STYPE_FORM:
     case STYPE_STR:
     case STYPE_ERR:
     case STYPE_HASH:
+    case STYPE_FN:
       return val;
     case STYPE_SYM:
       return lookup_sym(snap, as_sym(val));
@@ -901,16 +917,32 @@ static SValue builtin_print(Snap* snap, SCons* args) {
   return create_nil();
 }
 
+static SValue builtin_apply(Snap* snap, SCons* args) {
+  SValue res;
+  SCons* cons;
+  if (!args ||
+      !is_cons(args->rest) || !as_cons(args->rest) ||
+      !is_cons(as_cons(args->rest)->first)) {
+    snap_throw(snap, 0, "Invalid apply");
+  }
+  cons = (SCons*)snap_push(snap, (SObject*)snap_cons_new(snap));
+  cons->first = args->first;
+  cons->rest = as_cons(args->rest)->first;
+  res = exec_cons(snap, cons);
+  snap_pop(snap);
+  return res;
+}
+
 static SValue builtin_isnil(Snap* snap, SCons* args) {
   if (!args) {
-    snap_throw(snap, 0, "Invalid isnil");
+    snap_throw(snap, 0, "Invalid nil?");
   }
   return create_bool(is_nil(args->first));
 }
 
 static SValue builtin_isempty(Snap* snap, SCons* args) {
   if (!args) {
-    snap_throw(snap, 0, "Invalid isempty");
+    snap_throw(snap, 0, "Invalid empty?");
   }
   return create_bool(is_cons(args->first) && !as_cons(args->first));
 }
@@ -1021,8 +1053,7 @@ void snap_init(Snap* snap) {
   snap->frame->up = NULL;
   snap_hash_init(&snap->globals);
 
-  snap_def_cfunc(snap, "print", builtin_print);
-  snap_def_cfunc(snap, "gc", builtin_gc);
+  snap_def_cfunc(snap, "apply", builtin_apply);
   snap_def_cfunc(snap, "nil?", builtin_isnil);
   snap_def_cfunc(snap, "empty?", builtin_isempty);
   snap_def_cfunc(snap, "cons", builtin_cons);
@@ -1030,6 +1061,9 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "car", builtin_first);
   snap_def_cfunc(snap, "rest", builtin_rest);
   snap_def_cfunc(snap, "cdr", builtin_rest);
+
+  snap_def_cfunc(snap, "print", builtin_print);
+  snap_def_cfunc(snap, "gc", builtin_gc);
   snap_def_cfunc(snap, "<", builtin_lt);
   snap_def_cfunc(snap, ">", builtin_gt);
   snap_def_cfunc(snap, "<=", builtin_le);

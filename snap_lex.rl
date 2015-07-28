@@ -39,12 +39,12 @@ int snap_lex_next_token(SnapLex* lex) {
     id = (alnum | [_\+\-\*\?/=,<>])+;
     integer = [\+\-]? digit+;
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
-    #string = ("\"" ([^\r\n\"] | "\\\"")* "\"") | ("'" ([^\r\n'] | "\\'")* "'");
     string = "\"" ([^\r\n\"] | "\\\"")* "\"";
 
     main := |*
       '(' => { token = (int)'('; fbreak; };
       ')' => { token = (int)')'; fbreak; };
+      '\'' => { token = (int)'\''; fbreak; };
       'do' => { token = TK_DO; fbreak; };
       'def' | 'define' => { token = TK_DEF; fbreak; };
       'if' => { token = TK_IF; fbreak; };

@@ -11,7 +11,7 @@
      (fn (args)
          (let ((a (car args))
                (b (cdr args)))
-           (if (isempty? b)
+           (if (empty? b)
              a
              (add (car args)
                   (add_ (cdr args)))
@@ -24,3 +24,4 @@
 
 (print (list 1 2 3 4))
 (print (+ 1 2 3 4))
+(print (apply + '(1 2 3 4 5)))
