@@ -1,10 +1,6 @@
 ; vi: filetype=scheme
 
-(def assert (fn (check msg)
-                (if check nil (throw 1 msg))
-                )
-     )
-
+(def assert (fn (check msg) (if check nil (throw 1 msg))))
 (def list (fn (args...) args))
 
 (def add_

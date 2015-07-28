@@ -123,9 +123,14 @@
            )
      ))
 
-(def assert (fn (check msg)
-                (if check nil (throw 1 msg))
-                )
-     )
-
-(assert false "This assertion is false")
+; hash
+(print "hash:")
+(def k (fn () "a"))
+(def v 1)
+(def h {(k) v "b" (fn () (print "Called fn from hash"))})
+((get h "b"))
+(print h)
+(put! h "a" '(1 2 3))
+(print h)
+(del! h "a" '(1 2 3))
+(print h)
