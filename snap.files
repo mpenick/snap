@@ -6,3 +6,4 @@ snap_lex.h
 snap_lex.rl
 snap_val.h
 main.c
+snap_val.c

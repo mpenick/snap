@@ -93,19 +93,30 @@ typedef struct SnapFrame_ {
   struct SnapFrame_* up;
 } SnapFrame;
 
+typedef struct SnapInst_ {
+  int opcode;
+  int arg;
+  SSymStr* arg_name;
+  int line;
+  struct SnapInst_* prev;
+  struct SnapInst_* next;
+} SnapInst;
+
 typedef struct SnapScope_ {
-  SnapHash* variables;
+  SnapHash local_names;
   struct SnapScope_* up;
 }  SnapScope;
 
 typedef struct SnapCodeGen_ {
-  int32_t insts;
+  SnapInst* insts;
+  int insts_count;
   SnapScope* scope;
-  SValue* constants;
-  SValue* names;
+  SnapHash constants;
+  SnapHash global_names;
   int num_locals;
   int max_stack_size;
   bool is_tail;
+  struct SnapCodeGen_* up;
 } SnapCodeGen;
 
 struct Snap_ {

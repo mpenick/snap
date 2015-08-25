@@ -311,8 +311,8 @@ SFn* snap_fn_new(Snap* snap, int n, SCons* params, SCons* body) {
 
 
 void snap_def(Snap* snap, const char* name, SValue val) {
-  SValue str = create_obj((SObject*)snap_str_new(snap, name));
-  snap_hash_put(snap->frame->scope ? &snap->frame->scope->vars : &snap->globals, str, val);
+  SValue key = create_obj((SObject*)snap_sym_new(snap, name));
+  snap_hash_put(snap->frame->scope ? &snap->frame->scope->vars : &snap->globals, key, val);
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {

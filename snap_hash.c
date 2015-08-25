@@ -66,7 +66,7 @@ void snap_hash_destroy(SnapHash* hash) {
 bool snap_hash_put(SnapHash* hash, SValue key, SValue val) {
   bool is_replaced;
   SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
-  if (is_undef(entry->key)) {
+  if (!is_undef(entry->key)) {
     is_replaced = true;
   } else {
     hash->count++;
@@ -84,7 +84,7 @@ bool snap_hash_put(SnapHash* hash, SValue key, SValue val) {
 
 bool snap_hash_delete(SnapHash* hash, SValue key) {
   SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
-  if (!is_undef(entry->key)) return false;
+  if (is_undef(entry->key)) return false;
   entry->key = create_undef();
   hash->count--;
   if ((double)hash->count / hash->capacity < HASH_MIN_LOAD_FACTOR &&
@@ -96,6 +96,6 @@ bool snap_hash_delete(SnapHash* hash, SValue key) {
 
 SValue* snap_hash_get(SnapHash* hash, SValue key) {
   SEntry* entry = hash_lookup(hash->entries, hash->capacity, key);
-  if (!is_undef(entry->key)) return NULL;
+  if (is_undef(entry->key)) return NULL;
   return &entry->val;
 }
