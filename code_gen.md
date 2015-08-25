@@ -264,3 +264,12 @@ CALL 1          ; fact(n -1)
 MUL             ; n * fact(n - 1)
 RETURN
 ```
+
+## Tail discovery
+
+(fn (x)
+  (print x)
+  (if (= x 0) (stuff) (otherstuff))
+  (recur (- x 1))
+  )
+

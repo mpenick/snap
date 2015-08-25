@@ -30,7 +30,7 @@ int main(int argc, char** argv) {
       SCons** args = &first;
       for (i = 2; i < argc; ++i) {
         *args = first ? snap_cons_new(&snap)
-                      : (SCons*)snap_push(&snap, (SObject*)snap_cons_new(&snap));
+          : (SCons*)snap_push(&snap, (SObject*)snap_cons_new(&snap));
         val.type = STYPE_STR;
         val.o = (SObject*)snap_str_new(&snap, argv[i]);
         (*args)->first = val;

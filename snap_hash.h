@@ -3,24 +3,23 @@
 
 #include "snap_val.h"
 
-#include <stddef.h>
 #include <stdbool.h>
 
 typedef struct {
-  const char* key;
+  SValue key;
   SValue val;
 } SEntry;
 
 typedef struct {
   SEntry* entries;
-  size_t capacity;
-  size_t count;
+  int capacity;
+  int count;
 } SnapHash;
 
 void snap_hash_init(SnapHash* hash);
 void snap_hash_destroy(SnapHash* hash);
-bool snap_hash_put(SnapHash* hash, const char* key, SValue val);
-bool snap_hash_delete(SnapHash* hash, const char* key);
-SValue* snap_hash_get(SnapHash* hash, const char* key);
+bool snap_hash_put(SnapHash* hash, SValue key, SValue val);
+bool snap_hash_delete(SnapHash* hash, SValue key);
+SValue* snap_hash_get(SnapHash* hash, SValue key);
 
 #endif

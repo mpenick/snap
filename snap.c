@@ -18,32 +18,8 @@ enum {
   BLACK
 };
 
-#define check(a, e) (assert(a), (e))
-
-#define is_obj(v) ((v).type > STYPE_CFUNC)
-#define is_nil(v) ((v).type == STYPE_NIL)
-#define is_bool(v) ((v).type == STYPE_BOOL)
-#define is_int(v) ((v).type == STYPE_INT)
-#define is_float(v) ((v).type == STYPE_FLOAT)
-#define is_form(v) ((v).type == STYPE_FORM)
-#define is_cfunc(v) ((v).type == STYPE_CFUNC)
-#define is_sym(v) ((v).type == STYPE_SYM)
-#define is_str(v) ((v).type == STYPE_STR)
-#define is_err(v) ((v).type == STYPE_ERR)
-#define is_cons(v) ((v).type == STYPE_CONS)
-#define is_hash(v) ((v).type == STYPE_HASH)
-#define is_scope(v) ((v).type == STYPE_SCOPE)
-#define is_fn(v) ((v).type == STYPE_FN)
-
-#define as_sym(v) check(is_sym(v), (SSymStr*)(v).o)
-#define as_str(v) check(is_str(v), (SSymStr*)(v).o)
-#define as_err(v) check(is_err(v), (SErr*)(v).o)
-#define as_cons(v) check(is_cons(v), (SCons*)(v).o)
-#define as_hash(v) check(is_hash(v), (SHash*)(v).o)
-#define as_fn(v) check(is_fn(v), (SFn*)(v).o)
-
 static bool read(Snap* snap, SnapLex* lex, SValue* val);
-static SValue* lookup(Snap* snap, const char* name);
+static SValue* lookup(Snap* snap, SValue name);
 static SValue exec(Snap* snap, SValue val);
 
 static void print_cons(SCons* cons);
@@ -66,49 +42,56 @@ static void pop_val(Snap* snap, SValue val) {
   }
 }
 
-static SValue create_nil() {
+SValue create_undef() {
+  SValue val;
+  val.type = STYPE_UNDEF;
+  val.o = NULL;
+  return val;
+}
+
+SValue create_nil() {
   SValue val;
   val.type = STYPE_NIL;
   val.o = NULL;
   return val;
 }
 
-static SValue create_empty() {
+SValue create_empty() {
   SValue val;
   val.type = STYPE_CONS;
   val.o = NULL;
   return val;
 }
 
-static SValue create_bool(bool b) {
+SValue create_bool(bool b) {
   SValue val;
   val.type = STYPE_BOOL;
   val.b = b;
   return val;
 }
 
-static SValue create_int(SnapInt i) {
+SValue create_int(SnapInt i) {
   SValue val;
   val.type = STYPE_INT;
   val.i = i;
   return val;
 }
 
-static SValue create_float(SnapFloat f) {
+SValue create_float(SnapFloat f) {
   SValue val;
   val.type = STYPE_FLOAT;
   val.f = f;
   return val;
 }
 
-static SValue create_cfunc(SCFunc c) {
+SValue create_cfunc(SCFunc c) {
   SValue val;
   val.type = STYPE_CFUNC;
   val.c = c;
   return val;
 }
 
-static SValue create_obj(SObject* o) {
+SValue create_obj(SObject* o) {
   SValue val;
   val.type = o->type;
   val.o = o;
@@ -175,10 +158,13 @@ static void gc_mark_val(Snap* snap, SValue val) {
 }
 
 static void gc_mark_hash(Snap* snap, SnapHash* hash) {
-  size_t i;
+  int i;
   for (i = 0; i < hash->capacity; ++i) {
     SEntry* entry = &hash->entries[i];
-    if (entry->key) gc_mark_val(snap, entry->val);
+    if (!is_undef(entry->key)) {
+      gc_mark_val(snap, entry->key);
+      gc_mark_val(snap, entry->val);
+    }
   }
 }
 
@@ -266,50 +252,6 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   return obj;
 }
 
-void snap_def(Snap* snap, const char* name, SValue val) {
-  snap_hash_put(snap->frame->scope ? &snap->frame->scope->vars : &snap->globals, name, val);
-}
-
-void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
-  snap_def(snap, name, create_cfunc(cfunc));
-}
-
-void snap_throw(Snap* snap, int code, const char* format, ...) {
-  char msg[256];
-  va_list args;
-  va_start(args, format);
-  vsnprintf(msg, sizeof(msg), format, args);
-  va_end(args);
-  snap->cause = snap_err_new(snap, code, msg);
-  longjmp(snap->trying->buf, 1);
-}
-
-SValue snap_exec(Snap* snap, const char* expr) {
-  SValue res;
-  SValue val;
-  SnapTry trying;
-  SnapLex lex;
-  lex.buf = expr;
-  lex.buf_size = strlen(lex.buf);
-  lex.p = lex.buf;
-  lex.line = 0;
-  trying.up = NULL;
-  snap->trying = &trying;
-  if (!setjmp(trying.buf)) {
-    while (read(snap, &lex, &val)) {
-      push_val(snap, val);
-      res = exec(snap, val);
-      pop_val(snap, val);
-    }
-  } else {
-    fprintf(stderr, "Error '%s' (code: %d)\n",
-            snap->cause->msg->data,
-            snap->cause->code);
-    res = create_obj((SObject*)snap->cause);
-  }
-  return res;
-}
-
 SSymStr* snap_str_new(Snap* snap, const char* str) {
   size_t len = strlen(str);
   SSymStr* s = (SSymStr*)gc_new(snap, STYPE_STR, sizeof(SSymStr) + len + 1);
@@ -367,6 +309,52 @@ SFn* snap_fn_new(Snap* snap, int n, SCons* params, SCons* body) {
   return fn;
 }
 
+
+void snap_def(Snap* snap, const char* name, SValue val) {
+  SValue str = create_obj((SObject*)snap_str_new(snap, name));
+  snap_hash_put(snap->frame->scope ? &snap->frame->scope->vars : &snap->globals, str, val);
+}
+
+void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
+  snap_def(snap, name, create_cfunc(cfunc));
+}
+
+void snap_throw(Snap* snap, int code, const char* format, ...) {
+  char msg[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(msg, sizeof(msg), format, args);
+  va_end(args);
+  snap->cause = snap_err_new(snap, code, msg);
+  longjmp(snap->trying->buf, 1);
+}
+
+SValue snap_exec(Snap* snap, const char* expr) {
+  SValue res;
+  SValue val;
+  SnapTry trying;
+  SnapLex lex;
+  lex.buf = expr;
+  lex.buf_size = strlen(lex.buf);
+  lex.p = lex.buf;
+  lex.line = 0;
+  trying.up = NULL;
+  snap->trying = &trying;
+  if (!setjmp(trying.buf)) {
+    while (read(snap, &lex, &val)) {
+      push_val(snap, val);
+      res = exec(snap, val);
+      pop_val(snap, val);
+    }
+  } else {
+    fprintf(stderr, "Error '%s' (code: %d)\n",
+            snap->cause->msg->data,
+            snap->cause->code);
+    res = create_obj((SObject*)snap->cause);
+  }
+  return res;
+}
+
 SObject* snap_push(Snap* snap, SObject* obj) {
   if (snap->anchored_top >= snap->anchored_capacity) {
     snap->anchored_capacity *= 2;
@@ -381,6 +369,98 @@ SObject* snap_push(Snap* snap, SObject* obj) {
 void snap_pop(Snap* snap) {
   assert(snap->anchored_top > 0);
   snap->anchored_top--;
+}
+
+static bool is_tail(SnapLex* lex, int token) {
+  int count = (token == '(' ? 1 : 0);
+  const char* p = lex->p;
+  do {
+    token = snap_lex_next_token(lex);
+    if (token == '(') count++;
+    if (token == ')') count--;
+  } while (count > 0);
+  lex->p = p;
+  return token == ')';
+}
+
+static void parse(Snap* snap, SnapLex* lex) {
+}
+
+static void parse_expr(Snap* snap, SnapLex* lex) {
+  int token = snap_lex_next_token(lex);
+
+  switch (token) {
+    case ')':
+      break;
+    case TK_ID:
+      break;
+    case TK_DO:
+      break;
+    case TK_DEF:
+      break;
+    case TK_ELLIPSIS:
+      break;
+    case TK_IF:
+      break;
+    case TK_FN:
+      break;
+    case TK_LET:
+      break;
+    case TK_QUOTE:
+      break;
+    case TK_RECUR:
+      break;
+    case TK_SET:
+      break;
+    case TK_THROW:
+      break;
+    case TK_TRY:
+      break;
+    default:
+      snap_throw(snap, 0, "Expected id, special form or expr at %d", lex->line);
+      break;
+  }
+}
+
+static void parse_token(Snap* snap, SnapLex* lex, int token) {
+  switch (token) {
+    case '(':
+      parse_expr(snap, lex);
+      break;
+    case '\'':
+      break;
+    case TK_INT:
+      break;
+    case TK_FLOAT:
+      break;
+    case TK_STR:
+      break;
+    case TK_ID:
+      break;
+    case TK_TRUE:
+    case TK_FALSE:
+      break;
+    case TK_NIL:
+      break;
+    case TK_DO:
+    case TK_DEF:
+    case TK_ELLIPSIS:
+    case TK_IF:
+    case TK_FN:
+    case TK_LET:
+    case TK_QUOTE:
+    case TK_RECUR:
+    case TK_SET:
+    case TK_THROW:
+    case TK_TRY:
+      // error
+      break;
+    case TK_EOF:
+      break;
+    default:
+      snap_throw(snap, 0, "Invalid token on line %d", lex->line);
+      break;
+  }
 }
 
 static bool read_val(Snap* snap, SnapLex* lex, int token, SValue* val);
@@ -501,7 +581,7 @@ static bool read(Snap* snap, SnapLex* lex, SValue* val) {
   return read_val(snap, lex, snap_lex_next_token(lex), val);
 }
 
-static SValue* lookup(Snap* snap, const char* name) {
+static SValue* lookup(Snap* snap, SValue name) {
   SValue* res;
   SScope* scope = snap->frame->scope;
   while (scope) {
@@ -512,10 +592,10 @@ static SValue* lookup(Snap* snap, const char* name) {
   return snap_hash_get(&snap->globals, name);
 }
 
-static SValue lookup_sym(Snap* snap, SSymStr* sym) {
-  SValue* val = lookup(snap, sym->data);
+static SValue lookup_sym(Snap* snap, SValue sym) {
+  SValue* val = lookup(snap, sym);
   if (val) return *val;
-  snap_throw(snap, 0, "Unable to find symbol %s", sym->data);
+  snap_throw(snap, 0, "Unable to find symbol %s", as_sym(sym)->data);
   return create_nil();
 }
 
@@ -625,7 +705,7 @@ static SValue form_let(Snap* snap, SCons* args) {
       snap_throw(snap, 0, "Invalid let binding");
     }
     snap_hash_put(&scope->vars,
-                  as_sym(as_cons(arg->first)->first)->data,
+                  as_cons(arg->first)->first,
                   exec(snap, as_cons(as_cons(arg->first)->rest)->first));
   }
   res = exec_body(snap, as_cons(args->rest));
@@ -710,7 +790,7 @@ static SValue form_set(Snap* snap, SCons* args) {
       !is_cons(args->rest) || !as_cons(args->rest)) {
     snap_throw(snap, 0, "Invalid set!");
   }
-  val = lookup(snap, as_sym(args->first)->data);
+  val = lookup(snap, args->first);
   if (!val) {
     snap_throw(snap, 0, "Variable '%s' is not defined",
                as_sym(args->first)->data);
@@ -736,9 +816,8 @@ static SValue exec_cfunc(Snap* snap, SCFunc cfunc, SCons* args) {
 }
 
 void bind_param(Snap* snap, SScope* scope, SValue sym, SValue val) {
-  const char* name = as_sym(sym)->data;
-  if (snap_hash_put(&scope->vars, name, val)) {
-    snap_throw(snap, 0, "Duplicate parameter %s", name);
+  if (snap_hash_put(&scope->vars, sym, val)) {
+    snap_throw(snap, 0, "Duplicate parameter %s", as_sym(sym)->data);
   }
 }
 
@@ -869,7 +948,7 @@ static SValue exec(Snap* snap, SValue val) {
     case STYPE_FN:
       return val;
     case STYPE_SYM:
-      return lookup_sym(snap, as_sym(val));
+      return lookup_sym(snap, val);
     case STYPE_CONS:
       return as_cons(val) ? exec_cons(snap, as_cons(val)) : val;
     default:
@@ -952,16 +1031,17 @@ static void print_cons(SCons* cons) {
 }
 
 static void print_hash(SHash* hash) {
-  size_t i;
+  int i;
   SnapHash* table = &hash->table;
   int space = 0;
   printf("{");
   for (i = 0; i < table->capacity; ++i) {
     SEntry* entry = &table->entries[i];
-    if (entry->key) {
+    if (!is_undef(entry->key)) {
       if (space) printf(" ");
       space = 1;
-      printf("\"%s\" ", entry->key);
+      snap_print(entry->key);
+      printf(" ");
       snap_print(entry->val);
     }
   }
@@ -1057,7 +1137,7 @@ static SValue builtin_make_hash(Snap* snap, SCons* args) {
       snap_throw(snap, 0, "Hash requires string keys");
     }
     snap_hash_put(&hash->table,
-                  as_str(key)->data,
+                  key,
                   exec(snap, as_cons(cons->rest)->first));
     cons = as_cons(as_cons(cons->rest)->rest);
     pop_val(snap, key);
@@ -1077,7 +1157,7 @@ static SValue builtin_get(Snap* snap, SCons* args) {
   }
   hash = as_hash(args->first);
   val = snap_hash_get(&hash->table,
-                      as_str(as_cons(args->rest)->first)->data);
+                      as_cons(args->rest)->first);
   if (!val) {
       if (is_cons(as_cons(args->rest)->rest) &&
           as_cons(as_cons(args->rest)->rest)) {
@@ -1099,7 +1179,7 @@ static SValue builtin_put(Snap* snap, SCons* args) {
   }
   hash = as_hash(args->first);
   return create_bool(snap_hash_put(&hash->table,
-                                   as_str(as_cons(args->rest)->first)->data,
+                                   as_cons(args->rest)->first,
                                    as_cons(as_cons(args->rest)->rest)->first));
 }
 
@@ -1112,7 +1192,7 @@ static SValue builtin_del(Snap* snap, SCons* args) {
   }
   hash = as_hash(args->first);
   return create_bool(snap_hash_delete(&hash->table,
-                                      as_str(as_cons(args->rest)->first)->data));
+                                      as_cons(args->rest)->first));
 }
 
 #define builtin_binop(name, iop, fop) \

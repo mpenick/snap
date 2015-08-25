@@ -4,8 +4,34 @@
 #include "snap_hash.h"
 
 #include <setjmp.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#define check(a, e) (assert(a), (e))
+
+#define is_undef(v) ((v).type == STYPE_UNDEF)
+#define is_obj(v) ((v).type > STYPE_CFUNC)
+#define is_nil(v) ((v).type == STYPE_NIL)
+#define is_bool(v) ((v).type == STYPE_BOOL)
+#define is_int(v) ((v).type == STYPE_INT)
+#define is_float(v) ((v).type == STYPE_FLOAT)
+#define is_form(v) ((v).type == STYPE_FORM)
+#define is_cfunc(v) ((v).type == STYPE_CFUNC)
+#define is_sym(v) ((v).type == STYPE_SYM)
+#define is_str(v) ((v).type == STYPE_STR)
+#define is_err(v) ((v).type == STYPE_ERR)
+#define is_cons(v) ((v).type == STYPE_CONS)
+#define is_hash(v) ((v).type == STYPE_HASH)
+#define is_scope(v) ((v).type == STYPE_SCOPE)
+#define is_fn(v) ((v).type == STYPE_FN)
+
+#define as_sym(v) check(is_sym(v), (SSymStr*)(v).o)
+#define as_str(v) check(is_str(v), (SSymStr*)(v).o)
+#define as_err(v) check(is_err(v), (SErr*)(v).o)
+#define as_cons(v) check(is_cons(v), (SCons*)(v).o)
+#define as_hash(v) check(is_hash(v), (SHash*)(v).o)
+#define as_fn(v) check(is_fn(v), (SFn*)(v).o)
 
 #define SOBJECT_FIELDS     \
   uint8_t type;            \
@@ -67,6 +93,21 @@ typedef struct SnapFrame_ {
   struct SnapFrame_* up;
 } SnapFrame;
 
+typedef struct SnapScope_ {
+  SnapHash* variables;
+  struct SnapScope_* up;
+}  SnapScope;
+
+typedef struct SnapCodeGen_ {
+  int32_t insts;
+  SnapScope* scope;
+  SValue* constants;
+  SValue* names;
+  int num_locals;
+  int max_stack_size;
+  bool is_tail;
+} SnapCodeGen;
+
 struct Snap_ {
   SnapHash globals;
   SCons* tail;
@@ -81,7 +122,17 @@ struct Snap_ {
   SObject* all;
   SObject* gray;
   SnapFrame bottom_frame;
+  SnapCodeGen* code_gen;
 };
+
+SValue create_undef();
+SValue create_nil();
+SValue create_empty();
+SValue create_bool(bool b);
+SValue create_int(SnapInt i);
+SValue create_float(SnapFloat f);
+SValue create_cfunc(SCFunc c);
+SValue create_obj(SObject* o);
 
 SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
