@@ -32,6 +32,7 @@ typedef struct {
   const char* buf;
   size_t buf_size;
   const char* p;
+  int token;
   int line;
   char val[128];
 } SnapLex;

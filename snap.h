@@ -171,6 +171,8 @@ void snap_throw(Snap* snap, int code, const char* format, ...);
 SValue snap_exec(Snap* snap, const char* expr);
 void snap_print(SValue value);
 
+void snap_parse(Snap* snap, const char* expr);
+
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);
 

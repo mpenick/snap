@@ -8,6 +8,7 @@ int main(int argc, char** argv) {
   Snap snap;
   snap_init(&snap);
 
+#if 0
   if (argc < 2) {
     fprintf(stderr, "%s <file> <arg_1>...<arg_n>\n", argv[0]);
     exit(-1);
@@ -50,6 +51,9 @@ int main(int argc, char** argv) {
   } else {
     fprintf(stderr, "'%s' not found\n", argv[1]);
   }
+#endif
+
+  snap_parse(&snap, "(define a 1)");
 
   snap_destroy(&snap);
 

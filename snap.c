@@ -24,6 +24,7 @@ enum {
 static bool read(Snap* snap, SnapLex* lex, SValue* val);
 static SValue* lookup(Snap* snap, SValue name);
 static SValue exec(Snap* snap, SValue val);
+static void parse(Snap* snap, SnapLex* lex);
 
 static SnapCodeGen* code_gen_new();
 static void code_gen_destroy(SnapCodeGen* code_gen);
@@ -362,6 +363,15 @@ SValue snap_exec(Snap* snap, const char* expr) {
   return res;
 }
 
+void snap_parse(Snap* snap, const char* expr) {
+  SnapLex lex;
+  lex.buf = expr;
+  lex.buf_size = strlen(lex.buf);
+  lex.p = lex.buf;
+  lex.line = 0;
+  parse(snap, &lex);
+}
+
 SObject* snap_push(Snap* snap, SObject* obj) {
   if (snap->anchored_top >= snap->anchored_capacity) {
     snap->anchored_capacity *= 2;
@@ -406,6 +416,7 @@ static void parse_expr(Snap* snap, SnapLex* lex, int token);
 
 static void parse(Snap* snap, SnapLex* lex) {
   snap->code_gen = code_gen_new();
+  parse_expr(snap, lex, snap_lex_next_token(lex));
 }
 
 static int get_or_create_index(SnapHash* hash, SValue key) {
@@ -455,6 +466,10 @@ static void parse_def(Snap* snap, SnapLex* lex) {
   parse_expr(snap, lex, snap_lex_next_token(lex));
   load_or_store_var(snap, sym, false);
   snap_pop(snap);
+  token = snap_lex_next_token(lex);
+  if (token != ')') {
+    snap_throw(snap, 0, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
 }
 
 static void parse_sexpr(Snap* snap, SnapLex* lex) {

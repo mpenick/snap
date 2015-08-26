@@ -87,5 +87,7 @@ int snap_lex_next_token(SnapLex* lex) {
 
   lex->p = p;
 
+  lex->token = token;
+
   return token;
 }
