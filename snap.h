@@ -93,13 +93,23 @@ typedef struct SnapFrame_ {
   struct SnapFrame_* up;
 } SnapFrame;
 
+#define SNAP_NODE_FIELDS  \
+  struct SnapNode_* prev; \
+  struct SnapNode_* next;
+
+typedef struct SnapNode_ {
+  SNAP_NODE_FIELDS
+} SnapNode;
+
+typedef struct SnapList_ {
+  SNAP_NODE_FIELDS
+  int count;
+} SnapList;
+
 typedef struct SnapInst_ {
+  SNAP_NODE_FIELDS
   int opcode;
   int arg;
-  SSymStr* arg_name;
-  int line;
-  struct SnapInst_* prev;
-  struct SnapInst_* next;
 } SnapInst;
 
 typedef struct SnapScope_ {
@@ -108,8 +118,7 @@ typedef struct SnapScope_ {
 }  SnapScope;
 
 typedef struct SnapCodeGen_ {
-  SnapInst* insts;
-  int insts_count;
+  SnapList insts;
   SnapScope* scope;
   SnapHash constants;
   SnapHash global_names;

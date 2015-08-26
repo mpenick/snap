@@ -18,12 +18,16 @@ enum {
   BLACK
 };
 
+#define push(type, obj) (type*)snap_push(snap, (SObject*)obj)
+#define push_sym(str) push(SSymStr, str)
+
 static bool read(Snap* snap, SnapLex* lex, SValue* val);
 static SValue* lookup(Snap* snap, SValue name);
 static SValue exec(Snap* snap, SValue val);
 
 static SnapCodeGen* code_gen_new();
 static void code_gen_destroy(SnapCodeGen* code_gen);
+static void insts_append(SnapList* insts, int opcode, int arg);
 
 static void print_cons(SCons* cons);
 static void print_hash(SHash* hash);
@@ -386,11 +390,71 @@ static bool is_tail(SnapLex* lex, int token) {
   return token == ')';
 }
 
-static SValue parse(Snap* snap, SnapLex* lex) {
+enum {
+  LOAD_GLOBAL,
+  STORE_GLOBAL,
+  LOAD_LOCAL,
+  STORE_LOCAL,
+  LOAD_CONSTANT,
+};
+
+static bool is_global_scope(Snap* snap) {
+  return snap->code_gen->up == NULL;
+}
+
+static void parse_expr(Snap* snap, SnapLex* lex, int token);
+
+static void parse(Snap* snap, SnapLex* lex) {
   snap->code_gen = code_gen_new();
 }
 
+static int get_or_create_index(SnapHash* hash, SValue key) {
+  int index;
+  SValue* val = snap_hash_get(hash, key);
+  if (val) {
+    index = val->i;
+  } else {
+    index = hash->count;
+    snap_hash_put(hash, key, create_int(index));
+  }
+  return index;
+}
+
+static void load_or_store_var(Snap* snap, SSymStr* sym, bool is_load) {
+  SnapCodeGen* code_gen = snap->code_gen;
+  SnapScope* scope = code_gen->scope;
+  SValue key = create_obj((SObject*)sym);
+  int index;
+
+  while (scope) {
+    SValue* val = snap_hash_get(&scope->local_names, key);
+    if (val) {
+      insts_append(&code_gen->insts, is_load ? LOAD_LOCAL : STORE_LOCAL, val->i);
+      return;
+    }
+    scope = scope->up;
+  }
+
+  index = get_or_create_index(&code_gen->global_names, key);
+  insts_append(&code_gen->insts, is_load ? LOAD_GLOBAL : STORE_GLOBAL, index);
+}
+
+static void load_constant(Snap* snap, SValue constant) {
+  SnapCodeGen* code_gen = snap->code_gen;
+  int index = get_or_create_index(&code_gen->constants, constant);
+  insts_append(&code_gen->insts, LOAD_CONSTANT, index);
+}
+
 static void parse_def(Snap* snap, SnapLex* lex) {
+  SSymStr* sym;
+  int token = snap_lex_next_token(lex);
+  if (token != TK_ID) {
+    snap_throw(snap, 0, "Expected id for first parameter of define at %d", lex->line);
+  }
+  sym = push_sym(snap_sym_new(snap, lex->val));
+  parse_expr(snap, lex, snap_lex_next_token(lex));
+  load_or_store_var(snap, sym, false);
+  snap_pop(snap);
 }
 
 static void parse_sexpr(Snap* snap, SnapLex* lex) {
@@ -404,6 +468,7 @@ static void parse_sexpr(Snap* snap, SnapLex* lex) {
     case TK_DO:
       break;
     case TK_DEF:
+      parse_def(snap, lex);
       break;
     case TK_ELLIPSIS:
       break;
@@ -437,15 +502,19 @@ static void parse_expr(Snap* snap, SnapLex* lex, int token) {
     case '\'':
       break;
     case TK_INT:
+      load_constant(snap, create_int(atol(lex->val)));
       break;
     case TK_FLOAT:
+      load_constant(snap, create_float(atof(lex->val)));
       break;
     case TK_STR:
+      load_constant(snap, create_obj((SObject*)snap_str_new(snap, lex->val)));
       break;
     case TK_ID:
       break;
     case TK_TRUE:
     case TK_FALSE:
+      load_constant(snap, create_bool(token == TK_TRUE));
       break;
     case TK_NIL:
       break;
@@ -1262,10 +1331,51 @@ builtin_binop(div, div_iop, div_fop)
 #define mod_fop(a, b) create_float(fmod(a->first.f, b->first.f))
 builtin_binop(mod, mod_iop, mod_fop)
 
+static void list_init(SnapList* list) {
+  list->count = 0;
+  list->prev = (SnapNode*)list;
+  list->next = (SnapNode*)list;
+}
+
+static bool list_is_empty(SnapList* list) {
+  return list->next == (SnapNode*)list;
+}
+
+static void list_remove(SnapList* list, SnapNode* node) {
+  list->count--;
+  node->prev->next = node->next;
+  node->next->prev = node->prev;
+  node->next = NULL;
+  node->prev = NULL;
+}
+
+static void list_insert_after(SnapList* list, SnapNode* pos, SnapNode* node) {
+  list->count++;
+  pos->next->prev = node;
+  node->prev = pos;
+  node->next = pos->next;
+  pos->next = node;
+}
+
+static void list_insert_before(SnapList* list, SnapNode* pos, SnapNode* node) {
+  list->count++;
+  pos->prev->next = node;
+  node->next = pos;
+  node->prev = pos->prev;
+  pos->prev = node;
+}
+
+static void list_append(SnapList* list, SnapNode* node) {
+  list_insert_after(list, (SnapNode*)list, node);
+}
+
+static void list_prepend(SnapList* list, SnapNode* node) {
+  list_insert_before(list, (SnapNode*)list, node);
+}
+
 static SnapCodeGen* code_gen_new() {
   SnapCodeGen* code_gen = (SnapCodeGen*)malloc(sizeof(SnapCodeGen));
-  code_gen->insts = NULL;
-  code_gen->insts_count = 0;
+  list_init(&code_gen->insts);
   code_gen->scope = NULL;
   snap_hash_init(&code_gen->constants);
   snap_hash_init(&code_gen->global_names);
@@ -1277,15 +1387,27 @@ static SnapCodeGen* code_gen_new() {
 }
 
 static void code_gen_destroy(SnapCodeGen* code_gen) {
-  SnapInst* inst = code_gen->insts;
-  while (inst) {
-    SnapInst* temp = inst;
-    inst = inst->next;
+  SnapList* insts = &code_gen->insts;
+  while (!list_is_empty(insts)) {
+    SnapNode* temp = insts->next;
+    list_remove(insts, temp);
     free(temp);
   }
   snap_hash_destroy(&code_gen->constants);
   snap_hash_destroy(&code_gen->global_names);
   free(code_gen);
+}
+
+static SnapInst* inst_new(int opcode, int arg) {
+  SnapInst* inst = (SnapInst*)malloc(sizeof(SnapInst));
+  inst->opcode = opcode;
+  inst->arg = arg;
+  inst->next = inst->prev = NULL;
+  return inst;
+}
+
+static void insts_append(SnapList* insts, int opcode, int arg) {
+  list_append(insts, (SnapNode*)inst_new(opcode, arg));
 }
 
 void snap_init(Snap* snap) {
