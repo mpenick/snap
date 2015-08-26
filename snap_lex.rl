@@ -57,6 +57,17 @@ int snap_lex_next_token(SnapLex* lex) {
       'false' => { token = TK_FALSE; fbreak; };
       'nil' => { token = TK_NIL; fbreak; };
       '...' => { token = TK_ELLIPSIS; fbreak; };
+      '+' => { token = TK_ADD; fbreak; };
+      '-' => { token = TK_SUB; fbreak; };
+      '*' => { token = TK_MUL; fbreak; };
+      '/' => { token = TK_DIV; fbreak; };
+      '%' => { token = TK_MOD; fbreak; };
+      '<' => { token = TK_LT; fbreak; };
+      '<=' => { token = TK_LE; fbreak; };
+      '>' => { token = TK_GT; fbreak; };
+      '>=' => { token = TK_GE; fbreak; };
+      '=' => { token = TK_EQ; fbreak; };
+      'not' => { token = TK_NOT; fbreak; };
       chars => { token = *ts; fbreak; };
       integer => { token = copy_value(lex, ts, te, TK_INT); fbreak; };
       floating => { token = copy_value(lex, ts, te, TK_FLOAT); fbreak; };

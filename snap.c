@@ -22,6 +22,9 @@ static bool read(Snap* snap, SnapLex* lex, SValue* val);
 static SValue* lookup(Snap* snap, SValue name);
 static SValue exec(Snap* snap, SValue val);
 
+static SnapCodeGen* code_gen_new();
+static void code_gen_destroy(SnapCodeGen* code_gen);
+
 static void print_cons(SCons* cons);
 static void print_hash(SHash* hash);
 
@@ -383,10 +386,14 @@ static bool is_tail(SnapLex* lex, int token) {
   return token == ')';
 }
 
-static void parse(Snap* snap, SnapLex* lex) {
+static SValue parse(Snap* snap, SnapLex* lex) {
+  snap->code_gen = code_gen_new();
 }
 
-static void parse_expr(Snap* snap, SnapLex* lex) {
+static void parse_def(Snap* snap, SnapLex* lex) {
+}
+
+static void parse_sexpr(Snap* snap, SnapLex* lex) {
   int token = snap_lex_next_token(lex);
 
   switch (token) {
@@ -422,10 +429,10 @@ static void parse_expr(Snap* snap, SnapLex* lex) {
   }
 }
 
-static void parse_token(Snap* snap, SnapLex* lex, int token) {
+static void parse_expr(Snap* snap, SnapLex* lex, int token) {
   switch (token) {
     case '(':
-      parse_expr(snap, lex);
+      parse_sexpr(snap, lex);
       break;
     case '\'':
       break;
@@ -1254,6 +1261,32 @@ builtin_binop(div, div_iop, div_fop)
 #define mod_iop(a, b) create_int(a->first.i % b->first.i)
 #define mod_fop(a, b) create_float(fmod(a->first.f, b->first.f))
 builtin_binop(mod, mod_iop, mod_fop)
+
+static SnapCodeGen* code_gen_new() {
+  SnapCodeGen* code_gen = (SnapCodeGen*)malloc(sizeof(SnapCodeGen));
+  code_gen->insts = NULL;
+  code_gen->insts_count = 0;
+  code_gen->scope = NULL;
+  snap_hash_init(&code_gen->constants);
+  snap_hash_init(&code_gen->global_names);
+  code_gen->num_locals = 0;
+  code_gen->max_stack_size = 0;
+  code_gen->is_tail = false;
+  code_gen->up = NULL;
+  return code_gen;
+}
+
+static void code_gen_destroy(SnapCodeGen* code_gen) {
+  SnapInst* inst = code_gen->insts;
+  while (inst) {
+    SnapInst* temp = inst;
+    inst = inst->next;
+    free(temp);
+  }
+  snap_hash_destroy(&code_gen->constants);
+  snap_hash_destroy(&code_gen->global_names);
+  free(code_gen);
+}
 
 void snap_init(Snap* snap) {
   snap->anchored = (SObject**)malloc(32 * sizeof(SObject*));

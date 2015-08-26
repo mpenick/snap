@@ -22,8 +22,9 @@ enum {
   TK_QUOTE,
   TK_RECUR,
   TK_SET,
-  TK_THROW,
-  TK_TRY,
+  TK_THROW, TK_TRY,
+  TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
+  TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ, TK_NOT,
   TK_EOF
 };
 
