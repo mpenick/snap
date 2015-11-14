@@ -83,11 +83,8 @@ int snap_lex_next_token(SnapLex* lex) {
     write exec;
   }%%
 
-  if (token == TK_INVALID && p == eof) return TK_EOF;
-
+  lex->token =  token == TK_INVALID && p == eof ? TK_EOF : token;
   lex->p = p;
 
-  lex->token = token;
-
-  return token;
+  return lex->token;
 }

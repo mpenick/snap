@@ -7,3 +7,5 @@ snap_lex.rl
 snap_val.h
 main.c
 snap_val.c
+snap_vec.h
+snap_vec.c

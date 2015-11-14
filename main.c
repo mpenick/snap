@@ -53,7 +53,31 @@ int main(int argc, char** argv) {
   }
 #endif
 
-  snap_parse(&snap, "(define a 1)");
+  //"(define a 1)\n"
+  // "(define p (fn (x) (print x)))"
+  // "(define add (fn (x y) (+ x y)))"
+  // "(p (add (add (add 1 2) 3) 4))\n"
+
+  snap_exec(&snap,
+            "(if false "
+                "(if true (if true (print \"true\") "
+                          "(print \"false\"))"
+                  "(print \"false\")) "
+                "(print \"false\"))\n"
+            //"(define x 1)"
+            //"(if false (define x x) (define x x))"
+            //"(define r "
+            //  "(fn (x) "
+            //  "(do (print x) "
+            //    "(if (< x 100) "
+            //      "(recur (+ x 1)) nil))))"
+            //"(r 1)"
+            //"(if false "
+            //  "(do false (if false false true)) true)"
+            //"(define p (fn (x) (print x)))"
+            //"(define add (fn (x y) (+ x y)))"
+            //"(p (add (add (add 1 2) 3) 4))\n"
+            );
 
   snap_destroy(&snap);
 

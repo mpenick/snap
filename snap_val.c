@@ -63,9 +63,9 @@ int snap_hash(SValue val) {
       return hash_string((SSymStr*)val.o);
     case STYPE_ERR:
     case STYPE_CONS:
-    case STYPE_HASH:
     case STYPE_SCOPE:
-    case STYPE_FN:
+    case STYPE_CODE:
+    case STYPE_CODE_GEN:
       return hash_pointer((void*)val.o);
   }
   return 0;
@@ -94,9 +94,7 @@ int snap_compare(SValue val1, SValue val2) {
       return compare_string((SSymStr*)val1.o, (SSymStr*)val2.o);
     case STYPE_ERR:
     case STYPE_CONS:
-    case STYPE_HASH:
     case STYPE_SCOPE:
-    case STYPE_FN:
       return snap_compare_(val1.o, val2.o);
   }
   return 0;

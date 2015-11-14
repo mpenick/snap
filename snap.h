@@ -2,6 +2,7 @@
 #define SNAP_H
 
 #include "snap_hash.h"
+#include "snap_vec.h"
 
 #include <setjmp.h>
 #include <stdbool.h>
@@ -11,13 +12,18 @@
 #define check(a, e) (assert(a), (e))
 
 #define is_undef(v) ((v).type == STYPE_UNDEF)
+#define is_undef_p(v) ((v)->type == STYPE_UNDEF)
 #define is_obj(v) ((v).type > STYPE_CFUNC)
 #define is_nil(v) ((v).type == STYPE_NIL)
 #define is_bool(v) ((v).type == STYPE_BOOL)
+#define is_bool_p(v) ((v)->type == STYPE_BOOL)
 #define is_int(v) ((v).type == STYPE_INT)
+#define is_int_p(v) ((v)->type == STYPE_INT)
 #define is_float(v) ((v).type == STYPE_FLOAT)
+#define is_float_p(v) ((v)->type == STYPE_FLOAT)
 #define is_form(v) ((v).type == STYPE_FORM)
 #define is_cfunc(v) ((v).type == STYPE_CFUNC)
+#define is_cfunc_p(v) ((v)->type == STYPE_CFUNC)
 #define is_sym(v) ((v).type == STYPE_SYM)
 #define is_str(v) ((v).type == STYPE_STR)
 #define is_err(v) ((v).type == STYPE_ERR)
@@ -25,19 +31,28 @@
 #define is_hash(v) ((v).type == STYPE_HASH)
 #define is_scope(v) ((v).type == STYPE_SCOPE)
 #define is_fn(v) ((v).type == STYPE_FN)
+#define is_inst(v) ((v).type == STYPE_INST)
+#define is_code(v) ((v).type == STYPE_CODE)
+#define is_code_p(v) ((v)->type == STYPE_CODE)
 
 #define as_sym(v) check(is_sym(v), (SSymStr*)(v).o)
 #define as_str(v) check(is_str(v), (SSymStr*)(v).o)
 #define as_err(v) check(is_err(v), (SErr*)(v).o)
 #define as_cons(v) check(is_cons(v), (SCons*)(v).o)
-#define as_hash(v) check(is_hash(v), (SHash*)(v).o)
+#define as_code(v) check(is_code(v), (SCode*)(v).o)
+#define as_inst(v) check(is_inst(v), (SInst*)(v).o)
 #define as_fn(v) check(is_fn(v), (SFn*)(v).o)
 
-#define SOBJECT_FIELDS     \
-  uint8_t type;            \
-  uint8_t mark;            \
-  struct SObject_* next;   \
-  struct SObject_* gc_next;
+typedef struct SnapNode_ {
+  struct SnapNode_* prev;
+  struct SnapNode_* next;
+} SnapNode;
+
+#define SOBJECT_FIELDS          \
+  uint8_t type;                 \
+  uint8_t mark;                 \
+  struct SObject_* gc_next;     \
+  struct SObject_* gc_gray_next;
 
 struct SObject_ {
   SOBJECT_FIELDS
@@ -62,87 +77,84 @@ struct SCons_ {
   SValue rest;
 };
 
+typedef struct SArr_ {
+  SOBJECT_FIELDS
+  size_t len;
+  SValue data[0];
+} SArr;
+
 typedef struct {
   SOBJECT_FIELDS
   SnapHash table;
 } SHash;
 
+typedef struct SnapJumpArg_ {
+  int dir;
+  SnapNode* dest;
+} SnapJumpArg;
+
+typedef struct SInst_ {
+  SOBJECT_FIELDS
+  SnapNode list;
+  int opcode;
+  union {
+    int arg;
+    SnapJumpArg jump_arg;
+  };
+} SInst;
+
 typedef struct SScope_ {
   SOBJECT_FIELDS
-  SnapHash vars;
-  SCons* cons;
-  struct SScope_* up;
-} SScope;
-
-typedef struct {
-  SOBJECT_FIELDS
-  int n;
-  SSymStr* name;
-  SScope* scope;
-  SCons* params;
-  SCons* body;
-} SFn;
-
-typedef struct SnapTry_ {
-  jmp_buf buf;
-  struct SnapTry_* up;
-} SnapTry;
-
-typedef struct SnapFrame_ {
-  SScope* scope;
-  struct SnapFrame_* up;
-} SnapFrame;
-
-#define SNAP_NODE_FIELDS  \
-  struct SnapNode_* prev; \
-  struct SnapNode_* next;
-
-typedef struct SnapNode_ {
-  SNAP_NODE_FIELDS
-} SnapNode;
-
-typedef struct SnapList_ {
-  SNAP_NODE_FIELDS
-  int count;
-} SnapList;
-
-typedef struct SnapInst_ {
-  SNAP_NODE_FIELDS
-  int opcode;
-  int arg;
-} SnapInst;
-
-typedef struct SnapScope_ {
   SnapHash local_names;
-  struct SnapScope_* up;
-}  SnapScope;
+  struct SScope_* up;
+}  SScope;
 
-typedef struct SnapCodeGen_ {
-  SnapList insts;
-  SnapScope* scope;
+typedef struct SCodeGen_ {
+  SOBJECT_FIELDS
+  SnapNode insts;
+  int insts_count;
+  SScope* scope;
   SnapHash constants;
   SnapHash global_names;
+  SnapVec param_names;
+  int num_locals;
+  bool is_tail;
+  struct SCodeGen_* up;
+} SCodeGen;
+
+typedef struct SCode_ {
+  SOBJECT_FIELDS
+  int* insts;
+  SArr* global_names;
+  SArr* constants;
   int num_locals;
   int max_stack_size;
-  bool is_tail;
-  struct SnapCodeGen_* up;
-} SnapCodeGen;
+  int insts_count;
+} SCode;
+
+typedef struct SnapFrame_ {
+  int* pc;
+  SCode* code;
+  SValue* stack_base;
+  SValue* stack_top;
+} SnapFrame;
 
 struct Snap_ {
   SnapHash globals;
-  SCons* tail;
+  SValue* stack;
+  SValue* stack_end;
+  int stack_size;
+  SnapFrame* frames;
+  int frames_top;
+  int frames_size;
   SObject** anchored;
   int anchored_capacity;
   int anchored_top;
-  SnapFrame* frame;
-  SnapTry* trying;
   SErr* cause;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;
   SObject* gray;
-  SnapFrame bottom_frame;
-  SnapCodeGen* code_gen;
 };
 
 SValue create_undef();
@@ -158,14 +170,14 @@ SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
 SErr* snap_err_new(Snap* snap, int code, const char* msg);
 SCons* snap_cons_new(Snap* snap);
-SHash* snap_hash_new(Snap* snap);
-SScope* snap_scope_new(Snap* snap);
-SFn* snap_fn_new(Snap* snap, int n, SCons* params, SCons* body);
+SInst* snap_inst_new(Snap* snap, int opcode);
+SScope* snap_scope_new(Snap* snap, SScope* up);
+SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up);
 
-SObject* snap_push(Snap* snap, SObject* obj);
-void snap_pop(Snap* snap);
+SObject* snap_anchor(Snap* snap, SObject* obj);
+void snap_release(Snap* snap);
 
-void snap_def(Snap* snap, const char* name, SValue val);
+void snap_define(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
 void snap_throw(Snap* snap, int code, const char* format, ...);
 SValue snap_exec(Snap* snap, const char* expr);
