@@ -58,27 +58,54 @@ int main(int argc, char** argv) {
   // "(define add (fn (x y) (+ x y)))"
   // "(p (add (add (add 1 2) 3) 4))\n"
 
-  snap_exec(&snap,
-            "(if false "
-                "(if true (if true (print \"true\") "
-                          "(print \"false\"))"
-                  "(print \"false\")) "
-                "(print \"false\"))\n"
-            //"(define x 1)"
-            //"(if false (define x x) (define x x))"
-            //"(define r "
-            //  "(fn (x) "
-            //  "(do (print x) "
-            //    "(if (< x 100) "
-            //      "(recur (+ x 1)) nil))))"
-            //"(r 1)"
-            //"(if false "
-            //  "(do false (if false false true)) true)"
-            //"(define p (fn (x) (print x)))"
-            //"(define add (fn (x y) (+ x y)))"
-            //"(p (add (add (add 1 2) 3) 4))\n"
-            );
+  snap_print(
+        snap_exec(&snap,
+                  "(set! x 1)"
+                  //"(< 1 2 3)"
 
+                  //"(try "
+                  //  "(println \"hello\")"
+                  //  "(raise :error3 \"raised an error\")"
+                  //"(catch :error1 [type val] (println type val))"
+                  //"(catch :error2 [type val] (println type val))"
+                  //"(catch [type val] (println type val)))"
+
+                  //"(define func1 (fn () (raise :error2 1 2 3)))\n"
+                  //"(define func2 (fn () (do (println \"here\") (func1))))\n"
+                  //"(try "
+                  //"(func2)"
+                  //"(do (println \"success\") 0)"
+                  //"(catch :error1 (fn (x) (raise x)))"
+                  //"(catch :error2 (fn (x) (do (println x) 2))))"
+                  //"(try "
+                  //  //"(raise :error1 \"something happened\")"
+                  //  "(raise \"something happened\")"
+                  //  "(do (println \"success\") 0)"
+                  //  "(catch :error1 (fn (x) (do (println x) 1)))"
+                  //  "(catch :error2 (fn (x) (do (println x) 2))))"
+
+                  //"(if false "
+                  //    "(if true (if true (print \"true\") "
+                  //              "(print \"false\"))"
+                  //      "(print \"false\")) "
+                  //    "(print \"false\"))\n"
+                  //"(define x 1)"
+                  //"(if false (define x x) (define x x))"
+
+                  //"(define r "
+                  //  "(fn (x) "
+                  //  "(do (println x) "
+                  //    "(if (< x 10) "
+                  //      "(recur (+ x 1)) nil))))"
+                  //"(r 1)"
+
+                  //"(if false "
+                  //  "(do false (if false false true)) true)"
+                  //"(define p (fn (x) (print x)))"
+                  //"(define add (fn (x y) (+ x y)))"
+                  //"(p (add (add (add 1 2) 3) 4))\n"
+                  ));
+  printf("\n");
   snap_destroy(&snap);
 
   return 0;

@@ -21,5 +21,6 @@ void snap_hash_destroy(SnapHash* hash);
 bool snap_hash_put(SnapHash* hash, SValue key, SValue val);
 bool snap_hash_delete(SnapHash* hash, SValue key);
 SValue* snap_hash_get(SnapHash* hash, SValue key);
+SValue* snap_hash_get_str(SnapHash* hash, const char* str, size_t len);
 
 #endif

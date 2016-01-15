@@ -25,8 +25,13 @@
 #define is_cfunc(v) ((v).type == STYPE_CFUNC)
 #define is_cfunc_p(v) ((v)->type == STYPE_CFUNC)
 #define is_sym(v) ((v).type == STYPE_SYM)
+#define is_sym_p(v) ((v)->type == STYPE_SYM)
 #define is_str(v) ((v).type == STYPE_STR)
+#define is_str_p(v) ((v)->type == STYPE_STR)
+#define is_key(v) ((v).type == STYPE_KEY)
+#define is_key_p(v) ((v)->type == STYPE_KEY)
 #define is_err(v) ((v).type == STYPE_ERR)
+#define is_err_p(v) ((v)->type == STYPE_ERR)
 #define is_cons(v) ((v).type == STYPE_CONS)
 #define is_hash(v) ((v).type == STYPE_HASH)
 #define is_scope(v) ((v).type == STYPE_SCOPE)
@@ -35,13 +40,20 @@
 #define is_code(v) ((v).type == STYPE_CODE)
 #define is_code_p(v) ((v)->type == STYPE_CODE)
 
-#define as_sym(v) check(is_sym(v), (SSymStr*)(v).o)
 #define as_str(v) check(is_str(v), (SSymStr*)(v).o)
+#define as_str_p(v) check(is_str_p(v), (SSymStr*)(v)->o)
+#define as_sym(v) check(is_sym(v), (SSymStr*)(v).o)
+#define as_sym_p(v) check(is_sym_p(v), (SSymStr*)(v)->o)
+#define as_key(v) check(is_key(v), (SKeyword*)(v).o)
+#define as_key_p(v) check(is_key_p(v), (SKeyword*)(v)->o)
 #define as_err(v) check(is_err(v), (SErr*)(v).o)
+#define as_err_p(v) check(is_err_p(v), (SErr*)(v)->o)
 #define as_cons(v) check(is_cons(v), (SCons*)(v).o)
 #define as_code(v) check(is_code(v), (SCode*)(v).o)
 #define as_inst(v) check(is_inst(v), (SInst*)(v).o)
 #define as_fn(v) check(is_fn(v), (SFn*)(v).o)
+
+#define SNAP_MAX_BLOCKS 16
 
 typedef struct SnapNode_ {
   struct SnapNode_* prev;
@@ -58,35 +70,36 @@ struct SObject_ {
   SOBJECT_FIELDS
 };
 
-typedef struct {
+typedef struct SSymStr_ {
   SOBJECT_FIELDS
   size_t len;
   char data[0];
 } SSymStr;
 
+typedef struct SKeyword_ {
+  SOBJECT_FIELDS
+  int id;
+  size_t len;
+  char data[0];
+} SKeyword;
+
 typedef struct SErr_ {
   SOBJECT_FIELDS
-  int code;
-  SSymStr* msg;
-  struct SErr_* inner;
+  SKeyword* err;
+  SValue msg;
 } SErr;
 
-struct SCons_ {
+typedef struct SCons_ {
   SOBJECT_FIELDS
   SValue first;
   SValue rest;
-};
+} SCons;
 
 typedef struct SArr_ {
   SOBJECT_FIELDS
   size_t len;
   SValue data[0];
 } SArr;
-
-typedef struct {
-  SOBJECT_FIELDS
-  SnapHash table;
-} SHash;
 
 typedef struct SnapJumpArg_ {
   int dir;
@@ -118,6 +131,7 @@ typedef struct SCodeGen_ {
   SnapHash global_names;
   SnapVec param_names;
   int num_locals;
+  int num_results;
   bool is_tail;
   struct SCodeGen_* up;
 } SCodeGen;
@@ -132,15 +146,23 @@ typedef struct SCode_ {
   int insts_count;
 } SCode;
 
+typedef struct SnapBlock_ {
+  int insts_offset;
+  int stack_offset;
+} SnapBlock;
+
 typedef struct SnapFrame_ {
   int* pc;
   SCode* code;
   SValue* stack_base;
   SValue* stack_top;
+  SnapBlock blocks[SNAP_MAX_BLOCKS];
+  int blocks_top;
 } SnapFrame;
 
 struct Snap_ {
   SnapHash globals;
+  SnapHash keywords;
   SValue* stack;
   SValue* stack_end;
   int stack_size;
@@ -150,11 +172,12 @@ struct Snap_ {
   SObject** anchored;
   int anchored_capacity;
   int anchored_top;
-  SErr* cause;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;
   SObject* gray;
+  SErr* cause;
+  jmp_buf jmp;
 };
 
 SValue create_undef();
@@ -168,7 +191,8 @@ SValue create_obj(SObject* o);
 
 SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
-SErr* snap_err_new(Snap* snap, int code, const char* msg);
+SErr* snap_err_new(Snap* snap, SKeyword* err, SValue msg);
+SErr* snap_err_new_str(Snap* snap, const char* code, const char* msg);
 SCons* snap_cons_new(Snap* snap);
 SInst* snap_inst_new(Snap* snap, int opcode);
 SScope* snap_scope_new(Snap* snap, SScope* up);
@@ -179,11 +203,8 @@ void snap_release(Snap* snap);
 
 void snap_define(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
-void snap_throw(Snap* snap, int code, const char* format, ...);
 SValue snap_exec(Snap* snap, const char* expr);
 void snap_print(SValue value);
-
-void snap_parse(Snap* snap, const char* expr);
 
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);

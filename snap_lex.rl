@@ -37,6 +37,7 @@ int snap_lex_next_token(SnapLex* lex) {
     comment = ";" [^\r\n]*;
     nl = '\r\n' | '\n';
     id = (alnum | [_\+\-\*\?/=,<>!])+;
+    key = ':' id ;
     chars = '\'' | '(' | ')' | '[' | ']' | '{' | '}';
     integer = [\+\-]? digit+;
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
@@ -51,8 +52,9 @@ int snap_lex_next_token(SnapLex* lex) {
       'quote' => { token = TK_QUOTE; fbreak; };
       'recur' => { token = TK_RECUR; fbreak; };
       'set!' => { token = TK_SET; fbreak; };
-      'throw' => { token = TK_THROW; fbreak; };
+      'raise' => { token = TK_RAISE; fbreak; };
       'try' => { token = TK_TRY; fbreak; };
+      'catch' => { token = TK_CATCH; fbreak; };
       'true' => { token = TK_TRUE; fbreak; };
       'false' => { token = TK_FALSE; fbreak; };
       'nil' => { token = TK_NIL; fbreak; };
@@ -73,6 +75,7 @@ int snap_lex_next_token(SnapLex* lex) {
       floating => { token = copy_value(lex, ts, te, TK_FLOAT); fbreak; };
       string => { token = copy_value(lex, ts + 1, te - 1, TK_STR); fbreak; };
       id => { token = copy_value(lex, ts, te, TK_ID); fbreak; };
+      key => { token = copy_value(lex, ts + 1, te, TK_KEY); fbreak; };
       nl => { lex->line++; };
       ws => { /* Skip */ };
       comment => { /* Skip */ };
@@ -83,8 +86,8 @@ int snap_lex_next_token(SnapLex* lex) {
     write exec;
   }%%
 
-  lex->token =  token == TK_INVALID && p == eof ? TK_EOF : token;
+  token = token == TK_INVALID && p == eof ? TK_EOF : token;
   lex->p = p;
 
-  return lex->token;
+  return token;
 }

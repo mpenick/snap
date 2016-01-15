@@ -24,12 +24,12 @@ enum {
   STYPE_INST     = 12,
   STYPE_SCOPE    = 13,
   STYPE_CODE_GEN = 14,
-  STYPE_CODE     = 15
+  STYPE_CODE     = 15,
+  STYPE_KEY      = 16
 };
 
 typedef struct Snap_ Snap;
 typedef struct SObject_ SObject;
-typedef struct SCons_ SCons;
 
 typedef struct SValue_ {
   uint8_t type;
@@ -38,14 +38,15 @@ typedef struct SValue_ {
     SnapInt i;
     SnapFloat f;
     SObject* o;
-    struct SValue_ (*c)(Snap* snap, const struct SValue_* args, int num_args);
+    void (*c)(Snap* snap, const struct SValue_* args, int num_args, struct SValue_* result);
   };
 } SValue;
 
-typedef SValue (*SCFunc)(Snap* snap, const SValue* args, int num_args);
+typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
 
-int snap_hash(SValue val);
-int snap_compare(SValue val1, SValue val2);
+int snap_hash(SValue* val);
+int snap_hash_str(const char* str, size_t len);
+int snap_compare(SValue* val1, SValue* val2);
 
 #endif
 
