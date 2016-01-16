@@ -1085,7 +1085,7 @@ static void parse_fn(Snap* snap, SnapLex* lex, SCodeGen* up) {
   SCodeGen* code_gen = snap_code_gen_new(snap, up);
   code_gen->scope = snap_scope_new(snap, NULL);
   token = snap_lex_next_token(lex);
-  if (token != '(') {
+  if (token != '[') {
     parse_err(snap, "Expected parameter list at %d", lex->line);
   }
   token = snap_lex_next_token(lex);
@@ -1095,8 +1095,8 @@ static void parse_fn(Snap* snap, SnapLex* lex, SCodeGen* up) {
     add_local(snap, code_gen, sym);
     token = snap_lex_next_token(lex);
   }
-  if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  if (token != ']') {
+    parse_err(snap, "Expected ']' to terminate parameter list at %d", lex->line);
   }
   token = parse_expr_list(snap, lex, code_gen);
   if (token != ')') {

@@ -60,7 +60,7 @@ int main(int argc, char** argv) {
 
   snap_print(
         snap_exec(&snap,
-                  "(set! x 1)"
+                  //"(set! x 1)"
                   //"(< 1 2 3)"
 
                   //"(try "
@@ -92,12 +92,12 @@ int main(int argc, char** argv) {
                   //"(define x 1)"
                   //"(if false (define x x) (define x x))"
 
-                  //"(define r "
-                  //  "(fn (x) "
-                  //  "(do (println x) "
-                  //    "(if (< x 10) "
-                  //      "(recur (+ x 1)) nil))))"
-                  //"(r 1)"
+                  "(define r "
+                    "(fn [x] "
+                    "(do (println x) "
+                      "(if (< x 10) "
+                        "(recur (+ x 1)) nil))))"
+                  "(r 1)"
 
                   //"(if false "
                   //  "(do false (if false false true)) true)"
