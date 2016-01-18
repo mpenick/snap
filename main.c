@@ -60,8 +60,9 @@ int main(int argc, char** argv) {
 
   snap_print(
         snap_exec(&snap,
+                  //"(define x 1)"
                   //"(set! x 1)"
-                  //"(< 1 2 3)"
+                  //"(< 1 2 3 4)"
 
                   //"(try "
                   //  "(println \"hello\")"
@@ -89,21 +90,21 @@ int main(int argc, char** argv) {
                   //              "(print \"false\"))"
                   //      "(print \"false\")) "
                   //    "(print \"false\"))\n"
-                  //"(define x 1)"
                   //"(if false (define x x) (define x x))"
 
-                  "(define r "
-                    "(fn [x] "
-                    "(do (println x) "
-                      "(if (< x 10) "
-                        "(recur (+ x 1)) nil))))"
-                  "(r 1)"
+                  //"(define r "
+                  //  "(fn [x] "
+                  //  "(do (println x) "
+                  //    "(if (< x 10) "
+                  //      "(recur (+ x 1)) nil))))"
+                  //"(r 1)"
 
                   //"(if false "
-                  //  "(do false (if false false true)) true)"
-                  //"(define p (fn (x) (print x)))"
-                  //"(define add (fn (x y) (+ x y)))"
-                  //"(p (add (add (add 1 2) 3) 4))\n"
+                  //  "(do true (if false false true)) true)"
+
+                  "(define p (fn [x] (println x)))"
+                  "(define add (fn [x y] (+ x y)))"
+                  "(p (add (add (add 1 2) 3) 4))\n"
                   ));
   printf("\n");
   snap_destroy(&snap);

@@ -15,6 +15,7 @@
 #define is_undef_p(v) ((v)->type == STYPE_UNDEF)
 #define is_obj(v) ((v).type > STYPE_CFUNC)
 #define is_nil(v) ((v).type == STYPE_NIL)
+#define is_arr(v) ((v).type == STYPE_ARR)
 #define is_bool(v) ((v).type == STYPE_BOOL)
 #define is_bool_p(v) ((v)->type == STYPE_BOOL)
 #define is_int(v) ((v).type == STYPE_INT)
@@ -40,6 +41,7 @@
 #define is_code(v) ((v).type == STYPE_CODE)
 #define is_code_p(v) ((v)->type == STYPE_CODE)
 
+#define as_arr(v) check(is_arr(v), (SArr*)(v).o)
 #define as_str(v) check(is_str(v), (SSymStr*)(v).o)
 #define as_str_p(v) check(is_str_p(v), (SSymStr*)(v)->o)
 #define as_sym(v) check(is_sym(v), (SSymStr*)(v).o)
@@ -203,7 +205,7 @@ void snap_release(Snap* snap);
 
 void snap_define(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
-SValue snap_exec(Snap* snap, const char* expr);
+SValue snap_exec(Snap* snap, const char* str);
 void snap_print(SValue value);
 
 void snap_init(Snap* snap);

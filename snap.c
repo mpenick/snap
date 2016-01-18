@@ -66,9 +66,13 @@ enum {
 #define anchor_sym(sym) anchor(SSymStr, sym)
 #define anchor_str(str) anchor(SSymStr, str)
 #define anchor_key(key) anchor(SKeyword, key)
+#define anchor_cons(cons) anchor(SCons, cons)
+#define anchor_code(code) anchor(SCode, code)
+#define anchor_code_gen(code_gen) anchor(SCodeGen, code_gen)
 
 static SValue exec(Snap* snap);
-static SCode* parse(Snap* snap, SnapLex* lex);
+static void compile(Snap* snap, SCodeGen* code_gen, SValue value);
+static bool parse(Snap* snap, SnapLex* lex, SValue *result);
 
 static void list_init(SnapNode* list);
 static void list_append(SnapNode* list, SnapNode* node);
@@ -83,6 +87,7 @@ static void insts_dump(SnapNode* insts);
 static void print_val(SValue val, int indent);
 static void print_code(SCode* code, int indent);
 static void print_cons(SCons* cons, int indent);
+static void print_arr(SArr* arr, int indent);
 
 static void jump_arg_init(SnapJumpArg* jump_arg, int dir, SnapNode* dest) {
   jump_arg->dir = dir;
@@ -141,6 +146,13 @@ SValue create_int(SnapInt i) {
   return val;
 }
 
+SValue create_form(SnapInt i) {
+  SValue val;
+  val.type = STYPE_FORM;
+  val.i = i;
+  return val;
+}
+
 SValue create_float(SnapFloat f) {
   SValue val;
   val.type = STYPE_FLOAT;
@@ -155,12 +167,14 @@ SValue create_cfunc(SCFunc c) {
   return val;
 }
 
-SValue create_obj(SObject* o) {
+SValue create_object(SObject* o) {
   SValue val;
   val.type = o->type;
   val.o = o;
   return val;
 }
+
+#define create_obj(o) create_object((SObject*)o)
 
 static void gc_free(Snap* snap, SObject* obj) {
   //printf("free %p\n", obj);
@@ -367,7 +381,7 @@ SKeyword* snap_key_new(Snap* snap, const char* name) {
     k->len = len;
     strcpy(k->data, name);
     k->id = snap->keywords.count;
-    snap_hash_put(&snap->keywords, create_obj((SObject*)k), create_obj((SObject*)k));
+    snap_hash_put(&snap->keywords, create_obj(k), create_obj(k));
     return k;
   }
 }
@@ -382,7 +396,7 @@ SErr* snap_err_new(Snap* snap, SKeyword* err, SValue msg) {
 SErr* snap_err_new_str(Snap* snap, const char* err, const char* msg) {
   SSymStr* s = anchor_str(snap_str_new(snap, msg));
   SKeyword* k = snap_key_new(snap, err);
-  SErr* e = snap_err_new(snap, k, create_obj((SObject*)s));
+  SErr* e = snap_err_new(snap, k, create_obj(s));
   snap_release(snap);
   return e;
 }
@@ -516,22 +530,12 @@ SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
 }
 
 void snap_define(Snap* snap, const char* name, SValue val) {
-  SValue key = create_obj((SObject*)snap_sym_new(snap, name));
+  SValue key = create_obj(snap_sym_new(snap, name));
   snap_hash_put(&snap->globals, key, val);
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
   snap_define(snap, name, create_cfunc(cfunc));
-}
-
-void parse_err(Snap* snap, const char* format, ...) {
-  char msg[256];
-  va_list args;
-  va_start(args, format);
-  vsnprintf(msg, sizeof(msg), format, args);
-  va_end(args);
-  snap->cause = snap_err_new_str(snap, "parse_error", msg);
-  longjmp(snap->jmp, 1);
 }
 
 // Stack layout
@@ -791,25 +795,47 @@ raise:
     goto new_frame;
   }
 
-  return create_obj((SObject*)snap_err_new(snap,
-                                           (SKeyword*)(stack - 1)->o,
-                                           *(stack - 2)));
+  return create_obj(snap_err_new(snap,
+                                 (SKeyword*)(stack - 1)->o,
+                                 *(stack - 2)));
 }
 
-SValue snap_exec(Snap* snap, const char* expr) {
+SValue snap_exec(Snap* snap, const char* str) {
   SnapLex lex;
-  lex.buf = expr;
+  SValue expr, result;
+  SCodeGen* code_gen;
+  SCode* code;
+  bool first = true;
+
+  lex.buf = str;
   lex.buf_size = strlen(lex.buf);
   lex.p = lex.buf;
   lex.line = 1;
-  if (setjmp(snap->jmp) > 0) {
-    return create_obj((SObject*)snap->cause);
-  } else {
-    SCode* code = parse(snap, &lex);
-    print_code(code, 0);
-    push_frame(snap, code, snap->stack);
-    return exec(snap);
+
+  code_gen = anchor_code_gen(snap_code_gen_new(snap, NULL));
+  while (parse(snap, &lex, &expr)) {
+    snap_print(expr);
+    printf("\n");
+    if (!first)  insts_append(snap, code_gen, POP);
+    first = false;
+    compile(snap, code_gen, expr);
   }
+  insts_append(snap, code_gen, RETURN);
+
+  if (expr.type == STYPE_ERR) {
+    result = expr;
+    goto err;
+  }
+
+  code = anchor_code(snap_code_new(snap, code_gen));
+  print_code(code, 0);
+  push_frame(snap, code, snap->stack);
+  result = exec(snap);
+  snap_release(snap);
+
+err:
+  snap_release(snap);
+  return result;
 }
 
 SObject* snap_anchor(Snap* snap, SObject* obj) {
@@ -840,22 +866,403 @@ static bool is_tail(SnapLex* lex, int token) {
   return token == ')';
 }
 
-static void parse_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token);
-static int parse_expr_list(Snap* snap, SnapLex* lex, SCodeGen* code_gen);
-static void parse_sexpr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token);
+static void compile_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token);
+static int compile_expr_list(Snap* snap, SCodeGen* code_gen, SCons* sexpr);
+static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr);
 
-static SCode* parse(Snap* snap, SnapLex* lex) {
+static void raise(Snap* snap, const char* format, ...) {
+  char msg[256];
+  va_list args;
+  va_start(args, format);
+  vsnprintf(msg, sizeof(msg), format, args);
+  va_end(args);
+  snap->cause = snap_err_new_str(snap, "parse_error", msg);
+  longjmp(snap->jmp, 1);
+}
+
+static SValue parse_expr(Snap* snap, SnapLex* lex, int token);
+static SValue parse_sexpr(Snap* snap, SnapLex* lex, int token);
+
+static int parse_expr_list(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  int token;
+  int count = 0;
+  SCons** curr = (SCons**)&sexpr->rest.o;
+  while ((token = snap_lex_next_token(lex)) != ')') {
+    (*curr) = snap_cons_new(snap);
+    (*curr)->first = parse_expr(snap, lex, token);
+    curr = (SCons**)&(*curr)->rest.o;
+    count++;
+  }
+  if (token != ')') {
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
+  return count;
+}
+
+static int parse_cons(Snap* snap, SnapLex* lex, int token, SCons* sexpr) {
+  sexpr->first = create_form(token);
+  return parse_expr_list(snap, lex, sexpr);
+}
+
+static void parse_call(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  int token;
+  sexpr->first = create_obj(snap_sym_new(snap, lex->val));
+  parse_expr_list(snap, lex, sexpr);
+}
+
+static void parse_def(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  sexpr->first = create_form(TK_DEF);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+  if (snap_lex_next_token(lex) != TK_ID) {
+    raise(snap, "Expected id for first argument of define at %d", lex->line);
+  }
+  sexpr->first = create_obj(snap_sym_new(snap, lex->val));
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+  sexpr->first = parse_expr(snap, lex, snap_lex_next_token(lex));
+  if (snap_lex_next_token(lex) != ')') {
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
+}
+
+static void parse_if(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  sexpr->first = create_form(TK_IF);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  sexpr->first = parse_expr(snap, lex, snap_lex_next_token(lex));
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  /* true */
+  sexpr->first = parse_expr(snap, lex, snap_lex_next_token(lex));
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  /* false */
+  sexpr->first = parse_expr(snap, lex, snap_lex_next_token(lex));
+
+  if (snap_lex_next_token(lex) != ')') {
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
+}
+
+static void parse_fn(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  int token;
+  int i, len = 0;
+  const char* p;
+  SArr* arr;
+
+  sexpr->first = create_form(TK_FN);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  if (snap_lex_next_token(lex) != '[') {
+    raise(snap, "Expected parameter list at %d", lex->line);
+  }
+
+  p = lex->p;
+  while ((token = snap_lex_next_token(lex)) == TK_ID) {
+    len++;
+  }
+  if (token != ']') {
+    raise(snap, "Expected ']' to terminate parameter list at %d", lex->line);
+  }
+  lex->p = p;
+
+  arr = snap_arr_new(snap, len);
+  sexpr->first = create_obj(arr);
+
+  for (i = 0; i < len; ++i) {
+    snap_lex_next_token(lex);
+    arr->data[i] = create_obj(snap_sym_new(snap, lex->val));
+  }
+  snap_lex_next_token(lex);
+
+  parse_expr_list(snap, lex, sexpr);
+}
+
+static void parse_let(Snap* snap, SnapLex* lex, SCons* sexpr) {
+}
+
+static void parse_quote(Snap* snap, SnapLex* lex, SCons* sexpr) {
+}
+
+static void parse_set(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  sexpr->first = create_form(TK_SET);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+  if (snap_lex_next_token(lex) != TK_ID) {
+    raise(snap, "Expected id for first argument of set! at %d", lex->line);
+  }
+  sexpr->first = create_obj(snap_sym_new(snap, lex->val));
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+  sexpr->first = parse_expr(snap, lex, snap_lex_next_token(lex));
+  if (snap_lex_next_token(lex) != ')') {
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
+}
+
+static void parse_raise(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  int token;
+
+  sexpr->first = create_form(TK_RAISE);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  if ((token = snap_lex_next_token(lex)) == TK_KEY) {
+    sexpr->first = create_obj(snap_key_new(snap, lex->val));
+  } else {
+    sexpr->first = create_obj(snap_key_new(snap, "error"));
+  }
+
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  if ((token = snap_lex_next_token(lex)) != ')') {
+    sexpr->first = parse_expr(snap, lex, token);
+  } else {
+    sexpr->first = create_nil();
+  }
+
+  if (snap_lex_next_token(lex) != ')') {
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
+}
+
+static bool parse_catch(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  int token;
+  int i, len = 0;
+  const char* p;
+  SArr* arr;
+  bool final_catch = false;
+
+  sexpr->first = create_form(TK_CATCH);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  if ((token = snap_lex_next_token(lex)) == TK_KEY) {
+    sexpr->first = create_obj(snap_key_new(snap, lex->val));
+    sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+    token = snap_lex_next_token(lex);
+  } else {
+    final_catch = true;
+  }
+
+  if (token != '[') {
+    raise(snap, "Expected '[' to for catch arguments at %d", lex->line);
+  }
+
+  p = lex->p;
+  while ((token = snap_lex_next_token(lex)) != ']') {
+    if (token != TK_ID) {
+      raise(snap, "Expected ids for catch arguments at %d", lex->line);
+    }
+    len++;
+  }
+  if (token != ']') {
+    raise(snap, "Expected ']' to terminate catch arguments at %d", lex->line);
+  }
+  lex->p = p;
+
+  if (len > 2) {
+    raise(snap, "Invalid number of catch argument (0 - 2) %d", lex->line);
+  }
+
+  arr = snap_arr_new(snap, len);
+  sexpr->first = create_obj(arr);
+
+  for (i = 0; i < len; ++i) {
+    snap_lex_next_token(lex);
+    arr->data[i] = create_obj(snap_sym_new(snap, lex->val));
+  }
+  snap_lex_next_token(lex);
+
+  parse_expr_list(snap, lex, sexpr);
+
+  return final_catch;
+}
+
+static void parse_try(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  /* (try <exprs> ...
+   *  (catch :err1 [<args> ...] <exprs> ...)
+   *  (catch :err2 [<args> ...] <exprs> ...)
+   *  ...
+   *  (catch [<args> ...] <exprs> ...)
+   * )
+   */
+  int token;
+  int count = 0;
+  SCons** curr = (SCons**)&sexpr->rest.o;
+
+  sexpr->first = create_form(TK_TRY);
+
+  while ((token = snap_lex_next_token(lex)) != ')') {
+    if (token == TK_EOF) break;
+    if (token == '(') {
+      token = snap_lex_next_token(lex);
+      if (token == TK_CATCH) {
+        break;
+      }
+      (*curr) = snap_cons_new(snap);
+      (*curr)->first = parse_sexpr(snap, lex, token);
+      curr = (SCons**)&(*curr)->rest.o;
+      count++;
+    } else {
+      (*curr) = snap_cons_new(snap);
+      (*curr)->first = parse_expr(snap, lex, token);
+      curr = (SCons**)&(*curr)->rest.o;
+      count++;
+    }
+  }
+
+  if (count < 1) {
+    raise(snap, "Expression expected at %d", lex->line);
+  }
+
+  if (token != TK_CATCH) {
+    raise(snap, "catch expected at %d", lex->line);
+  }
+
+  do {
+    (*curr) = snap_cons_new(snap);
+    sexpr = as_cons((*curr)->first = create_obj(snap_cons_new(snap)));
+    if (parse_catch(snap, lex, sexpr)) {
+      token = snap_lex_next_token(lex);
+      break;
+    } else if ((token = snap_lex_next_token(lex)) == ')') {
+      break;
+    }
+    if (token != '(' || (token = snap_lex_next_token(lex)) != TK_CATCH) {
+      raise(snap, "catch expected at %d", lex->line);
+    }
+    curr = (SCons**)&(*curr)->rest.o;
+  } while(1);
+
+  if (token != ')') {
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+  }
+}
+
+static SValue parse_sexpr(Snap* snap, SnapLex* lex, int token) {
+  SCons* sexpr = anchor_cons(snap_cons_new(snap));
+  switch (token) {
+    case ')': break;
+    case TK_ID: parse_call(snap, lex, sexpr); break;
+    case TK_DO: parse_cons(snap, lex, token, sexpr); break;
+    case TK_DEF: parse_def(snap, lex, sexpr); break;
+    case TK_IF: parse_if(snap, lex, sexpr); break;
+    case TK_FN: parse_fn(snap, lex, sexpr); break;
+    case TK_LET: parse_let(snap, lex, sexpr); break;
+    case TK_QUOTE: parse_quote(snap, lex, sexpr); break;
+    case TK_RECUR: parse_cons(snap, lex, token, sexpr); break;
+    case TK_SET: parse_set(snap, lex, sexpr); break;
+    case TK_RAISE: parse_raise(snap, lex, sexpr); break;
+    case TK_TRY: parse_try(snap, lex, sexpr); break;
+    case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
+      if (parse_cons(snap, lex, token, sexpr) < 2) {
+        raise(snap, "Arithmetic expression requires at least two arguments at %d", lex->line);
+      }
+      break;
+    case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
+      if (parse_cons(snap, lex, token, sexpr) < 2) {
+        raise(snap, "Conditional expression requires at least two arguments at %d", lex->line);
+      }
+      break;
+    default:
+      raise(snap, "Expected id, special form or expr at %d", lex->line);
+      break;
+  }
+  return create_obj(sexpr);
+}
+
+static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
+  switch (token) {
+    case '(':
+      return parse_sexpr(snap, lex, snap_lex_next_token(lex));
+    case '\'':
+      break;
+    case TK_INT:
+      return create_int(atol(lex->val));
+    case TK_FLOAT:
+      return create_float(atof(lex->val));
+    case TK_STR:
+      return create_obj(snap_str_new(snap, lex->val));
+    case TK_ID:
+      return create_obj(snap_sym_new(snap, lex->val));
+    case TK_KEY:
+      return create_obj(snap_key_new(snap, lex->val));
+    case TK_TRUE:
+    case TK_FALSE:
+      return create_bool(token == TK_TRUE);
+    case TK_NIL:
+      return create_nil();
+    case TK_DO:
+    case TK_DEF:
+    case TK_ELLIPSIS:
+    case TK_IF:
+    case TK_FN:
+    case TK_LET:
+    case TK_QUOTE:
+    case TK_RECUR:
+    case TK_SET:
+    case TK_RAISE:
+    case TK_TRY:
+      raise(snap, "Unexpect token on line %d", lex->line);
+      break;
+    case TK_EOF:
+      break;
+    default:
+      raise(snap, "Invalid token on line %d", lex->line);
+      break;
+  }
+  return create_nil();
+}
+
+static bool parse(Snap* snap, SnapLex* lex, SValue* result) {
+  int token = snap_lex_next_token(lex);
+  if (TK_EOF == token) return false;
+  if (setjmp(snap->jmp) > 0) {
+    // TODO: clear anchors
+    *result = create_obj(snap->cause);
+    return false;
+  } else {
+    *result = parse_expr(snap, lex, token);
+    return true;
+  }
+}
+
+static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant);
+static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym);
+
+static void compile(Snap* snap, SCodeGen* code_gen, SValue expr) {
   int token;
   bool first = true;
-  // TODO: Anchor
-  SCodeGen* code_gen = snap_code_gen_new(snap, NULL);
+  switch (expr.type) {
+    case STYPE_INT:
+    case STYPE_FLOAT:
+    case STYPE_STR:
+    case STYPE_BOOL:
+    case STYPE_KEY:
+      load_constant(snap, code_gen, expr);
+      break;
+    case STYPE_NIL:
+      insts_append(snap, code_gen, LOAD_NIL);
+      break;
+    case STYPE_SYM:
+      load_variable(snap, code_gen, as_sym(expr));
+      break;
+    case STYPE_CONS:
+      compile_sexpr(snap, code_gen, as_cons(expr));
+      break;
+    case STYPE_FORM:
+      // error
+      break;
+    default:
+      // error
+      raise(snap, "Unexpected type");
+      break;
+  }
+  /*
   while ((token = snap_lex_next_token(lex)) != TK_EOF) {
     if (!first) insts_append(snap, code_gen, POP);
-    parse_expr(snap, lex, code_gen, token);
+    compile_expr(snap, lex, code_gen, token);
     first = false;
   }
-  insts_append(snap, code_gen, RETURN);
-  return snap_code_new(snap, code_gen);
+  */
+  //snap_release(snap);
+  //return snap_code_new(snap, code_gen);
 }
 
 static int get_or_add_index(SnapHash* hash, SValue key) {
@@ -873,10 +1280,10 @@ static int get_or_add_index(SnapHash* hash, SValue key) {
 int add_local(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   SScope* scope = code_gen->scope;
   SScope* up = scope;
-  SValue key = create_obj((SObject*)sym);
+  SValue key = create_obj(sym);
   int index = 0;
   if (snap_hash_get(&code_gen->scope->local_names, key)) {
-    parse_err(snap, "Variable '%s' already defined in current scope", sym->data);
+    raise(snap, "Variable '%s' already defined in current scope", sym->data);
   }
   while (up) {
     index += scope->local_names.count;
@@ -890,7 +1297,7 @@ int add_local(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
 }
 
 int add_global(SCodeGen* code_gen, SSymStr* sym) {
-  SValue key = create_obj((SObject*)sym);
+  SValue key = create_obj(sym);
   SValue* val = snap_hash_get(&code_gen->global_names, key);
   if (val)  return val->i;
   int index = code_gen->global_names.count;
@@ -905,7 +1312,7 @@ static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant) {
 
 static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   SScope* scope = code_gen->scope;
-  SValue key = create_obj((SObject*)sym);
+  SValue key = create_obj(sym);
   while (scope) {
     SValue* val = snap_hash_get(&scope->local_names, key);
     if (val) {
@@ -922,7 +1329,7 @@ static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
 
 static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   SScope* scope = code_gen->scope;
-  SValue key = create_obj((SObject*)sym);
+  SValue key = create_obj(sym);
   while (scope) {
     SValue* val = snap_hash_get(&scope->local_names, key);
     if (val) {
@@ -937,14 +1344,26 @@ static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   }
 }
 
-static void parse_define(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_def(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  SSymStr* sym = as_sym(sexpr->first);
+  compile(snap, code_gen, as_cons(sexpr->rest)->first);
+  if (code_gen->scope) {
+    insts_append(snap, code_gen, STORE_LOCAL)->arg =
+        add_local(snap, code_gen, sym);
+  } else {
+    insts_append(snap, code_gen, STORE_GLOBAL)->arg =
+        add_global(code_gen, sym);
+  }
+  insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
+
+#if 0
   SSymStr* sym;
   int token = snap_lex_next_token(lex);
   if (token != TK_ID) {
-    parse_err(snap, "Expected id for first argument of define at %d", lex->line);
+    raise(snap, "Expected id for first argument of define at %d", lex->line);
   }
   sym = anchor_sym(snap_sym_new(snap, lex->val));
-  parse_expr(snap, lex, code_gen, snap_lex_next_token(lex));
+  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
   if (code_gen->scope) {
     insts_append(snap, code_gen, STORE_LOCAL)->arg = add_local(snap, code_gen, sym);
   } else {
@@ -954,37 +1373,32 @@ static void parse_define(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
   snap_release(snap);
   token = snap_lex_next_token(lex);
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
+#endif
 }
 
-static void parse_arith_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int opcode) {
+static void compile_arith_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   int i;
-  int token;
-  int count = 0;
-  while ((token = snap_lex_next_token(lex)) != ')') {
-    if (token == TK_EOF) break;
-    parse_expr(snap, lex, code_gen, token);
-    count++;
-  }
-  if (count < 2) {
-    parse_err(snap, "Arithmetic expression requires at least two arguments at %d", lex->line);
-  }
+  int opcode = (sexpr->first.i - TK_ADD) + ADD;
+  int count = compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
   for (i = 1; i < count; ++i) {
     insts_append(snap, code_gen, opcode);
   }
 }
 
-static void parse_cond_expr_inner(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int opcode, int token) {
+static void compile_cond_expr_inner(Snap* snap, SCodeGen* code_gen, int opcode, SCons* sexpr) {
   SInst* jump_false = NULL;
+  SCons* curr = as_cons(sexpr->rest);
+  compile(snap, code_gen, sexpr->first);
 
-  parse_expr(snap, lex, code_gen, token);
   insts_append(snap, code_gen, DUP);
   insts_append(snap, code_gen, ROT3);
   insts_append(snap, code_gen, opcode);
-  if ((token = snap_lex_next_token(lex)) != ')') {
+
+  if (curr) {
     jump_false = insts_append(snap, code_gen, JUMP_FALSE_OR_POP);
-    parse_cond_expr_inner(snap, lex, code_gen, opcode, token);
+    compile_cond_expr_inner(snap, code_gen, opcode, curr);
   }
 
   if (jump_false) {
@@ -992,26 +1406,23 @@ static void parse_cond_expr_inner(Snap* snap, SnapLex* lex, SCodeGen* code_gen, 
   }
 }
 
-static void parse_cond_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int opcode) {
+static void compile_cond_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   int i;
-  int token;
-  int count = 0;
+  int opcode = (sexpr->first.i - TK_LT) + LESS_THAN;
+  SCons* curr = as_cons(sexpr->rest);
   SInst* jump_false = NULL;
 
-  for (i = 0; (token = snap_lex_next_token(lex)) != ')' && i < 2; ++i) {
-    parse_expr(snap, lex, code_gen, token);
+  for (i = 0; i < 2; ++i) {
+    compile(snap, code_gen, curr->first);
+    curr = as_cons(curr->rest);
   }
 
-  if (i < 2) {
-    parse_err(snap, "Condition expression requires at least two arguments at %d", lex->line);
-  }
-
-  if (token != ')') {
+  if (curr) {
     insts_append(snap, code_gen, DUP);
     insts_append(snap, code_gen, ROT3);
     insts_append(snap, code_gen, opcode);
     jump_false = insts_append(snap, code_gen, JUMP_FALSE_OR_POP);
-    parse_cond_expr_inner(snap, lex, code_gen, opcode, token);
+    compile_cond_expr_inner(snap, code_gen, opcode, curr);
   } else {
     insts_append(snap, code_gen, opcode);
   }
@@ -1023,114 +1434,226 @@ static void parse_cond_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int op
   }
 }
 
-static void parse_call(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_call(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  int count = compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+  load_variable(snap, code_gen, as_sym(sexpr->first));
+  insts_append(snap, code_gen, CALL)->arg = count;
+
+#if 0
   int token;
   int count = 0;
   SSymStr* sym = anchor_sym(snap_sym_new(snap, lex->val));
   while ((token = snap_lex_next_token(lex)) != ')') {
     if (token == TK_EOF) break;
-    parse_expr(snap, lex, code_gen, token);
+    compile_expr(snap, lex, code_gen, token);
     count++;
   }
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
   load_variable(snap, code_gen, sym);
   insts_append(snap, code_gen, CALL)->arg = count;
   snap_release(snap);
+#endif
 }
 
-static void parse_if(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_if(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  SValue jump_val;
+  SInst* cond_jump, * jump;
+
+  compile(snap, code_gen, sexpr->first);
+  cond_jump = insts_append(snap, code_gen, JUMP_FALSE);
+
+  /* True */
+  compile(snap, code_gen, as_cons(sexpr->rest)->first);
+  jump = insts_append(snap, code_gen, JUMP);
+  jump_arg_init(&cond_jump->jump_arg, 1, code_gen->insts.prev);
+
+  /* False */
+  compile(snap, code_gen, as_cons(as_cons(sexpr->rest)->rest)->first);
+  jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
+
+#if 0
   int token;
   SValue jump_val;
   SInst* cond_jump, * jump;
-  parse_expr(snap, lex, code_gen, snap_lex_next_token(lex));
+  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
   cond_jump = insts_append(snap, code_gen, JUMP_FALSE);
   // true
-  parse_expr(snap, lex, code_gen, snap_lex_next_token(lex));
+  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
   jump = insts_append(snap, code_gen, JUMP);
   jump_arg_init(&cond_jump->jump_arg, 1, code_gen->insts.prev);
   // false
-  parse_expr(snap, lex, code_gen, snap_lex_next_token(lex));
+  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
   jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
   token = snap_lex_next_token(lex);
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
+#endif
 }
 
-static void parse_quote(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
-}
-
-static void parse_set(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_set(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  compile(snap, code_gen, as_cons(sexpr->rest)->first);
+  store_variable(snap, code_gen, as_sym(sexpr->first));
+  insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
+#if 0
   SSymStr* sym;
   int token = snap_lex_next_token(lex);
   if (token != TK_ID) {
-    parse_err(snap, "Expected id for first argument of set! at %d", lex->line);
+    raise(snap, "Expected id for first argument of set! at %d", lex->line);
   }
   sym = anchor_sym(snap_sym_new(snap, lex->val));
-  parse_expr(snap, lex, code_gen, snap_lex_next_token(lex));
+  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
   store_variable(snap, code_gen, sym);
   insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
   snap_release(snap);
   token = snap_lex_next_token(lex);
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
+#endif
 }
 
-static void parse_fn(Snap* snap, SnapLex* lex, SCodeGen* up) {
+static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
+  int i;
+  SArr* args = as_arr(sexpr->first);
+  SCodeGen* code_gen = snap_code_gen_new(snap, up);
+  code_gen->scope = snap_scope_new(snap, NULL);
+
+  for (i = 0; i < args->len; ++i) {
+    SSymStr* sym = as_sym(args->data[i]);
+    snap_vec_push(&code_gen->param_names, create_obj(sym));
+    add_local(snap, code_gen, sym);
+  }
+
+  compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+
+  insts_append(snap, code_gen, RETURN);
+  load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
+#if 0
   // TODO: Anchor
   int token;
   SCodeGen* code_gen = snap_code_gen_new(snap, up);
   code_gen->scope = snap_scope_new(snap, NULL);
   token = snap_lex_next_token(lex);
   if (token != '[') {
-    parse_err(snap, "Expected parameter list at %d", lex->line);
+    raise(snap, "Expected parameter list at %d", lex->line);
   }
   token = snap_lex_next_token(lex);
   while (token == TK_ID) {
     SSymStr* sym = snap_sym_new(snap, lex->val);
-    snap_vec_push(&code_gen->param_names, create_obj((SObject*)sym));
+    snap_vec_push(&code_gen->param_names, create_obj(sym));
     add_local(snap, code_gen, sym);
     token = snap_lex_next_token(lex);
   }
   if (token != ']') {
-    parse_err(snap, "Expected ']' to terminate parameter list at %d", lex->line);
+    raise(snap, "Expected ']' to terminate parameter list at %d", lex->line);
   }
-  token = parse_expr_list(snap, lex, code_gen);
+  token = compile_expr_list(snap, lex, code_gen);
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
   insts_append(snap, code_gen, RETURN);
-  load_constant(snap, up, create_obj((SObject*)snap_code_new(snap, code_gen)));
+  load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
+#endif
 }
 
-static void parse_let(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_let(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   // New scope
 }
 
-static void parse_recur(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_recur(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   int i;
-  int token;
-  int count = 0;
   SnapVec* param_names = &code_gen->param_names;
-  while ((token = snap_lex_next_token(lex)) != ')') {
-    if (token == TK_EOF) break;
-    parse_expr(snap, lex, code_gen, token);
-    count++;
-  }
+  int count = compile_expr_list(snap, code_gen, sexpr);
   if (count != param_names->size) {
-    parse_err(snap, "Invalid number of arguments", lex->line);
+    raise(snap, "Invalid number of arguments");
   }
   for (i = 0; i < count; ++i) {
     int index = get_or_add_index(&code_gen->scope->local_names, param_names->items[i]);
     insts_append(snap, code_gen, STORE_LOCAL)->arg =  index;
   }
   jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->insts.next);
+#if 0
+  int i;
+  int token;
+  int count = 0;
+  SnapVec* param_names = &code_gen->param_names;
+  while ((token = snap_lex_next_token(lex)) != ')') {
+    if (token == TK_EOF) break;
+    compile_expr(snap, lex, code_gen, token);
+    count++;
+  }
+  if (count != param_names->size) {
+    raise(snap, "Invalid number of arguments", lex->line);
+  }
+  for (i = 0; i < count; ++i) {
+    int index = get_or_add_index(&code_gen->scope->local_names, param_names->items[i]);
+    insts_append(snap, code_gen, STORE_LOCAL)->arg =  index;
+  }
+  jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->insts.next);
+#endif
 }
 
-static int parse_catch(Snap* snap, SnapLex* lex, SCodeGen* code_gen, bool empty_catch) {
+static void compile_catch(Snap* snap, SCodeGen* code_gen,
+                          SCons* sexpr, SCons* next_catch) {
+  bool empty_catch = true;
+  SInst* jump_false = NULL;
+  SnapNode* jump_to = NULL;
+  SArr* arr;
+
+  if (is_key(sexpr->first)) {
+    insts_append(snap, code_gen, DUP);
+    load_constant(snap, code_gen, sexpr->first);
+    insts_append(snap, code_gen, EQUALS);
+    jump_false = insts_append(snap, code_gen, JUMP_FALSE);
+    empty_catch = false;
+    sexpr = as_cons(sexpr->rest);
+  }
+
+  arr = as_arr(sexpr->first);
+
+  code_gen->scope = snap_scope_new(snap, code_gen->scope);
+  if (arr->len == 2) {
+    store_variable(snap, code_gen, as_sym(arr->data[0]));
+    store_variable(snap, code_gen, as_sym(arr->data[1]));
+  } else if (arr->len == 1) {
+    insts_append(snap, code_gen, POP);
+    store_variable(snap, code_gen, as_sym(arr->data[0]));
+  } else {
+    insts_append(snap, code_gen, POP);
+    insts_append(snap, code_gen, POP);
+  }
+
+  compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+  code_gen->scope = code_gen->scope->up;
+
+  if (next_catch) {
+    SInst* jump = insts_append(snap, code_gen, JUMP);
+    if (jump_false) {
+      jump_arg_init(&jump_false->jump_arg, 1, code_gen->insts.prev);
+      jump_false = NULL;
+    }
+    compile_catch(snap, code_gen,
+                  as_cons(as_cons(next_catch->first)->rest),
+                  as_cons(next_catch->rest));
+    jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
+  }
+
+  if (!empty_catch && !next_catch) {
+    SInst* jump = insts_append(snap, code_gen, JUMP);
+    jump_to = insts_append(snap, code_gen, RAISE)->list.prev;
+    jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
+  } else {
+    jump_to = code_gen->insts.prev;
+  }
+
+  if (jump_false) {
+    jump_arg_init(&jump_false->jump_arg, 1, jump_to);
+  }
+
+#if 0
   int token;
   SInst* jump_false = NULL;
   SnapNode* jump_to = NULL;
@@ -1141,12 +1664,12 @@ static int parse_catch(Snap* snap, SnapLex* lex, SCodeGen* code_gen, bool empty_
 
 
   if (empty_catch) {
-    parse_err(snap, "empty catch is expect to be last at %d", lex->line);
+    raise(snap, "empty catch is expect to be last at %d", lex->line);
   }
 
   if ((token = snap_lex_next_token(lex)) == TK_KEY) {
     insts_append(snap, code_gen, DUP);
-    load_constant(snap, code_gen, create_obj((SObject*)snap_key_new(snap, lex->val)));
+    load_constant(snap, code_gen, create_obj(snap_key_new(snap, lex->val)));
     insts_append(snap, code_gen, EQUALS);
     jump_false = insts_append(snap, code_gen, JUMP_FALSE);
     token = snap_lex_next_token(lex);
@@ -1156,22 +1679,22 @@ static int parse_catch(Snap* snap, SnapLex* lex, SCodeGen* code_gen, bool empty_
 
   p = lex->p;
   if (token != '[') {
-    parse_err(snap, "Expected '[' to for catch arguments at %d", lex->line);
+    raise(snap, "Expected '[' to for catch arguments at %d", lex->line);
   }
 
   while ((token = snap_lex_next_token(lex)) != ']') {
     if (token != TK_ID) {
-      parse_err(snap, "Expected ids for catch arguments at %d", lex->line);
+      raise(snap, "Expected ids for catch arguments at %d", lex->line);
     }
     count++;
   }
   if (token != ']') {
-    parse_err(snap, "Expected ']' to terminate catch arguments at %d", lex->line);
+    raise(snap, "Expected ']' to terminate catch arguments at %d", lex->line);
   }
   lex->p = p;
 
   if (count > 2) {
-    parse_err(snap, "Invalid number of catch argument (0 - 2) %d", lex->line);
+    raise(snap, "Invalid number of catch argument (0 - 2) %d", lex->line);
   }
 
   code_gen->scope = snap_scope_new(snap, code_gen->scope);
@@ -1196,11 +1719,11 @@ static int parse_catch(Snap* snap, SnapLex* lex, SCodeGen* code_gen, bool empty_
   }
   snap_lex_next_token(lex); /* Consume ']' */
 
-  token = parse_expr_list(snap, lex, code_gen);
+  token = compile_expr_list(snap, lex, code_gen);
   code_gen->scope = code_gen->scope->up;
 
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
 
   if ((token = snap_lex_next_token(lex)) == '(')  {
@@ -1210,7 +1733,7 @@ static int parse_catch(Snap* snap, SnapLex* lex, SCodeGen* code_gen, bool empty_
         jump_arg_init(&jump_false->jump_arg, 1, code_gen->insts.prev);
         jump_false = NULL;
       }
-      token = parse_catch(snap, lex, code_gen, empty_catch);
+      token = compile_catch(snap, lex, code_gen, empty_catch);
       jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
     } else {
       final_catch = true;
@@ -1232,9 +1755,10 @@ static int parse_catch(Snap* snap, SnapLex* lex, SCodeGen* code_gen, bool empty_
   }
 
   return token;
+#endif
 }
 
-static void parse_try(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_try(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   /* (try <exprs> ...
    *  (catch :err1 [<args> ...] <exprs> ...)
    *  (catch :err2 [<args> ...] <exprs> ...)
@@ -1242,10 +1766,38 @@ static void parse_try(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
    *  (catch [<args> ...] <exprs> ...)
    * )
    */
+  SCons* curr;
+  SInst* jump_catch, * jump;
+  bool first = true;
+
+  jump_catch = insts_append(snap, code_gen, BLOCK);
+
+  for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
+    if (is_cons(curr->first) &&
+        is_form(as_cons(curr->first)->first) &&
+        as_cons(curr->first)->first.i == TK_CATCH) {
+      break;
+    }
+    if (!first) insts_append(snap, code_gen, POP);
+    first = false;
+    compile(snap, code_gen, curr->first);
+  }
+
+  insts_append(snap, code_gen, END_BLOCK);
+  jump = insts_append(snap, code_gen, JUMP);
+
+  jump_arg_init(&jump_catch->jump_arg, 1, code_gen->insts.prev);
+
+  compile_catch(snap, code_gen,
+                as_cons(as_cons(curr->first)->rest),
+                as_cons(curr->rest));
+
+  jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
+
+#if 0
   int token;
   int count = 0;
   int index;
-  bool first = true;
   bool empty_catch = false;
   SInst* jump_catch, * jump;
 
@@ -1260,23 +1812,23 @@ static void parse_try(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
       } else {
         if (!first) insts_append(snap, code_gen, POP);
         first = false;
-        parse_sexpr(snap, lex, code_gen, token);
+        compile_sexpr(snap, lex, code_gen, token);
         count++;
       }
     } else {
       if (!first) insts_append(snap, code_gen, POP);
       first = false;
-      parse_expr(snap, lex, code_gen, token);
+      compile_expr(snap, lex, code_gen, token);
       count++;
     }
   }
 
   if (count < 1) {
-    parse_err(snap, "Expression expected at %d", lex->line);
+    compile_err(snap, "Expression expected at %d", lex->line);
   }
 
   if (token != TK_CATCH) {
-    parse_err(snap, "catch expected at %d", lex->line);
+    compile_err(snap, "catch expected at %d", lex->line);
   }
 
   insts_append(snap, code_gen, END_BLOCK);
@@ -1284,16 +1836,21 @@ static void parse_try(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
 
   jump_arg_init(&jump_catch->jump_arg, 1, code_gen->insts.prev);
 
-  token = parse_catch(snap, lex, code_gen, false);
+  token = compile_catch(snap, lex, code_gen, false);
 
   jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
 
   if (token != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    compile_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
+#endif
 }
 
-static void parse_raise(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
+static void compile_raise(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  compile(snap, code_gen, as_cons(sexpr->rest)->first);
+  load_constant(snap, code_gen, sexpr->first);
+  insts_append(snap, code_gen, RAISE);
+#if 0
   SInst* raise;
   int token = snap_lex_next_token(lex);
   int count = 1;
@@ -1307,73 +1864,90 @@ static void parse_raise(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
   }
 
   if ((token = snap_lex_next_token(lex)) != ')') {
-    parse_expr(snap, lex, code_gen, token);
+    compile_expr(snap, lex, code_gen, token);
   } else {
     insts_append(snap, code_gen, LOAD_NIL);
   }
 
   if ((token = snap_lex_next_token(lex)) != ')') {
-    parse_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
 
-  load_constant(snap, code_gen, create_obj((SObject*)key));
+  load_constant(snap, code_gen, create_obj(key));
   insts_append(snap, code_gen, RAISE);
 
   snap_release(snap);
+#endif
 }
 
-static void parse_sexpr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token) {
+static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  switch (sexpr->first.type) {
+    case STYPE_SYM:
+      compile_call(snap, code_gen, sexpr);
+      break;
+    case STYPE_FORM:
+      switch (sexpr->first.i) {
+        case TK_DO:
+          compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_DEF:
+          compile_def(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_IF:
+          compile_if(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_FN:
+          compile_fn(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_LET:
+          compile_let(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_QUOTE:
+          load_constant(snap, code_gen, as_cons(sexpr->rest)->first);
+          break;
+        case TK_RECUR:
+          compile_recur(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_SET:
+          compile_set(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_RAISE:
+          compile_raise(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_TRY:
+          compile_try(snap, code_gen, as_cons(sexpr->rest));
+          break;
+        case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
+          compile_arith_expr(snap, code_gen, sexpr);
+          break;
+        case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
+          compile_cond_expr(snap, code_gen, sexpr);
+          break;
+      }
+      break;
+    default:
+      raise(snap, "Expected id, special form or expr");
+      break;
+  }
+#if 0
   switch (token) {
     case ')':
       break;
     case TK_ID:
-      parse_call(snap, lex, code_gen);
-      break;
-    case TK_DO:
-      parse_expr_list(snap, lex, code_gen);
-      break;
-    case TK_DEF:
-      parse_define(snap, lex, code_gen);
-      break;
-    case TK_IF:
-      parse_if(snap, lex, code_gen);
-      break;
-    case TK_FN:
-      parse_fn(snap, lex, code_gen);
-      break;
-    case TK_LET:
-      parse_let(snap, lex, code_gen);
-      break;
-    case TK_QUOTE:
-      break;
-    case TK_RECUR:
-      parse_recur(snap, lex, code_gen);
-      break;
-    case TK_SET:
-      parse_set(snap, lex, code_gen);
-      break;
-    case TK_RAISE:
-      parse_raise(snap, lex, code_gen);
-      break;
-    case TK_TRY:
-      parse_try(snap, lex, code_gen);
-      break;
-    case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
-      parse_arith_expr(snap, lex, code_gen, (token - TK_ADD) + ADD);
-      break;
-    case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
-      parse_cond_expr(snap, lex, code_gen, (token - TK_LT) + LESS_THAN);
+      compile_call(snap, lex, code_gen);
       break;
     default:
-      parse_err(snap, "Expected id, special form or expr at %d", lex->line);
+      compile_err(snap, "Expected id, special form or expr at %d", lex->line);
       break;
   }
+#endif
 }
 
-static void parse_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token) {
+static void compile_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token) {
+#if 0
   switch (token) {
     case '(':
-      parse_sexpr(snap, lex, code_gen, snap_lex_next_token(lex));
+      compile_sexpr(snap, lex, code_gen, snap_lex_next_token(lex));
       break;
     case '\'':
       break;
@@ -1384,14 +1958,14 @@ static void parse_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token) 
       load_constant(snap, code_gen, create_float(atof(lex->val)));
       break;
     case TK_STR:
-      load_constant(snap, code_gen, create_obj((SObject*)snap_str_new(snap, lex->val)));
+      load_constant(snap, code_gen, create_obj(snap_str_new(snap, lex->val)));
       break;
     case TK_ID:
       load_variable(snap, code_gen, anchor_sym(snap_sym_new(snap, lex->val)));
       snap_release(snap);
       break;
     case TK_KEY:
-      load_constant(snap, code_gen, create_obj((SObject*)snap_key_new(snap, lex->val)));
+      load_constant(snap, code_gen, create_obj(snap_key_new(snap, lex->val)));
       break;
     case TK_TRUE:
     case TK_FALSE:
@@ -1416,26 +1990,21 @@ static void parse_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token) 
     case TK_EOF:
       break;
     default:
-      parse_err(snap, "Invalid token on line %d", lex->line);
+      compile_err(snap, "Invalid token on line %d", lex->line);
       break;
   }
+#endif
 }
 
-static int parse_expr_list(Snap* snap, SnapLex* lex, SCodeGen* code_gen) {
-  int token;
+static int compile_expr_list(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  SCons* curr;
   int count = 0;
-  bool first = true;
-  while ((token = snap_lex_next_token(lex)) != ')') {
-    if (token == TK_EOF) break;
-    if (!first) insts_append(snap, code_gen, POP);
-    first = false;
-    parse_expr(snap, lex, code_gen, token);
+  for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
+    if (count > 0) insts_append(snap, code_gen, POP);
+    compile(snap, code_gen, curr->first);
     count++;
   }
-  if (count < 1) {
-    parse_err(snap, "Expression expected at %d", lex->line);
-  }
-  return token;
+  return count;
 }
 
 static inline void list_init(SnapNode* list) {
@@ -1543,6 +2112,9 @@ static void print_val(SValue val, int indent) {
         case TK_SET: iprintf(indent, "set"); break;
         case TK_RAISE: iprintf(indent, "raise"); break;
         case TK_TRY: iprintf(indent, "try"); break;
+        case TK_CATCH: iprintf(indent, "catch"); break;
+        case TK_LT: iprintf(indent, "<"); break;
+        case TK_ADD: iprintf(indent, "+"); break;
       }
       break;
     case STYPE_STR:
@@ -1559,6 +2131,11 @@ static void print_val(SValue val, int indent) {
       print_val(as_err(val)->msg, 0);
       printf(">");
       break;
+    case STYPE_ARR:
+      iprintf(indent, "[");
+      print_arr(as_arr(val), indent);
+      iprintf(indent, "]");
+    break;
     case STYPE_CONS:
       iprintf(indent, "(");
       print_cons(as_cons(val), indent);
@@ -1568,6 +2145,14 @@ static void print_val(SValue val, int indent) {
       iprintf(indent, "<code object (%p)>:\n", val.o);
       print_code(as_code(val), indent + 1);
       break;
+  }
+}
+
+static void print_arr(SArr* arr, int indent) {
+  int i = 0;
+  for (i = 0; i < arr->len; ++i) {
+    if (i > 0) printf(" ");
+    print_val(arr->data[i], indent);
   }
 }
 
