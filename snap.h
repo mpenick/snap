@@ -87,7 +87,7 @@ typedef struct SKeyword_ {
 
 typedef struct SErr_ {
   SOBJECT_FIELDS
-  SKeyword* err;
+  SValue err;
   SValue msg;
 } SErr;
 
@@ -116,11 +116,14 @@ typedef struct SInst_ {
     int arg;
     SnapJumpArg jump_arg;
   };
+  SValue arg_data;
 } SInst;
 
 typedef struct SScope_ {
   SOBJECT_FIELDS
+  SnapNode* top;
   SnapHash local_names;
+  SnapVec param_names;
   struct SScope_* up;
 }  SScope;
 
@@ -146,6 +149,7 @@ typedef struct SCode_ {
   int num_locals;
   int max_stack_size;
   int insts_count;
+  SnapNode insts_debug;
 } SCode;
 
 typedef struct SnapBlock_ {
@@ -193,7 +197,7 @@ SValue create_obj(SObject* o);
 
 SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
-SErr* snap_err_new(Snap* snap, SKeyword* err, SValue msg);
+SErr* snap_err_new(Snap* snap, SValue err, SValue msg);
 SErr* snap_err_new_str(Snap* snap, const char* code, const char* msg);
 SCons* snap_cons_new(Snap* snap);
 SInst* snap_inst_new(Snap* snap, int opcode);
@@ -203,7 +207,7 @@ SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up);
 SObject* snap_anchor(Snap* snap, SObject* obj);
 void snap_release(Snap* snap);
 
-void snap_define(Snap* snap, const char* name, SValue val);
+void snap_def(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
 SValue snap_exec(Snap* snap, const char* str);
 void snap_print(SValue value);

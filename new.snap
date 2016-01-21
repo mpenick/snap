@@ -1,0 +1,97 @@
+; vi: filetype=scheme
+
+(def test (fn [s i m]
+              (if (< i m) (recur
+                            (loop [[a i] [s s] [i 0] [m m]]
+                                  (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
+
+                            (+ i 1) m) s)
+              ))
+(println (test 0 0 10000))
+
+;(define x 1)
+;(set! x 1)
+;(< 1 2 3 4)
+;
+;(try
+;  (println "hello")
+;  (raise :error3 "raised an error")
+;  (catch :error1 [type val] (println type val))
+;  (catch :error2 [type val] (println type val))
+;  (catch [type val] (println type val)))
+;
+;(raise :error1 "some error")
+;
+;(define func1 (fn [] (raise :error1 "some error")))
+;(define func2 (fn [] (println "here") (func1)))
+;(try
+;  (func2)
+;  (do (println "success") 0)
+;  (catch :error1 [t x] (raise t x))
+;  (catch :error2 [x] (println x) 2)
+;  )
+;
+;(try
+;  ;(raise :error1 "something happened")
+;  (raise "something happened")
+;  (do (println "success") 0)
+;  (catch :error1 (fn (x) (do (println x) 1)))
+;  (catch :error2 (fn (x) (do (println x) 2))))
+;
+;(if false
+;  (if true (if true (print "true")
+;             (print "false"))
+;    (print "false"))
+;  (print "false"))
+;(if false (define x x) (define x x))
+;
+;(define r
+;  (fn [x]
+;      (do (println x)
+;        (if (< x 10)
+;          (recur (+ x 1)) nil))))
+;(r 1)
+;
+;(if false
+;  (do true (if false false true)) true)
+;
+;(define p (fn [x] (println x)))
+;(define add (fn [x y] (+ x y)))
+;(p (add (add (add 1 2) 3) 4))
+;(add 1 4)
+;
+;(loop [[x 1]] x)
+;
+;(println (loop [[a 1] [s 0] [i 0] [m 10000]]
+;               (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s)))
+;
+;
+;(loop [[x 100]]
+;      (if (> x 0)
+;        (do
+;          (println (loop [[a 1] [s 0] [i 0] [m 10000]]
+;                         (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s)))
+;          (recur (- x 1))
+;          )
+;        nil
+;        )
+;      )
+;
+;(loop [[a 1] [s 0] [i 0] [m 10000]]
+;      (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
+;
+;(def inner (fn [a s i m]
+;               (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s)))
+;(println (inner 1 0 0 10000))
+;(def loop (fn [s i m]
+;              (if (< i m) (recur (inner i s 0 m) (+ i 1) m) s)
+;              ))
+;
+;(def test (fn [s i m]
+;              (if (< i m) (recur
+;                            (loop [[a i] [s s] [i 0] [m m]]
+;                                  (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
+;
+;                            (+ i 1) m) s)
+;              ))
+;(println (test 0 0 10000))

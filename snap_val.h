@@ -5,27 +5,32 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef long SnapInt;
+typedef int64_t SnapInt;
 typedef double SnapFloat;
 
+#define STYPE_MAP(XX) \
+  XX(STYPE_UNDEF, 0, "undef") \
+  XX(STYPE_NIL, 1, "nil") \
+  XX(STYPE_BOOL, 2, "bool") \
+  XX(STYPE_INT, 3, "int") \
+  XX(STYPE_FLOAT, 4, "float") \
+  XX(STYPE_FORM, 5, "form") \
+  XX(STYPE_CFUNC, 6, "cfunc") \
+  XX(STYPE_SYM, 7, "sym") \
+  XX(STYPE_STR, 8, "str") \
+  XX(STYPE_ERR, 9, "err") \
+  XX(STYPE_CONS, 10, "cons") \
+  XX(STYPE_ARR, 11, "array") \
+  XX(STYPE_INST, 12, "inst") \
+  XX(STYPE_SCOPE, 13, "scope") \
+  XX(STYPE_CODE_GEN, 14, "codegen") \
+  XX(STYPE_CODE, 15, "code") \
+  XX(STYPE_KEY, 16, "key")
+
 enum {
-  STYPE_UNDEF    = 0,
-  STYPE_NIL      = 1,
-  STYPE_BOOL     = 2,
-  STYPE_INT      = 3,
-  STYPE_FLOAT    = 4,
-  STYPE_FORM     = 5,
-  STYPE_CFUNC    = 6,
-  STYPE_SYM      = 7,
-  STYPE_STR      = 8,
-  STYPE_ERR      = 9,
-  STYPE_CONS     = 10,
-  STYPE_ARR      = 11,
-  STYPE_INST     = 12,
-  STYPE_SCOPE    = 13,
-  STYPE_CODE_GEN = 14,
-  STYPE_CODE     = 15,
-  STYPE_KEY      = 16
+#define XX(type, id, name) type,
+  STYPE_MAP(XX)
+#undef XX
 };
 
 typedef struct Snap_ Snap;

@@ -20,6 +20,7 @@ enum {
   TK_IF,
   TK_FN,
   TK_LET,
+  TK_LOOP,
   TK_QUOTE,
   TK_RECUR,
   TK_SET,

@@ -49,6 +49,7 @@ int snap_lex_next_token(SnapLex* lex) {
       'if' => { token = TK_IF; fbreak; };
       'fn' => { token = TK_FN; fbreak; };
       'let' => { token = TK_LET; fbreak; };
+      'loop' => { token = TK_LOOP; fbreak; };
       'quote' => { token = TK_QUOTE; fbreak; };
       'recur' => { token = TK_RECUR; fbreak; };
       'set!' => { token = TK_SET; fbreak; };

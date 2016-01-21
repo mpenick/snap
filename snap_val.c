@@ -105,9 +105,7 @@ int snap_compare(SValue* val1, SValue* val2) {
     case STYPE_KEY:
       return compare(((SKeyword*)val1->o)->id, ((SKeyword*)val2->o)->id);
     case STYPE_ERR:
-      if (!((SErr*)val1->o)->err) return -1;
-      if (!((SErr*)val2->o)->err) return 1;
-      return compare(((SErr*)val1->o)->err->id, ((SErr*)val2->o)->err->id);
+      return snap_compare(&((SErr*)val1->o)->err, &((SErr*)val2->o)->err);
     case STYPE_CONS:
     case STYPE_SCOPE:
     case STYPE_CODE:

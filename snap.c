@@ -62,6 +62,31 @@ enum {
 #undef XX
 };
 
+static const char* opcode_name(int op) {
+  switch (op) {
+#define XX(opcode, name, has_arg) \
+    case opcode: \
+      return name;
+    OPCODE_MAP(XX)
+#undef XX
+    default:
+      return "INVALID";
+  }
+}
+
+static const char* stype_name(int  type) {
+  switch (type) {
+#define XX(type, id, name) \
+    case type: \
+      return name;
+    STYPE_MAP(XX)
+#undef XX
+    default:
+      return "invalid";
+  }
+}
+
+
 #define anchor(type, obj) (type*)snap_anchor(snap, (SObject*)obj)
 #define anchor_sym(sym) anchor(SSymStr, sym)
 #define anchor_str(str) anchor(SSymStr, str)
@@ -75,6 +100,7 @@ static void compile(Snap* snap, SCodeGen* code_gen, SValue value);
 static bool parse(Snap* snap, SnapLex* lex, SValue *result);
 
 static void list_init(SnapNode* list);
+static void list_copy(SnapNode* src, SnapNode* dst);
 static void list_append(SnapNode* list, SnapNode* node);
 static int list_forward_count(SnapNode* first, SnapNode* last);
 static int list_backward_count(SnapNode* first, SnapNode* last);
@@ -82,7 +108,7 @@ static int list_backward_count(SnapNode* first, SnapNode* last);
 static SInst* insts_append(Snap* snap, SCodeGen* code_gen, int opcode);
 static int insts_calculate_jump(SInst* inst);
 static void insts_remove_dead_code(SnapNode* insts);
-static void insts_dump(SnapNode* insts);
+static void insts_dump(SnapNode* insts, int indent);
 
 static void print_val(SValue val, int indent);
 static void print_code(SCode* code, int indent);
@@ -201,6 +227,7 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_SCOPE:
       snap->num_bytes_alloced -= sizeof(SScope);
       snap_hash_destroy(&((SScope*)obj)->local_names);
+      snap_vec_destroy(&((SScope*)obj)->param_names);
       break;
     case STYPE_CODE_GEN:
       snap->num_bytes_alloced -= sizeof(SCodeGen);
@@ -274,7 +301,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
   int i;
   switch (obj->type) {
     case STYPE_ERR:
-      gc_mark(snap, (SObject*)((SErr*)obj)->err);
+      gc_mark_val(snap, ((SErr*)obj)->err);
       gc_mark_val(snap, ((SErr*)obj)->msg);
       break;
     case STYPE_CONS:
@@ -288,6 +315,11 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       break;
     case STYPE_SCOPE:
       gc_mark_hash(snap, &((SScope*)obj)->local_names);
+      gc_mark_vec(snap, &((SScope*)obj)->param_names);
+      break;
+    case STYPE_INST:
+      gc_mark_val(snap, ((SInst*)obj)->arg_data);
+      gc_mark(snap, (SObject*)((SInst*)obj)->list.next);
       break;
     case STYPE_CODE_GEN:
       gc_mark(snap, (SObject*)((SCodeGen*)obj)->scope);
@@ -298,6 +330,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
     case STYPE_CODE:
       gc_mark(snap, (SObject*)((SCode*)obj)->constants);
       gc_mark(snap, (SObject*)((SCode*)obj)->global_names);
+      gc_mark(snap, (SObject*)((SCode*)obj)->insts_debug.next);
       break;
     default:
       assert(0 && "Not a valid gray object");
@@ -386,7 +419,7 @@ SKeyword* snap_key_new(Snap* snap, const char* name) {
   }
 }
 
-SErr* snap_err_new(Snap* snap, SKeyword* err, SValue msg) {
+SErr* snap_err_new(Snap* snap, SValue err, SValue msg) {
   SErr* e = (SErr*)gc_new(snap, STYPE_ERR, sizeof(SErr));
   e->err = err;
   e->msg = msg;
@@ -396,7 +429,7 @@ SErr* snap_err_new(Snap* snap, SKeyword* err, SValue msg) {
 SErr* snap_err_new_str(Snap* snap, const char* err, const char* msg) {
   SSymStr* s = anchor_str(snap_str_new(snap, msg));
   SKeyword* k = snap_key_new(snap, err);
-  SErr* e = snap_err_new(snap, k, create_obj(s));
+  SErr* e = snap_err_new(snap, create_obj(k), create_obj(s));
   snap_release(snap);
   return e;
 }
@@ -430,11 +463,11 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
   SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
   snap_anchor(snap, (SObject*)c);
 
-  //insts_dump(&code_gen->insts);
-  printf("\n");
+  //insts_dump(&code_gen->insts, 0);
+  //printf("\n");
   insts_remove_dead_code(&code_gen->insts);
-  //insts_dump(&code_gen->insts);
-  printf("\n");
+  //insts_dump(&code_gen->insts, 0);
+  //printf("\n");
 
   c->insts = (int*)malloc(sizeof(int) * code_gen->insts_count);
   {
@@ -466,18 +499,12 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
           stack_size = 0;
           break;
         case JUMP:
-          inst->arg = insts_calculate_jump(inst) + MAX_OP_ARG;
           stack_size--;
           break;
         case JUMP_FALSE:
-          inst->arg = insts_calculate_jump(inst) + MAX_OP_ARG;
           stack_size--;
           break;
-        case JUMP_FALSE_OR_POP:
-          inst->arg = insts_calculate_jump(inst) + MAX_OP_ARG;
-          break;
         case BLOCK:
-          inst->arg = insts_calculate_jump(inst) + MAX_OP_ARG;
           stack_size--;
           break;
         case END_BLOCK:
@@ -488,7 +515,13 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
           stack_size--; // subtract 2, add 1
           break;
       }
-      c->insts[count++] = ((inst->opcode & 0x3F) << 26) | (inst->arg & 0x3FFFFFF);
+      if (inst->opcode == JUMP || inst->opcode == JUMP_FALSE ||
+          inst->opcode == JUMP_FALSE_OR_POP || inst->opcode == BLOCK) {
+        int jump = insts_calculate_jump(inst) + MAX_OP_ARG;
+        c->insts[count++] = ((inst->opcode & 0x3F) << 26) | (jump & 0x3FFFFFF);
+      } else {
+        c->insts[count++] = ((inst->opcode & 0x3F) << 26) | (inst->arg & 0x3FFFFFF);
+      }
     }
     c->num_locals = code_gen->num_locals;
     c->max_stack_size = max_stack_size;
@@ -496,6 +529,7 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
   }
   c->constants = arr_new_from_hash(snap, &code_gen->constants);
   c->global_names = arr_new_from_hash(snap, &code_gen->global_names);
+  list_copy(&code_gen->insts, &c->insts_debug);
   snap_release(snap);
   return c;
 }
@@ -504,6 +538,7 @@ SInst* snap_inst_new(Snap* snap, int opcode) {
  SInst* i = (SInst*)gc_new(snap,  STYPE_INST, sizeof(SInst));
  i->opcode = opcode;
  i->arg = 0;
+ i->arg_data = create_nil();
  jump_arg_init(&i->jump_arg, 0, NULL);
  i->list.next = i->list.prev = NULL;
  return i;
@@ -511,7 +546,9 @@ SInst* snap_inst_new(Snap* snap, int opcode) {
 
 SScope* snap_scope_new(Snap* snap, SScope* up) {
   SScope* s = (SScope*)gc_new(snap,  STYPE_SCOPE, sizeof(SScope));
+  s->up = up;
   snap_hash_init(&s->local_names);
+  snap_vec_init(&s->param_names);
   return s;
 }
 
@@ -529,13 +566,13 @@ SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
   return c;
 }
 
-void snap_define(Snap* snap, const char* name, SValue val) {
+void snap_def(Snap* snap, const char* name, SValue val) {
   SValue key = create_obj(snap_sym_new(snap, name));
   snap_hash_put(&snap->globals, key, val);
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
-  snap_define(snap, name, create_cfunc(cfunc));
+  snap_def(snap, name, create_cfunc(cfunc));
 }
 
 // Stack layout
@@ -632,7 +669,22 @@ static void push_frame(Snap* snap, SCode* code, SValue* stack_base) {
 #define mod_iop(a, b) create_int(a->i % b->i)
 #define mod_fop(a, b) create_float(fmod(a->f, b->f))
 
-#define dispatch(n) pc += n; continue
+#define GETOP() (((*pc) >> 26) & 0x3F)
+#define GETARG() ((*pc) & 0x3FFFFFF)
+#define GETJARG() (((*pc) & 0x3FFFFFF) - MAX_OP_ARG)
+
+#define NEXT(n) pc += n
+
+#define INDIRECT_DISPATCH 1
+
+#ifdef INDIRECT_DISPATCH
+#define OP(name) _##name:
+#define OPT(name) [name] = &&_##name
+#define DISPATCH() goto *optable[GETOP()]
+#else
+#define OP(name) case name:
+#define DISPATCH() continue
+#endif
 
 static SValue exec(Snap* snap) {
   SnapFrame* frame;
@@ -647,6 +699,14 @@ static SValue exec(Snap* snap) {
   SValue temp;
   int i, arg;
 
+#ifdef INDIRECT_DISPATCH
+#define XX(opcode, name, has_arg) OPT(opcode),
+  static void *optable[] = {
+    OPCODE_MAP(XX)
+  };
+#undef XX
+#endif
+
 new_frame:
     frame = &snap->frames[snap->frames_top - 1];
     code = frame->code;
@@ -656,58 +716,83 @@ new_frame:
     locals = frame->stack_base;
     stack = frame->stack_top;
 
-  for (;;) {
-    int inst = *pc;
-    int opcode = (inst >> 26) & 0x3F;
-    switch (opcode) {
-      case LOAD_GLOBAL:
-        arg = inst & 0x3FFFFFF;
+#ifdef INDIRECT_DISPATCH
+    DISPATCH();
+#endif
+
+#ifndef INDIRECT_DISPATCH
+  for (;;) { switch (GETOP()) {
+#endif
+      OP(LOAD_GLOBAL) {
+        arg = GETARG();
+        NEXT(1);
         a = snap_hash_get(&snap->globals, global_names[arg]);
         if (!a) {
-          return create_nil();
+          // TODO: Better error
+          return create_obj(snap_err_new_str(snap, "runtime_error", "Unable to find global"));
         }
         *stack++ = *a;
-        dispatch(1);
-      case STORE_GLOBAL:
-        arg = inst & 0x3FFFFFF;
+        DISPATCH();
+      }
+      OP(STORE_GLOBAL) {
+        arg = GETARG();
+        NEXT(1);
         snap_hash_put(&snap->globals, global_names[arg], *--stack);
-        dispatch(1);
-      case LOAD_LOCAL:
-        arg = inst & 0x3FFFFFF;
+        DISPATCH();
+      }
+      OP(LOAD_LOCAL) {
+        arg = GETARG();
+        NEXT(1);
         *stack++ = locals[arg];
-        dispatch(1);
-      case STORE_LOCAL:
-        arg = inst & 0x3FFFFFF;
+        DISPATCH();
+      }
+      OP(STORE_LOCAL) {
+        arg = GETARG();
+        NEXT(1);
         locals[arg] = *--stack;
-        dispatch(1);
-      case LOAD_CONSTANT:
-        arg = inst & 0x3FFFFFF;
+        DISPATCH();
+      }
+      OP(LOAD_CONSTANT) {
+        arg = GETARG();
+        NEXT(1);
         *stack++ = constants[arg];
-        dispatch(1);
-      case LOAD_NIL:
-        arg = inst & 0x3FFFFFF;
+        DISPATCH();
+      }
+      OP(LOAD_NIL) {
+        arg = GETARG();
+        NEXT(1);
         *stack++ = create_nil();
-        dispatch(1);
-      case POP:
+        DISPATCH();
+      }
+      OP(POP) {
+        NEXT(1);
         --stack;
-        dispatch(1);
-      case DUP:
+        DISPATCH();
+      }
+      OP(DUP) {
+        NEXT(1);
         *stack = *(stack - 1);
         stack++;
-        dispatch(1);
-      case ROT2:
+        DISPATCH();
+      }
+      OP(ROT2) {
+        NEXT(1);
         temp = *(stack - 1);
         *(stack - 1) = *(stack - 2);
         *(stack - 2) = temp;
-        dispatch(1);
-      case ROT3:
+        DISPATCH();
+      }
+      OP(ROT3) {
+        NEXT(1);
         temp = *(stack - 3);
         *(stack - 3) = *(stack - 1);
         *(stack - 1) = *(stack - 2);
         *(stack - 2) = temp;
-        dispatch(1);
-      case CALL:
-        arg = inst & 0x3FFFFFF;
+        DISPATCH();
+      }
+      OP(CALL) {
+        arg = GETARG();
+        NEXT(1);
         a = --stack; // Pop callable
         if (is_cfunc_p(a)) {
           temp = create_nil();
@@ -716,16 +801,17 @@ new_frame:
           stack -= arg; // Pop arguments
           *stack++ = temp;
         } else if (is_code_p(a)){
-          frame->pc = pc + 1;
+          frame->pc = pc;
           frame->stack_top = stack - arg; // Pop arguments
           push_frame(snap, (SCode*)a->o, frame->stack_top);
           goto new_frame;
         } else {
-          // TODO: Handle code or error
+          // TODO) Handle code or error
           return create_nil();
         }
-        dispatch(1);
-      case RETURN:
+        DISPATCH();
+      }
+      OP(RETURN) {
         if (snap->frames_top > 1) {
           SnapFrame* frame_prev = &snap->frames[snap->frames_top - 2];
           *frame_prev->stack_top++ = *--stack;
@@ -733,49 +819,63 @@ new_frame:
           goto new_frame;
         }
         return *--stack;
-      case JUMP:
-        arg = (inst & 0x3FFFFFF) - MAX_OP_ARG;
-        dispatch(arg);
-      case JUMP_FALSE:
+      }
+      OP(JUMP) {
+        arg = GETJARG();
+        NEXT(arg);
+        DISPATCH();
+      }
+      OP(JUMP_FALSE) {
         a = --stack;
         if (!is_bool_p(a) || !a->b) {
-          arg = (inst & 0x3FFFFFF) - MAX_OP_ARG;
-          dispatch(arg);
+          arg = GETJARG();
+          NEXT(arg);
+        } else {
+          NEXT(1);
         }
-        dispatch(1);
-      case JUMP_FALSE_OR_POP:
+        DISPATCH();
+      }
+      OP(JUMP_FALSE_OR_POP) {
         a = stack - 1;
         if (!is_bool_p(a) || !a->b) {
-          arg = (inst & 0x3FFFFFF) - MAX_OP_ARG;
-          dispatch(arg);
+          arg = GETJARG();
+          NEXT(arg);
+        } else {
+          NEXT(1);
         }
         --stack;
-        dispatch(1);
-      case BLOCK:
-        // TODO: Handle too many blocks
-        arg = (inst & 0x3FFFFFF) - MAX_OP_ARG;
+        DISPATCH();
+      }
+      OP(BLOCK) {
+        // TODO) Handle too many blocks
+        arg = GETJARG();
         block = &frame->blocks[frame->blocks_top++];
         block->insts_offset = (pc - code->insts) + arg;
         block->stack_offset = stack - snap->stack;
-        dispatch(1);
-      case END_BLOCK:
+        NEXT(1);
+        DISPATCH();
+      }
+      OP(END_BLOCK) {
+        NEXT(1);
         --frame->blocks_top;
-        dispatch(1);
-      case RAISE:
+        DISPATCH();
+      }
+      OP(RAISE) {
         goto raise;
-        dispatch(1);
-      case ADD: binary_op(add, add_iop, add_fop) dispatch(1);
-      case SUB: binary_op(sub, sub_iop, sub_fop) dispatch(1);
-      case MUL: binary_op(mul, mul_iop, mul_fop) dispatch(1);
-      case DIV: binary_op(div, div_iop, div_fop) dispatch(1);
-      case MOD: binary_op(mod, mod_iop, mod_fop) dispatch(1);
-      case LESS_THAN: compare_op(<) dispatch(1);
-      case GREATER_THAN: compare_op(>) dispatch(1);
-      case LESS_EQUALS: compare_op(<=) dispatch(1);
-      case GREATER_EQUALS: compare_op(>=) dispatch(1);
-      case EQUALS: compare_op(==) dispatch(1);
-    }
-  }
+      }
+      OP(ADD) { NEXT(1); binary_op(add, add_iop, add_fop) DISPATCH(); }
+      OP(SUB) { NEXT(1); binary_op(sub, sub_iop, sub_fop) DISPATCH(); }
+      OP(MUL) { NEXT(1); binary_op(mul, mul_iop, mul_fop) DISPATCH(); }
+      OP(DIV) { NEXT(1); binary_op(div, div_iop, div_fop) DISPATCH(); }
+      OP(MOD) { NEXT(1); binary_op(mod, mod_iop, mod_fop) DISPATCH(); }
+      OP(LESS_THAN)      { NEXT(1); compare_op(<) DISPATCH();  }
+      OP(GREATER_THAN)   { NEXT(1); compare_op(>) DISPATCH();  }
+      OP(LESS_EQUALS)    { NEXT(1); compare_op(<=) DISPATCH(); }
+      OP(GREATER_EQUALS) { NEXT(1); compare_op(>=) DISPATCH(); }
+      OP(EQUALS)         { NEXT(1); compare_op(==) DISPATCH(); }
+#ifndef INDIRECT_DISPATCH
+    } }
+#endif
 
   return create_nil();
 
@@ -796,7 +896,7 @@ raise:
   }
 
   return create_obj(snap_err_new(snap,
-                                 (SKeyword*)(stack - 1)->o,
+                                 *(stack - 1),
                                  *(stack - 2)));
 }
 
@@ -866,8 +966,7 @@ static bool is_tail(SnapLex* lex, int token) {
   return token == ')';
 }
 
-static void compile_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token);
-static int compile_expr_list(Snap* snap, SCodeGen* code_gen, SCons* sexpr);
+static int compile_expr_list(Snap* snap, SCodeGen* code_gen, bool pop, SCons* sexpr);
 static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr);
 
 static void raise(Snap* snap, const char* format, ...) {
@@ -947,7 +1046,7 @@ static void parse_fn(Snap* snap, SnapLex* lex, SCons* sexpr) {
   int token;
   int i, len = 0;
   const char* p;
-  SArr* arr;
+  SArr* params;
 
   sexpr->first = create_form(TK_FN);
   sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
@@ -965,19 +1064,77 @@ static void parse_fn(Snap* snap, SnapLex* lex, SCons* sexpr) {
   }
   lex->p = p;
 
-  arr = snap_arr_new(snap, len);
-  sexpr->first = create_obj(arr);
+  params = snap_arr_new(snap, len);
+  sexpr->first = create_obj(params);
 
   for (i = 0; i < len; ++i) {
     snap_lex_next_token(lex);
-    arr->data[i] = create_obj(snap_sym_new(snap, lex->val));
+    params->data[i] = create_obj(snap_sym_new(snap, lex->val));
   }
-  snap_lex_next_token(lex);
+  snap_lex_next_token(lex); /* Consume ']' */
 
   parse_expr_list(snap, lex, sexpr);
 }
 
-static void parse_let(Snap* snap, SnapLex* lex, SCons* sexpr) {
+static void parse_loop_or_let(Snap* snap, SnapLex* lex, int loop_or_let, SCons* sexpr) {
+  int token;
+  int i, len = 0;
+  const char* p;
+  SArr* params;
+
+  sexpr->first = create_form(loop_or_let);
+  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
+
+  if (snap_lex_next_token(lex) != '[') {
+    raise(snap, "Expected parameter list at %d", lex->line);
+  }
+
+  p = lex->p;
+  token = snap_lex_next_token(lex);
+  do {
+    int count = 0;
+    if (token != '[') {
+      raise(snap, "Expected parameter at %d", lex->line);
+    }
+    if (snap_lex_next_token(lex) != TK_ID) {
+      raise(snap, "Expected id for parameter at %d", lex->line);
+    }
+    while ((token = snap_lex_next_token(lex)) != TK_EOF) {
+      if (token == '[') {
+        count++;
+      } else if (token == ']') {
+        if (count > 0) {
+          count--;
+          token = snap_lex_next_token(lex);
+        } else {
+          token = snap_lex_next_token(lex);
+          break;
+        }
+      }
+    }
+    len++;
+  } while(token == '[');
+
+  if (token != ']') {
+    raise(snap, "Expected ']' to terminate parameter list at %d", lex->line);
+  }
+  lex->p = p;
+
+  params = snap_arr_new(snap, len);
+  sexpr->first = create_obj(params);
+
+  for (i = 0; i < len; ++i) {
+    SArr* param = snap_arr_new(snap, 2);
+    params->data[i] = create_obj(param);
+    snap_lex_next_token(lex); /* Consume '[' */
+    snap_lex_next_token(lex); /* Consume TK_ID */
+    param->data[0] = create_obj(snap_sym_new(snap, lex->val));
+    param->data[1] = parse_expr(snap, lex, snap_lex_next_token(lex));
+    snap_lex_next_token(lex); /* Consume ']' */
+  }
+  snap_lex_next_token(lex); /* Consume ']' */
+
+  parse_expr_list(snap, lex, sexpr);
 }
 
 static void parse_quote(Snap* snap, SnapLex* lex, SCons* sexpr) {
@@ -998,27 +1155,18 @@ static void parse_set(Snap* snap, SnapLex* lex, SCons* sexpr) {
 }
 
 static void parse_raise(Snap* snap, SnapLex* lex, SCons* sexpr) {
-  int token;
+  int count;
 
   sexpr->first = create_form(TK_RAISE);
-  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
 
-  if ((token = snap_lex_next_token(lex)) == TK_KEY) {
-    sexpr->first = create_obj(snap_key_new(snap, lex->val));
-  } else {
-    sexpr->first = create_obj(snap_key_new(snap, "error"));
+  count = parse_expr_list(snap, lex, sexpr);
+  if (count > 2) {
+    raise(snap, "Too many arguments for raise at %d", lex->line);
   }
 
-  sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
-
-  if ((token = snap_lex_next_token(lex)) != ')') {
-    sexpr->first = parse_expr(snap, lex, token);
-  } else {
+  if (count == 1) {
+    sexpr = as_cons(sexpr->rest = create_obj(snap_cons_new(snap)));
     sexpr->first = create_nil();
-  }
-
-  if (snap_lex_next_token(lex) != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
   }
 }
 
@@ -1144,7 +1292,7 @@ static SValue parse_sexpr(Snap* snap, SnapLex* lex, int token) {
     case TK_DEF: parse_def(snap, lex, sexpr); break;
     case TK_IF: parse_if(snap, lex, sexpr); break;
     case TK_FN: parse_fn(snap, lex, sexpr); break;
-    case TK_LET: parse_let(snap, lex, sexpr); break;
+    case TK_LET: case TK_LOOP: parse_loop_or_let(snap, lex, token, sexpr); break;
     case TK_QUOTE: parse_quote(snap, lex, sexpr); break;
     case TK_RECUR: parse_cons(snap, lex, token, sexpr); break;
     case TK_SET: parse_set(snap, lex, sexpr); break;
@@ -1279,15 +1427,15 @@ static int get_or_add_index(SnapHash* hash, SValue key) {
 
 int add_local(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   SScope* scope = code_gen->scope;
-  SScope* up = scope;
+  SScope* curr = scope;
   SValue key = create_obj(sym);
   int index = 0;
   if (snap_hash_get(&code_gen->scope->local_names, key)) {
     raise(snap, "Variable '%s' already defined in current scope", sym->data);
   }
-  while (up) {
-    index += scope->local_names.count;
-    up = scope->up;
+  while (curr) {
+    index += curr->local_names.count;
+    curr = curr->up;
   }
   if (index + 1 > code_gen->num_locals) {
     code_gen->num_locals = index + 1;
@@ -1307,7 +1455,9 @@ int add_global(SCodeGen* code_gen, SSymStr* sym) {
 
 static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant) {
   int index = get_or_add_index(&code_gen->constants, constant);
-  insts_append(snap, code_gen, LOAD_CONSTANT)->arg = index;
+  SInst* inst = insts_append(snap, code_gen, LOAD_CONSTANT);
+  inst->arg = index;
+  inst->arg_data = constant;
 }
 
 static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
@@ -1316,14 +1466,18 @@ static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   while (scope) {
     SValue* val = snap_hash_get(&scope->local_names, key);
     if (val) {
-      insts_append(snap, code_gen, LOAD_LOCAL)->arg = val->i;
+      SInst* inst = insts_append(snap, code_gen, LOAD_LOCAL);
+      inst->arg = val->i;
+      inst->arg_data = create_obj(sym);
       return;
     }
     scope = scope->up;
   }
   {
     int index = get_or_add_index(&code_gen->global_names, key);
-    insts_append(snap, code_gen, LOAD_GLOBAL)->arg = index;
+    SInst* inst = insts_append(snap, code_gen, LOAD_GLOBAL);
+    inst->arg = index;
+    inst->arg_data = create_obj(sym);
   }
 }
 
@@ -1333,14 +1487,18 @@ static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   while (scope) {
     SValue* val = snap_hash_get(&scope->local_names, key);
     if (val) {
-      insts_append(snap, code_gen, STORE_LOCAL)->arg = val->i;
+      SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
+      inst->arg = val->i;
+      inst->arg_data = create_obj(sym);
       return;
     }
     scope = scope->up;
   }
   {
     int index = get_or_add_index(&code_gen->global_names, key);
-    insts_append(snap, code_gen, STORE_GLOBAL)->arg = index;
+    SInst* inst = insts_append(snap, code_gen, STORE_GLOBAL);
+    inst->arg = index;
+    inst->arg_data = create_obj(sym);
   }
 }
 
@@ -1348,40 +1506,21 @@ static void compile_def(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   SSymStr* sym = as_sym(sexpr->first);
   compile(snap, code_gen, as_cons(sexpr->rest)->first);
   if (code_gen->scope) {
-    insts_append(snap, code_gen, STORE_LOCAL)->arg =
-        add_local(snap, code_gen, sym);
+    SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
+    inst->arg = add_local(snap, code_gen, sym);
+    inst->arg_data = create_obj(sym);
   } else {
-    insts_append(snap, code_gen, STORE_GLOBAL)->arg =
-        add_global(code_gen, sym);
+    SInst* inst = insts_append(snap, code_gen, STORE_GLOBAL);
+    inst->arg = add_global(code_gen, sym);
+    inst->arg_data = create_obj(sym);
   }
   insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
-
-#if 0
-  SSymStr* sym;
-  int token = snap_lex_next_token(lex);
-  if (token != TK_ID) {
-    raise(snap, "Expected id for first argument of define at %d", lex->line);
-  }
-  sym = anchor_sym(snap_sym_new(snap, lex->val));
-  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
-  if (code_gen->scope) {
-    insts_append(snap, code_gen, STORE_LOCAL)->arg = add_local(snap, code_gen, sym);
-  } else {
-    insts_append(snap, code_gen, STORE_GLOBAL)->arg = add_global(code_gen, sym);
-  }
-  insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
-  snap_release(snap);
-  token = snap_lex_next_token(lex);
-  if (token != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-#endif
 }
 
 static void compile_arith_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   int i;
   int opcode = (sexpr->first.i - TK_ADD) + ADD;
-  int count = compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+  int count = compile_expr_list(snap, code_gen, false, as_cons(sexpr->rest));
   for (i = 1; i < count; ++i) {
     insts_append(snap, code_gen, opcode);
   }
@@ -1435,26 +1574,9 @@ static void compile_cond_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
 }
 
 static void compile_call(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int count = compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+  int count = compile_expr_list(snap, code_gen, false, as_cons(sexpr->rest));
   load_variable(snap, code_gen, as_sym(sexpr->first));
   insts_append(snap, code_gen, CALL)->arg = count;
-
-#if 0
-  int token;
-  int count = 0;
-  SSymStr* sym = anchor_sym(snap_sym_new(snap, lex->val));
-  while ((token = snap_lex_next_token(lex)) != ')') {
-    if (token == TK_EOF) break;
-    compile_expr(snap, lex, code_gen, token);
-    count++;
-  }
-  if (token != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-  load_variable(snap, code_gen, sym);
-  insts_append(snap, code_gen, CALL)->arg = count;
-  snap_release(snap);
-#endif
 }
 
 static void compile_if(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
@@ -1472,47 +1594,12 @@ static void compile_if(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   /* False */
   compile(snap, code_gen, as_cons(as_cons(sexpr->rest)->rest)->first);
   jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-
-#if 0
-  int token;
-  SValue jump_val;
-  SInst* cond_jump, * jump;
-  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
-  cond_jump = insts_append(snap, code_gen, JUMP_FALSE);
-  // true
-  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
-  jump = insts_append(snap, code_gen, JUMP);
-  jump_arg_init(&cond_jump->jump_arg, 1, code_gen->insts.prev);
-  // false
-  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
-  jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-  token = snap_lex_next_token(lex);
-  if (token != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-#endif
 }
 
 static void compile_set(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   compile(snap, code_gen, as_cons(sexpr->rest)->first);
   store_variable(snap, code_gen, as_sym(sexpr->first));
   insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
-#if 0
-  SSymStr* sym;
-  int token = snap_lex_next_token(lex);
-  if (token != TK_ID) {
-    raise(snap, "Expected id for first argument of set! at %d", lex->line);
-  }
-  sym = anchor_sym(snap_sym_new(snap, lex->val));
-  compile_expr(snap, lex, code_gen, snap_lex_next_token(lex));
-  store_variable(snap, code_gen, sym);
-  insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
-  snap_release(snap);
-  token = snap_lex_next_token(lex);
-  if (token != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-#endif
 }
 
 static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
@@ -1527,73 +1614,86 @@ static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
     add_local(snap, code_gen, sym);
   }
 
-  compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+  compile_expr_list(snap, code_gen, true, as_cons(sexpr->rest));
+  insts_append(snap, code_gen, RETURN);
 
-  insts_append(snap, code_gen, RETURN);
   load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
-#if 0
-  // TODO: Anchor
-  int token;
-  SCodeGen* code_gen = snap_code_gen_new(snap, up);
-  code_gen->scope = snap_scope_new(snap, NULL);
-  token = snap_lex_next_token(lex);
-  if (token != '[') {
-    raise(snap, "Expected parameter list at %d", lex->line);
-  }
-  token = snap_lex_next_token(lex);
-  while (token == TK_ID) {
-    SSymStr* sym = snap_sym_new(snap, lex->val);
-    snap_vec_push(&code_gen->param_names, create_obj(sym));
-    add_local(snap, code_gen, sym);
-    token = snap_lex_next_token(lex);
-  }
-  if (token != ']') {
-    raise(snap, "Expected ']' to terminate parameter list at %d", lex->line);
-  }
-  token = compile_expr_list(snap, lex, code_gen);
-  if (token != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-  insts_append(snap, code_gen, RETURN);
-  load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
-#endif
 }
 
-static void compile_let(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  // New scope
+static void compile_loop_or_let(Snap* snap, SCodeGen* code_gen, int loop_or_let, SCons* sexpr) {
+  int i;
+  SArr* args = as_arr(sexpr->first);
+
+  for (i = 0; i < args->len; ++i) {
+    SArr* arg = as_arr(args->data[i]);
+    compile(snap, code_gen, arg->data[1]);
+  }
+
+  code_gen->scope = snap_scope_new(snap, code_gen->scope);
+
+  for (i = 0; i < args->len; ++i) {
+    SArr* arg = as_arr(args->data[i]);
+    SSymStr* sym = as_sym(arg->data[0]);
+    if (loop_or_let == TK_LOOP) {
+      snap_vec_push(&code_gen->scope->param_names, create_obj(sym));
+    }
+    add_local(snap, code_gen, sym);
+  }
+
+  for (i = args->len - 1; i >= 0; --i) {
+    SArr* arg = as_arr(args->data[i]);
+    int index = get_or_add_index(&code_gen->scope->local_names, arg->data[0]);
+    SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
+    inst->arg = index;
+    inst->arg_data = arg->data[0];
+  }
+
+  code_gen->scope->top = code_gen->insts.prev;
+
+  compile_expr_list(snap, code_gen, true, as_cons(sexpr->rest));
+
+  code_gen->scope = code_gen->scope->up;
 }
 
 static void compile_recur(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int i;
-  SnapVec* param_names = &code_gen->param_names;
-  int count = compile_expr_list(snap, code_gen, sexpr);
-  if (count != param_names->size) {
-    raise(snap, "Invalid number of arguments");
+  int i, count = 0;
+  SCons* curr;
+  SnapVec* param_names;
+
+  if (code_gen->scope && code_gen->scope->param_names.size > 0) {
+    param_names = &code_gen->scope->param_names;
+  } else {
+    param_names = &code_gen->param_names;
   }
-  for (i = 0; i < count; ++i) {
-    int index = get_or_add_index(&code_gen->scope->local_names, param_names->items[i]);
-    insts_append(snap, code_gen, STORE_LOCAL)->arg =  index;
-  }
-  jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->insts.next);
-#if 0
-  int i;
-  int token;
-  int count = 0;
-  SnapVec* param_names = &code_gen->param_names;
-  while ((token = snap_lex_next_token(lex)) != ')') {
-    if (token == TK_EOF) break;
-    compile_expr(snap, lex, code_gen, token);
+
+  for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
+    if (count >= param_names->size) {
+      raise(snap, "Invalid number of arguments");
+    }
+    if (!is_sym(curr->first) ||
+        snap_compare(&curr->first, &param_names->items[count]) != 0) {
+      compile(snap, code_gen, curr->first);
+    }
     count++;
   }
-  if (count != param_names->size) {
-    raise(snap, "Invalid number of arguments", lex->line);
+
+  for (i = count - 1; i >= 0; --i) {
+    int j;
+    for (j = 0, curr = sexpr; j < i; ++j, curr = as_cons(curr->rest)) { }
+    if (!is_sym(curr->first) ||
+        snap_compare(&curr->first, &param_names->items[i]) != 0) {
+      int index = get_or_add_index(&code_gen->scope->local_names, param_names->items[i]);
+      SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
+      inst->arg = index;
+      inst->arg_data = param_names->items[i];
+    }
   }
-  for (i = 0; i < count; ++i) {
-    int index = get_or_add_index(&code_gen->scope->local_names, param_names->items[i]);
-    insts_append(snap, code_gen, STORE_LOCAL)->arg =  index;
+
+  if (code_gen->scope && code_gen->scope->param_names.size > 0) {
+    jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->scope->top->next);
+  } else {
+    jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->insts.next);
   }
-  jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->insts.next);
-#endif
 }
 
 static void compile_catch(Snap* snap, SCodeGen* code_gen,
@@ -1616,17 +1716,20 @@ static void compile_catch(Snap* snap, SCodeGen* code_gen,
 
   code_gen->scope = snap_scope_new(snap, code_gen->scope);
   if (arr->len == 2) {
+    add_local(snap, code_gen, as_sym(arr->data[0]));
+    add_local(snap, code_gen, as_sym(arr->data[1]));
     store_variable(snap, code_gen, as_sym(arr->data[0]));
     store_variable(snap, code_gen, as_sym(arr->data[1]));
   } else if (arr->len == 1) {
     insts_append(snap, code_gen, POP);
+    add_local(snap, code_gen, as_sym(arr->data[0]));
     store_variable(snap, code_gen, as_sym(arr->data[0]));
   } else {
     insts_append(snap, code_gen, POP);
     insts_append(snap, code_gen, POP);
   }
 
-  compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+  compile_expr_list(snap, code_gen, true, as_cons(sexpr->rest));
   code_gen->scope = code_gen->scope->up;
 
   if (next_catch) {
@@ -1652,110 +1755,6 @@ static void compile_catch(Snap* snap, SCodeGen* code_gen,
   if (jump_false) {
     jump_arg_init(&jump_false->jump_arg, 1, jump_to);
   }
-
-#if 0
-  int token;
-  SInst* jump_false = NULL;
-  SnapNode* jump_to = NULL;
-  bool final_catch = false;
-  int count = 0;
-  const char* p;
-  SSymStr* sym;
-
-
-  if (empty_catch) {
-    raise(snap, "empty catch is expect to be last at %d", lex->line);
-  }
-
-  if ((token = snap_lex_next_token(lex)) == TK_KEY) {
-    insts_append(snap, code_gen, DUP);
-    load_constant(snap, code_gen, create_obj(snap_key_new(snap, lex->val)));
-    insts_append(snap, code_gen, EQUALS);
-    jump_false = insts_append(snap, code_gen, JUMP_FALSE);
-    token = snap_lex_next_token(lex);
-  } else {
-    empty_catch = true;
-  }
-
-  p = lex->p;
-  if (token != '[') {
-    raise(snap, "Expected '[' to for catch arguments at %d", lex->line);
-  }
-
-  while ((token = snap_lex_next_token(lex)) != ']') {
-    if (token != TK_ID) {
-      raise(snap, "Expected ids for catch arguments at %d", lex->line);
-    }
-    count++;
-  }
-  if (token != ']') {
-    raise(snap, "Expected ']' to terminate catch arguments at %d", lex->line);
-  }
-  lex->p = p;
-
-  if (count > 2) {
-    raise(snap, "Invalid number of catch argument (0 - 2) %d", lex->line);
-  }
-
-  code_gen->scope = snap_scope_new(snap, code_gen->scope);
-  if (count == 2) {
-    snap_lex_next_token(lex);
-    sym = anchor_sym(snap_sym_new(snap, lex->val));
-    store_variable(snap, code_gen, sym);
-    snap_release(snap);
-    snap_lex_next_token(lex);
-    sym = anchor_sym(snap_sym_new(snap, lex->val));
-    store_variable(snap, code_gen, sym);
-    snap_release(snap);
-  } else if (count == 1) {
-    insts_append(snap, code_gen, POP);
-    snap_lex_next_token(lex);
-    sym = anchor_sym(snap_sym_new(snap, lex->val));
-    store_variable(snap, code_gen, sym);
-    snap_release(snap);
-  } else {
-    insts_append(snap, code_gen, POP);
-    insts_append(snap, code_gen, POP);
-  }
-  snap_lex_next_token(lex); /* Consume ']' */
-
-  token = compile_expr_list(snap, lex, code_gen);
-  code_gen->scope = code_gen->scope->up;
-
-  if (token != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-
-  if ((token = snap_lex_next_token(lex)) == '(')  {
-    if ((token = snap_lex_next_token(lex)) == TK_CATCH) {
-      SInst* jump = insts_append(snap, code_gen, JUMP);
-      if (jump_false) {
-        jump_arg_init(&jump_false->jump_arg, 1, code_gen->insts.prev);
-        jump_false = NULL;
-      }
-      token = compile_catch(snap, lex, code_gen, empty_catch);
-      jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-    } else {
-      final_catch = true;
-    }
-  } else {
-      final_catch = true;
-  }
-
-  if (!empty_catch && final_catch) {
-    SInst* jump = insts_append(snap, code_gen, JUMP);
-    jump_to = insts_append(snap, code_gen, RAISE)->list.prev;
-    jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-  } else {
-    jump_to = code_gen->insts.prev;
-  }
-
-  if (jump_false) {
-    jump_arg_init(&jump_false->jump_arg, 1, jump_to);
-  }
-
-  return token;
-#endif
 }
 
 static void compile_try(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
@@ -1793,91 +1792,12 @@ static void compile_try(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
                 as_cons(curr->rest));
 
   jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-
-#if 0
-  int token;
-  int count = 0;
-  int index;
-  bool empty_catch = false;
-  SInst* jump_catch, * jump;
-
-  jump_catch = insts_append(snap, code_gen, BLOCK);
-
-  while ((token = snap_lex_next_token(lex)) != ')') {
-    if (token == TK_EOF) break;
-    if (token == '(') {
-      token = snap_lex_next_token(lex);
-      if (token == TK_CATCH) {
-        break;
-      } else {
-        if (!first) insts_append(snap, code_gen, POP);
-        first = false;
-        compile_sexpr(snap, lex, code_gen, token);
-        count++;
-      }
-    } else {
-      if (!first) insts_append(snap, code_gen, POP);
-      first = false;
-      compile_expr(snap, lex, code_gen, token);
-      count++;
-    }
-  }
-
-  if (count < 1) {
-    compile_err(snap, "Expression expected at %d", lex->line);
-  }
-
-  if (token != TK_CATCH) {
-    compile_err(snap, "catch expected at %d", lex->line);
-  }
-
-  insts_append(snap, code_gen, END_BLOCK);
-  jump = insts_append(snap, code_gen, JUMP);
-
-  jump_arg_init(&jump_catch->jump_arg, 1, code_gen->insts.prev);
-
-  token = compile_catch(snap, lex, code_gen, false);
-
-  jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-
-  if (token != ')') {
-    compile_err(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-#endif
 }
 
 static void compile_raise(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   compile(snap, code_gen, as_cons(sexpr->rest)->first);
-  load_constant(snap, code_gen, sexpr->first);
+  compile(snap, code_gen, sexpr->first);
   insts_append(snap, code_gen, RAISE);
-#if 0
-  SInst* raise;
-  int token = snap_lex_next_token(lex);
-  int count = 1;
-
-  SKeyword* key;
-
-  if (token == TK_KEY) {
-    key = anchor_key(snap_key_new(snap, lex->val));
-  } else {
-    key = anchor_key(snap_key_new(snap, "error"));
-  }
-
-  if ((token = snap_lex_next_token(lex)) != ')') {
-    compile_expr(snap, lex, code_gen, token);
-  } else {
-    insts_append(snap, code_gen, LOAD_NIL);
-  }
-
-  if ((token = snap_lex_next_token(lex)) != ')') {
-    raise(snap, "Expected ')' to terminate s-expression at %d", lex->line);
-  }
-
-  load_constant(snap, code_gen, create_obj(key));
-  insts_append(snap, code_gen, RAISE);
-
-  snap_release(snap);
-#endif
 }
 
 static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
@@ -1888,7 +1808,7 @@ static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
     case STYPE_FORM:
       switch (sexpr->first.i) {
         case TK_DO:
-          compile_expr_list(snap, code_gen, as_cons(sexpr->rest));
+          compile_expr_list(snap, code_gen, true, as_cons(sexpr->rest));
           break;
         case TK_DEF:
           compile_def(snap, code_gen, as_cons(sexpr->rest));
@@ -1900,7 +1820,10 @@ static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
           compile_fn(snap, code_gen, as_cons(sexpr->rest));
           break;
         case TK_LET:
-          compile_let(snap, code_gen, as_cons(sexpr->rest));
+          compile_loop_or_let(snap, code_gen, TK_LET, as_cons(sexpr->rest));
+          break;
+        case TK_LOOP:
+          compile_loop_or_let(snap, code_gen, TK_LOOP, as_cons(sexpr->rest));
           break;
         case TK_QUOTE:
           load_constant(snap, code_gen, as_cons(sexpr->rest)->first);
@@ -1929,78 +1852,13 @@ static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
       raise(snap, "Expected id, special form or expr");
       break;
   }
-#if 0
-  switch (token) {
-    case ')':
-      break;
-    case TK_ID:
-      compile_call(snap, lex, code_gen);
-      break;
-    default:
-      compile_err(snap, "Expected id, special form or expr at %d", lex->line);
-      break;
-  }
-#endif
 }
 
-static void compile_expr(Snap* snap, SnapLex* lex, SCodeGen* code_gen, int token) {
-#if 0
-  switch (token) {
-    case '(':
-      compile_sexpr(snap, lex, code_gen, snap_lex_next_token(lex));
-      break;
-    case '\'':
-      break;
-    case TK_INT:
-      load_constant(snap, code_gen, create_int(atol(lex->val)));
-      break;
-    case TK_FLOAT:
-      load_constant(snap, code_gen, create_float(atof(lex->val)));
-      break;
-    case TK_STR:
-      load_constant(snap, code_gen, create_obj(snap_str_new(snap, lex->val)));
-      break;
-    case TK_ID:
-      load_variable(snap, code_gen, anchor_sym(snap_sym_new(snap, lex->val)));
-      snap_release(snap);
-      break;
-    case TK_KEY:
-      load_constant(snap, code_gen, create_obj(snap_key_new(snap, lex->val)));
-      break;
-    case TK_TRUE:
-    case TK_FALSE:
-      load_constant(snap, code_gen, create_bool(token == TK_TRUE));
-      break;
-    case TK_NIL:
-      insts_append(snap, code_gen, LOAD_NIL);
-      break;
-    case TK_DO:
-    case TK_DEF:
-    case TK_ELLIPSIS:
-    case TK_IF:
-    case TK_FN:
-    case TK_LET:
-    case TK_QUOTE:
-    case TK_RECUR:
-    case TK_SET:
-    case TK_RAISE:
-    case TK_TRY:
-      // error
-      break;
-    case TK_EOF:
-      break;
-    default:
-      compile_err(snap, "Invalid token on line %d", lex->line);
-      break;
-  }
-#endif
-}
-
-static int compile_expr_list(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+static int compile_expr_list(Snap* snap, SCodeGen* code_gen, bool pop, SCons* sexpr) {
   SCons* curr;
   int count = 0;
   for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
-    if (count > 0) insts_append(snap, code_gen, POP);
+    if (pop && count > 0) insts_append(snap, code_gen, POP);
     compile(snap, code_gen, curr->first);
     count++;
   }
@@ -2009,6 +1867,13 @@ static int compile_expr_list(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
 
 static inline void list_init(SnapNode* list) {
   list->next = list->prev = list;
+}
+
+static inline void list_copy(SnapNode* src, SnapNode* dst) {
+  src->next->prev = dst;
+  src->prev->next = dst;
+  dst->next = src->next;
+  dst->prev = src->prev;
 }
 
 static inline bool list_is_empty(SnapNode* list) {
@@ -2057,12 +1922,6 @@ static int list_backward_count(SnapNode* first, SnapNode* last) {
   return count++;
 }
 
-static void code_gen_destroy(SCodeGen* code_gen) {
-  snap_hash_destroy(&code_gen->constants);
-  snap_hash_destroy(&code_gen->global_names);
-  free(code_gen);
-}
-
 static SInst* insts_append(Snap* snap, SCodeGen* code_gen, int opcode) {
   SInst* inst = snap_inst_new(snap, opcode);
   code_gen->insts_count++;
@@ -2107,6 +1966,7 @@ static void print_val(SValue val, int indent) {
         case TK_IF: iprintf(indent, "if"); break;
         case TK_FN: iprintf(indent, "fn"); break;
         case TK_LET: iprintf(indent, "let"); break;
+        case TK_LOOP: iprintf(indent, "loop"); break;
         case TK_QUOTE: iprintf(indent, "quote"); break;
         case TK_RECUR: iprintf(indent, "recur"); break;
         case TK_SET: iprintf(indent, "set"); break;
@@ -2115,6 +1975,8 @@ static void print_val(SValue val, int indent) {
         case TK_CATCH: iprintf(indent, "catch"); break;
         case TK_LT: iprintf(indent, "<"); break;
         case TK_ADD: iprintf(indent, "+"); break;
+        case TK_SUB: iprintf(indent, "-"); break;
+        case TK_MUL: iprintf(indent, "*"); break;
       }
       break;
     case STYPE_STR:
@@ -2127,7 +1989,9 @@ static void print_val(SValue val, int indent) {
       iprintf(indent, ":%s", as_key(val)->data);
       break;
     case STYPE_ERR:
-      iprintf(indent, "<err %s ", as_err(val)->err->data);
+      iprintf(indent, "<err ");
+      print_val(as_err(val)->err, 0);
+      printf(" ");
       print_val(as_err(val)->msg, 0);
       printf(">");
       break;
@@ -2198,21 +2062,7 @@ static void print_code(SCode* code, int indent) {
     iprintf(indent, "}\n");
   }
   iprintf(indent, "instructions: {\n");
-  for (i = 0; i < code->insts_count; ++i) {
-    int inst = code->insts[i];
-    int op = (inst >> 26) & 0x3F;
-    switch (op) {
-#define XX(opcode, name, has_arg) \
-      case opcode: \
-        if (!has_arg) { iprintf(indent + 1, "%04d: %s\n", i, name); } \
-        else { iprintf(indent + 1, "%04d: %s %d\n", i, name, \
-                      op == JUMP || op == JUMP_FALSE || op == JUMP_FALSE_OR_POP || op == BLOCK \
-                      ? (inst & 0x3FFFFFF) - MAX_OP_ARG : inst & 0x3FFFFFF); } \
-        break;
-      OPCODE_MAP(XX)
-#undef XX
-    }
-  }
+  insts_dump(&code->insts_debug, indent);
   iprintf(indent, "}\n");
 }
 
@@ -2296,21 +2146,63 @@ static void insts_remove_dead_code(SnapNode* insts) {
   }
 }
 
-static void insts_dump(SnapNode* insts) {
+static void insts_dump(SnapNode* insts, int indent) {
   SnapNode* pos;
   int i = 0;
+  int jump;
   list_foreach(insts) {
     SInst* inst = list_entry(SInst, pos, list);
     switch(inst->opcode) {
-#define XX(opcode, name, has_arg) \
-      case opcode: \
-        if (!has_arg) { printf("%04d: %s\n", i, name); } \
-        else { printf("%04d: %s %d\n", i, name, \
-                      inst->arg == JUMP || inst->arg == JUMP_FALSE || inst->arg == JUMP_FALSE_OR_POP \
-                      ? inst->arg - MAX_OP_ARG : inst->arg); } \
+      case LOAD_GLOBAL:
+      case STORE_GLOBAL:
+      case LOAD_LOCAL:
+      case STORE_LOCAL:
+        iprintf(indent + 1, "%8d %-18s %-8d (%s)\n",
+                i, opcode_name(inst->opcode), inst->arg, as_sym(inst->arg_data)->data);
         break;
-      OPCODE_MAP(XX)
-    #undef XX
+      case LOAD_CONSTANT:
+        if (inst->arg_data.type == STYPE_BOOL  || inst->arg_data.type == STYPE_INT ||
+            inst->arg_data.type == STYPE_FLOAT || inst->arg_data.type == STYPE_STR ||
+            inst->arg_data.type == STYPE_SYM || inst->arg_data.type == STYPE_KEY) {
+          iprintf(indent + 1, "%8d %-18s %-8d (",
+                  i, opcode_name(inst->opcode), inst->arg);
+          print_val(inst->arg_data, 0);
+          printf(")\n");
+        } else {
+          iprintf(indent + 1, "%8d %-18s %-8d (<%s at %p>)\n",
+                  i, opcode_name(inst->opcode), inst->arg,
+                  stype_name(inst->arg_data.type), inst->arg_data.o);
+        }
+        break;
+      case LOAD_NIL:
+      case POP:
+      case DUP:
+      case ROT2:
+      case ROT3:
+      case CALL:
+      case RETURN:
+      case END_BLOCK:
+      case RAISE:
+      case ADD:
+      case SUB:
+      case MUL:
+      case DIV:
+      case MOD:
+      case LESS_THAN:
+      case LESS_EQUALS:
+      case GREATER_THAN:
+      case GREATER_EQUALS:
+      case EQUALS:
+        iprintf(indent + 1, "%8d %-18s\n", i, opcode_name(inst->opcode));
+        break;
+      case JUMP:
+      case JUMP_FALSE:
+      case JUMP_FALSE_OR_POP:
+      case BLOCK:
+        jump = insts_calculate_jump(inst);
+        iprintf(indent + 1, "%8d %-18s %-8d (jump to %d)\n", i,
+                opcode_name(inst->opcode), jump, i + jump);
+        break;
     }
     i++;
   }
@@ -2348,8 +2240,8 @@ void snap_init(Snap* snap) {
   snap_hash_init(&snap->globals);
   snap_hash_init(&snap->keywords);
 
-  snap_define(snap, "print", create_cfunc(builtin_print));
-  snap_define(snap, "println", create_cfunc(builtin_println));
+  snap_def(snap, "print", create_cfunc(builtin_print));
+  snap_def(snap, "println", create_cfunc(builtin_println));
 }
 
 void snap_destroy(Snap* snap) {
