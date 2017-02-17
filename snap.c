@@ -132,7 +132,7 @@ static void push_val(Snap* snap, SValue val) {
 
 static void pop_val(Snap* snap, SValue val) {
   if (is_obj(val)) {
-    assert(snap->anchored[snap->anchored_top - 1] == val.o);
+    assert(snap_vec_back(&snap->anchors) == val.o);
     snap_release(snap);
   }
 }
@@ -288,9 +288,8 @@ static void gc_mark_hash(Snap* snap, SnapHash* hash) {
 }
 
 static void gc_mark_vec(Snap* snap, SnapVec* vec) {
-  int i;
-  for (i = 0; i < vec->size; ++i) {
-    SValue* item = &vec->items[i];
+  SValue* item;
+  snap_vec_foreach(vec, item) {
     if (!is_undef_p(item)) {
       gc_mark_val(snap, *item);
     }
@@ -339,11 +338,10 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
 }
 
 static void gc_collect(Snap* snap) {
-  int i;
   SObject** obj;
 
-  for (i = 0; i < snap->anchored_top; ++i) {
-    gc_mark(snap, snap->anchored[i]);
+  snap_vec_foreach(&snap->anchors, obj) {
+    gc_mark(snap, *obj);
   }
 
   gc_mark_hash(snap, &snap->globals);
@@ -548,7 +546,7 @@ SScope* snap_scope_new(Snap* snap, SScope* up) {
   SScope* s = (SScope*)gc_new(snap,  STYPE_SCOPE, sizeof(SScope));
   s->up = up;
   snap_hash_init(&s->local_names);
-  snap_vec_init(&s->param_names);
+  snap_vec_init(&s->param_names, SValue, 2);
   return s;
 }
 
@@ -559,7 +557,7 @@ SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
   c->scope = NULL;
   snap_hash_init(&c->constants);
   snap_hash_init(&c->global_names);
-  snap_vec_init(&c->param_names);
+  snap_vec_init(&c->param_names, SValue, 2);
   c->num_locals = 0;
   c->is_tail = false;
   c->up = NULL;
@@ -584,17 +582,12 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
 // 3) [args and locals][stack...][return value]
 
 static void push_frame(Snap* snap, SCode* code, SValue* stack_base) {
-  SnapFrame* frame;
-  if (snap->frames_top + 1 >= snap->frames_size) {
-    snap->frames_size = snap->frames_size > 0 ? 2 * snap->frames_size : 4;
-    snap->frames = (SnapFrame*)realloc(snap->frames, snap->frames_size * sizeof(SnapFrame));
-  }
-  frame = &snap->frames[snap->frames_top++];
+  SnapFrame* frame = snap_vec_push(&snap->frames, SnapFrame);
   frame->code = code;
   frame->pc = code->insts;
   frame->blocks_top = 0;
   if (stack_base + code->max_stack_size >= snap->stack_end) {
-    int i;
+    SnapFrame* frame;
     uintptr_t d;
     // TODO: Grow more intelligently than this
     int stack_size = (snap->stack_end - snap->stack) + code->max_stack_size;
@@ -603,8 +596,7 @@ static void push_frame(Snap* snap, SCode* code, SValue* stack_base) {
     snap->stack_end = stack_new + stack_size;
 
     // Update stack pointers to the new stack
-    for (i = 0; i < snap->frames_top; ++i) {
-      SnapFrame* frame = &snap->frames[i];
+    snap_vec_foreach(&snap->frames, frame) {
       d = frame->stack_base - stack_old;
       frame->stack_base = stack_new + d;
       d = frame->stack_top - stack_old;
@@ -708,7 +700,7 @@ static SValue exec(Snap* snap) {
 #endif
 
 new_frame:
-    frame = &snap->frames[snap->frames_top - 1];
+    frame = &snap_vec_back(&snap->frames);
     code = frame->code;
     pc = frame->pc;
     constants = code->constants->data;
@@ -812,10 +804,10 @@ new_frame:
         DISPATCH();
       }
       OP(RETURN) {
-        if (snap->frames_top > 1) {
-          SnapFrame* frame_prev = &snap->frames[snap->frames_top - 2];
+        if (snap->frames.vsize > 1) {
+          SnapFrame* frame_prev = &snap_vec_back(&snap->frames) - 1;
           *frame_prev->stack_top++ = *--stack;
-          --snap->frames_top;
+          snap_vec_pop(&snap->frames);
           goto new_frame;
         }
         return *--stack;
@@ -880,10 +872,10 @@ new_frame:
   return create_nil();
 
 raise:
-  while (snap->frames_top > 0) {
-    frame = &snap->frames[snap->frames_top - 1];
+  while (snap->frames.vsize > 0) {
+    frame = &snap_vec_back(&snap->frames);
     if (frame->blocks_top > 0) break;
-    --snap->frames_top;
+    snap_vec_pop(&snap->frames);
   }
 
   if (frame->blocks_top > 0) {
@@ -939,19 +931,12 @@ err:
 }
 
 SObject* snap_anchor(Snap* snap, SObject* obj) {
-  if (snap->anchored_top >= snap->anchored_capacity) {
-    snap->anchored_capacity *= 2;
-    snap->anchored
-        = (SObject**)realloc(snap->anchored,
-                             snap->anchored_capacity * sizeof(SObject*));
-  }
-  snap->anchored[snap->anchored_top++] = obj;
+  *snap_vec_push(&snap->anchors, SObject*) = obj;
   return obj;
 }
 
 void snap_release(Snap* snap) {
-  assert(snap->anchored_top > 0);
-  snap->anchored_top--;
+  snap_vec_pop(&snap->anchors);
 }
 
 static bool is_tail(SnapLex* lex, int token) {
@@ -1364,6 +1349,8 @@ static bool parse(Snap* snap, SnapLex* lex, SValue* result) {
   if (setjmp(snap->jmp) > 0) {
     // TODO: clear anchors
     *result = create_obj(snap->cause);
+    print_val(*result, 0);
+    printf("\n");
     return false;
   } else {
     *result = parse_expr(snap, lex, token);
@@ -1610,7 +1597,7 @@ static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
 
   for (i = 0; i < args->len; ++i) {
     SSymStr* sym = as_sym(args->data[i]);
-    snap_vec_push(&code_gen->param_names, create_obj(sym));
+    *snap_vec_push(&code_gen->param_names, SValue) = create_obj(sym);
     add_local(snap, code_gen, sym);
   }
 
@@ -1635,7 +1622,7 @@ static void compile_loop_or_let(Snap* snap, SCodeGen* code_gen, int loop_or_let,
     SArr* arg = as_arr(args->data[i]);
     SSymStr* sym = as_sym(arg->data[0]);
     if (loop_or_let == TK_LOOP) {
-      snap_vec_push(&code_gen->scope->param_names, create_obj(sym));
+      *snap_vec_push(&code_gen->scope->param_names, SValue) = create_obj(sym);
     }
     add_local(snap, code_gen, sym);
   }
@@ -1660,18 +1647,18 @@ static void compile_recur(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   SCons* curr;
   SnapVec* param_names;
 
-  if (code_gen->scope && code_gen->scope->param_names.size > 0) {
+  if (code_gen->scope && code_gen->scope->param_names.vsize > 0) {
     param_names = &code_gen->scope->param_names;
   } else {
     param_names = &code_gen->param_names;
   }
 
   for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
-    if (count >= param_names->size) {
+    if (count >= param_names->vsize) {
       raise(snap, "Invalid number of arguments");
     }
     if (!is_sym(curr->first) ||
-        snap_compare(&curr->first, &param_names->items[count]) != 0) {
+        snap_compare(&curr->first, &param_names->vitems[count]) != 0) {
       compile(snap, code_gen, curr->first);
     }
     count++;
@@ -1681,15 +1668,15 @@ static void compile_recur(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
     int j;
     for (j = 0, curr = sexpr; j < i; ++j, curr = as_cons(curr->rest)) { }
     if (!is_sym(curr->first) ||
-        snap_compare(&curr->first, &param_names->items[i]) != 0) {
-      int index = get_or_add_index(&code_gen->scope->local_names, param_names->items[i]);
+        snap_compare(&curr->first, &param_names->vitems[i]) != 0) {
+      int index = get_or_add_index(&code_gen->scope->local_names, param_names->vitems[i]);
       SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
       inst->arg = index;
-      inst->arg_data = param_names->items[i];
+      inst->arg_data = param_names->vitems[i];
     }
   }
 
-  if (code_gen->scope && code_gen->scope->param_names.size > 0) {
+  if (code_gen->scope && code_gen->scope->param_names.vsize > 0) {
     jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->scope->top->next);
   } else {
     jump_arg_init(&insts_append(snap, code_gen, JUMP)->jump_arg, -1, code_gen->insts.next);
@@ -2226,12 +2213,8 @@ void builtin_println(Snap* snap, const SValue* args, int num_args, SValue* resul
 void snap_init(Snap* snap) {
   snap->stack = (SValue*)malloc(1024 * sizeof(SValue));
   snap->stack_end = snap->stack + 1024 * sizeof(SValue);
-  snap->frames = NULL;
-  snap->frames_top = 0;
-  snap->frames_size = 0;
-  snap->anchored = (SObject**)malloc(32 * sizeof(SObject*));
-  snap->anchored_capacity = 32;
-  snap->anchored_top = 0;
+  snap_vec_init(&snap->frames, SnapFrame, 32);
+  snap_vec_init(&snap->anchors, SObject*, 32);
   snap->num_bytes_alloced = 0;
   snap->num_bytes_alloced_last_gc = 0;
   snap->all = NULL;
@@ -2252,7 +2235,8 @@ void snap_destroy(Snap* snap) {
     gc_free(snap, temp);
   }
   free((void*)snap->stack);
-  free((void*)snap->anchored);
+  snap_vec_destroy(&snap->frames);
+  snap_vec_destroy(&snap->anchors);
   snap_hash_destroy(&snap->globals);
   snap_hash_destroy(&snap->keywords);
   assert(snap->num_bytes_alloced == 0);

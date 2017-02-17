@@ -41,7 +41,8 @@ int main(int argc, char** argv) {
       snap_def(&snap, "args", val);
       if (first) snap_release(&snap);
       buf[num_bytes] = '\0';
-      snap_exec(&snap, buf);
+      snap_print(snap_exec(&snap, buf));
+      printf("\n");
     } else {
       fprintf(stderr, "Unable to read %s\n", filename);
     }

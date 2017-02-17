@@ -62,6 +62,10 @@ typedef struct SnapNode_ {
   struct SnapNode_* next;
 } SnapNode;
 
+typedef struct SnapVec_ {
+  SNAP_VEC_FIELDS(SValue);
+} SnapVec;
+
 #define SOBJECT_FIELDS          \
   uint8_t type;                 \
   uint8_t mark;                 \
@@ -172,12 +176,8 @@ struct Snap_ {
   SValue* stack;
   SValue* stack_end;
   int stack_size;
-  SnapFrame* frames;
-  int frames_top;
-  int frames_size;
-  SObject** anchored;
-  int anchored_capacity;
-  int anchored_top;
+  struct { SNAP_VEC_FIELDS(SnapFrame); } frames;
+  struct { SNAP_VEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;

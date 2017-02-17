@@ -1,0 +1,103 @@
+(a (b))
+
+LOAD_CONSTANT 0
+CALL 0 0
+LOAD_CONSTANT 1
+CALL 0 1
+
+
+(a (b 1)  (c 1 2))
+
+
+LOAD_CONSTANT 0
+LOAD_CONSTANT 1
+CALL 1 1
+LOAD_CONSTANT 2
+LOAD_CONSTANT 1
+LOAD_CONSTANT 3
+CALL 2 0
+LOAD_CONSTANT 4
+CALL 1 1
+
+
+(a (b 1)  (c (d)))
+
+LOAD_CONSTANT 0 # load 'b'
+LOAD_CONSTANT 1 # load 1
+CALL 1 1
+
+LOAD_CONSTANT 2 # load 'd'
+CALL 0 0
+
+LOAD_CONSTANT 3 # load 'c'
+CALL 0 0
+
+LOAD_CONSTANT 4 # load 'a'
+CALL 1 1
+
+
+num_result = 0 when function call is last argument
+num_args = args - 1 when function call is last argument
+
+
+(define [x y z] (a))
+(define [x y z] [1 2 3])
+
+(let ([x y z] [1 2 3])
+
+
+(define a (fn (x) (+ x x)))
+(define b (fn (x) (a x)))
+(define c (fn (x) (b x)))
+(c 1)
+
+# function a
+LOAD_LOCAL 0
+LOAD_LOCAL 0
+ADD
+RETURN 1
+
+# function b
+LOAD_LOCAL 0
+LOAD_GLOBAL 2 # load a
+CALL 1 0
+RETURN 0
+
+# function c
+LOAD_LOCAL 0
+LOAD_GLOBAL 1 # load b
+CALL 1 0
+RETURN 0
+
+LOAD_CONSTANT 0 # load 1
+LOAD_GLOBAL 0 # load c
+CALL 1 1
+POP
+
+1)
+[ 1 ]
+[ func 'c' ]
+
+2)
+[ 1 ]
+[ 1 ]
+[ func 'b' ]
+
+3)
+[ 1 ]
+[ 1 ]
+[ 1 ]
+[ func 'a' ]
+
+4)
+[ 1 ]
+[ 1 ]
+[ 1 ]
+[ 1 ]
+[ 1 ]
+
+5)
+[ 1 ]
+[ 1 ]
+[ 1 ]
+[ 2 ]
