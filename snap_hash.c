@@ -77,19 +77,17 @@ void snap_hash_destroy(SnapHash* hash) {
 bool snap_hash_put(SnapHash* hash, SValue key, SValue val) {
   bool is_replaced;
   SEntry* entry = hash_lookup(hash->entries, hash->capacity, &key);
+  entry->val = val;
   if (!is_undef(entry->key)) {
     is_replaced = true;
   } else {
+    entry->key = key;
     hash->count++;
     if ((double)hash->count / hash->capacity > HASH_MAX_LOAD_FACTOR) {
       hash_resize(hash, hash->count / HASH_MIN_LOAD_FACTOR);
-      // Need to find the new entry
-      entry = hash_lookup(hash->entries, hash->capacity, &key);
     }
-    entry->key = key;
     is_replaced = false;
   }
-  entry->val = val;
   return is_replaced;
 }
 
