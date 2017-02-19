@@ -905,19 +905,19 @@ SValue snap_exec(Snap* snap, const char* str) {
   lex.line = 1;
 
   code_gen = anchor_code_gen(snap_code_gen_new(snap, NULL));
-  while (parse(snap, &lex, &expr)) {
-    snap_print(expr);
-    printf("\n");
-    if (!first)  insts_append(snap, code_gen, POP);
-    first = false;
-    compile(snap, code_gen, expr);
+  if (setjmp(snap->jmp) > 0) {
+    result = create_obj(snap->cause);
+    goto err;
+  } else {
+    while (parse(snap, &lex, &expr)) {
+      snap_print(expr);
+      printf("\n");
+      if (!first)  insts_append(snap, code_gen, POP);
+      first = false;
+      compile(snap, code_gen, expr);
+    }
   }
   insts_append(snap, code_gen, RETURN);
-
-  if (expr.type == STYPE_ERR) {
-    result = expr;
-    goto err;
-  }
 
   code = anchor_code(snap_code_new(snap, code_gen));
   print_code(code, 0);
@@ -960,7 +960,7 @@ static void raise(Snap* snap, const char* format, ...) {
   va_start(args, format);
   vsnprintf(msg, sizeof(msg), format, args);
   va_end(args);
-  snap->cause = snap_err_new_str(snap, "parse_error", msg);
+  snap->cause = snap_err_new_str(snap, "parse_compile_error", msg);
   longjmp(snap->jmp, 1);
 }
 
@@ -1351,14 +1351,8 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
 static bool parse(Snap* snap, SnapLex* lex, SValue* result) {
   int token = snap_lex_next_token(lex);
   if (TK_EOF == token) return false;
-  if (setjmp(snap->jmp) > 0) {
-    // TODO: clear anchors
-    *result = create_obj(snap->cause);
-    return false;
-  } else {
-    *result = parse_expr(snap, lex, token);
-    return true;
-  }
+  *result = parse_expr(snap, lex, token);
+  return true;
 }
 
 static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant);
