@@ -988,8 +988,12 @@ static int parse_cons(Snap* snap, SnapLex* lex, int token, SCons* sexpr) {
   return parse_expr_list(snap, lex, sexpr);
 }
 
+static void parse_sub_sexpr(Snap* snap, SnapLex* lex, SCons* sexpr) {
+  sexpr->first = parse_sexpr(snap, lex, snap_lex_next_token(lex));
+  parse_expr_list(snap, lex, sexpr);
+}
+
 static void parse_call(Snap* snap, SnapLex* lex, SCons* sexpr) {
-  int token;
   sexpr->first = create_obj(snap_sym_new(snap, lex->val));
   parse_expr_list(snap, lex, sexpr);
 }
@@ -1272,6 +1276,7 @@ static SValue parse_sexpr(Snap* snap, SnapLex* lex, int token) {
   SCons* sexpr = anchor_cons(snap_cons_new(snap));
   switch (token) {
     case ')': break;
+    case '(': parse_sub_sexpr(snap, lex, sexpr); break;
     case TK_ID: parse_call(snap, lex, sexpr); break;
     case TK_DO: parse_cons(snap, lex, token, sexpr); break;
     case TK_DEF: parse_def(snap, lex, sexpr); break;
@@ -1349,8 +1354,6 @@ static bool parse(Snap* snap, SnapLex* lex, SValue* result) {
   if (setjmp(snap->jmp) > 0) {
     // TODO: clear anchors
     *result = create_obj(snap->cause);
-    print_val(*result, 0);
-    printf("\n");
     return false;
   } else {
     *result = parse_expr(snap, lex, token);
@@ -1563,6 +1566,12 @@ static void compile_cond_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
 static void compile_call(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   int count = compile_expr_list(snap, code_gen, false, as_cons(sexpr->rest));
   load_variable(snap, code_gen, as_sym(sexpr->first));
+  insts_append(snap, code_gen, CALL)->arg = count;
+}
+
+static void compile_sub_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  int count = compile_expr_list(snap, code_gen, false, as_cons(sexpr->rest));
+  compile_sexpr(snap, code_gen, as_cons(sexpr->first));
   insts_append(snap, code_gen, CALL)->arg = count;
 }
 
@@ -1834,6 +1843,9 @@ static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
           compile_cond_expr(snap, code_gen, sexpr);
           break;
       }
+      break;
+    case STYPE_CONS:
+      compile_sub_sexpr(snap, code_gen, sexpr);
       break;
     default:
       raise(snap, "Expected id, special form or expr");

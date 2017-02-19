@@ -1,5 +1,5 @@
-#CFLAGS=-g -O0
-CFLAGS=-O3
+CFLAGS=-g -O0
+#CFLAGS=-O3
 
 TARGET=snap
 SOURCES=$(filter-out snap_lex.c, $(wildcard *.c)) snap_lex.c
