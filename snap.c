@@ -394,6 +394,20 @@ SSymStr* snap_str_new(Snap* snap, const char* str) {
   return s;
 }
 
+SSymStr* snap_strf_new(Snap* snap, const char* format, ...) {
+  int len;
+  char buf[256]; /* TODO: Dynamic buffer size */
+  SSymStr* s;
+  va_list args;
+  va_start(args, format);
+  len = vsnprintf(buf, sizeof(buf), format, args);
+  s = (SSymStr*)gc_new(snap, STYPE_STR, sizeof(SSymStr) + len + 1);
+  s->len = len;
+  strncpy(s->data, buf, len);
+  va_end(args);
+  return s;
+}
+
 SSymStr* snap_sym_new(Snap* snap, const char* sym) {
   size_t len = strlen(sym);
   SSymStr* s = (SSymStr*)gc_new(snap, STYPE_SYM, sizeof(SSymStr) + len + 1);
@@ -522,7 +536,7 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
       }
     }
     c->num_locals = code_gen->num_locals;
-    c->max_stack_size = max_stack_size;
+    c->max_stack_size = max_stack_size + 2; /* Add enough room for raising errors */
     c->insts_count = count;
   }
   c->constants = arr_new_from_hash(snap, &code_gen->constants);
@@ -712,6 +726,11 @@ new_frame:
     DISPATCH();
 #endif
 
+#define RUNTIME_ERROR(err,  ...)                           \
+  *stack++ = create_obj(snap_strf_new(snap, __VA_ARGS__)); \
+  *stack++ = create_obj(snap_key_new(snap, err));          \
+  goto raise;
+
 #ifndef INDIRECT_DISPATCH
   for (;;) { switch (GETOP()) {
 #endif
@@ -720,8 +739,7 @@ new_frame:
         NEXT(1);
         a = snap_hash_get(&snap->globals, global_names[arg]);
         if (!a) {
-          // TODO: Better error
-          return create_obj(snap_err_new_str(snap, "runtime_error", "Unable to find global"));
+          RUNTIME_ERROR("snap_name_error", "'%s' is not defined", as_sym(global_names[arg])->data);
         }
         *stack++ = *a;
         DISPATCH();
@@ -798,8 +816,7 @@ new_frame:
           push_frame(snap, (SCode*)a->o, frame->stack_top);
           goto new_frame;
         } else {
-          // TODO) Handle code or error
-          return create_nil();
+          RUNTIME_ERROR("snap_type_error", "Value is not callable");
         }
         DISPATCH();
       }
@@ -868,6 +885,8 @@ new_frame:
 #ifndef INDIRECT_DISPATCH
     } }
 #endif
+
+#undef RUNTIME_ERROR
 
   return create_nil();
 

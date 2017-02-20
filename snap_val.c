@@ -37,7 +37,7 @@ static int hash_keyword(SKeyword* k) {
 }
 
 static int compare_string(SSymStr* s1, SSymStr* s2) {
-  if (s1->len != s1->len) {
+  if (s1->len != s2->len) {
     return s1->len < s2->len ? -1 : 1;
   }
   return strncmp(s1->data, s2->data, s1->len);

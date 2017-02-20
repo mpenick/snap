@@ -1,6 +1,13 @@
 ; vi: filetype=scheme
 
-((fn [x] (println x)) "hello")
+(try
+    ((+ 1 1))
+    (+ 1 a)
+    (catch :snap_name_error [x] (do (println x) 1))
+    (catch :snap_type_error [x] (do (println x) 2))
+)
+
+;((fn [x] (println x)) "hello")
 
 ;(def test (fn [s i m]
 ;              (if (< i m) (recur
