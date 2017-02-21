@@ -103,7 +103,7 @@ typedef struct SCons_ {
 
 typedef struct SArr_ {
   SOBJECT_FIELDS
-  size_t len;
+  int len;
   SValue data[0];
 } SArr;
 

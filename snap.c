@@ -120,12 +120,6 @@ static void jump_arg_init(SnapJumpArg* jump_arg, int dir, SnapNode* dest) {
   jump_arg->dest = dest;
 }
 
-static int arity(SCons* cons) {
-  int n = 0;
-  for (; cons; cons = as_cons(cons->rest)) n++;
-  return n;
-}
-
 static void push_val(Snap* snap, SValue val) {
   if (is_obj(val)) snap_anchor(snap, val.o);
 }
@@ -703,7 +697,7 @@ static SValue exec(Snap* snap) {
   SValue* stack;
   SValue* a, * b, * r;
   SValue temp;
-  int i, arg;
+  int arg;
 
 #ifdef INDIRECT_DISPATCH
 #define XX(opcode, name, has_arg) OPT(opcode),
@@ -1378,8 +1372,6 @@ static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant);
 static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym);
 
 static void compile(Snap* snap, SCodeGen* code_gen, SValue expr) {
-  int token;
-  bool first = true;
   switch (expr.type) {
     case STYPE_INT:
     case STYPE_FLOAT:
@@ -1405,15 +1397,6 @@ static void compile(Snap* snap, SCodeGen* code_gen, SValue expr) {
       raise(snap, "Unexpected type");
       break;
   }
-  /*
-  while ((token = snap_lex_next_token(lex)) != TK_EOF) {
-    if (!first) insts_append(snap, code_gen, POP);
-    compile_expr(snap, lex, code_gen, token);
-    first = false;
-  }
-  */
-  //snap_release(snap);
-  //return snap_code_new(snap, code_gen);
 }
 
 static int get_or_add_index(SnapHash* hash, SValue key) {
@@ -1589,7 +1572,6 @@ static void compile_sub_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
 }
 
 static void compile_if(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  SValue jump_val;
   SInst* cond_jump, * jump;
 
   compile(snap, code_gen, sexpr->first);

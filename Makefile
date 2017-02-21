@@ -1,4 +1,4 @@
-CFLAGS=-g -O0
+CFLAGS=-g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
 #CFLAGS=-O3
 
 TARGET=snap

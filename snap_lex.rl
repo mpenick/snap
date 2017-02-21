@@ -32,6 +32,10 @@ int snap_lex_next_token(SnapLex* lex) {
 
   lex->val[0] = '\0';
 
+  (void) lex_first_final;
+  (void) lex_error;
+  (void) lex_en_main;
+
   %%{
     ws = [ \t];
     comment = ";" [^\r\n]*;
