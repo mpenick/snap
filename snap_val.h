@@ -25,7 +25,8 @@ typedef double SnapFloat;
   XX(STYPE_SCOPE, 13, "scope") \
   XX(STYPE_CODE_GEN, 14, "codegen") \
   XX(STYPE_CODE, 15, "code") \
-  XX(STYPE_KEY, 16, "key")
+  XX(STYPE_CLOSURE, 16, "closure") \
+  XX(STYPE_KEY, 17, "key")
 
 enum {
 #define XX(type, id, name) type,

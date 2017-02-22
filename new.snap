@@ -1,11 +1,27 @@
 ; vi: filetype=scheme
 
-(try
-    ((+ 1 1))
-    (+ 1 a)
-    (catch :snap_name_error [x] (do (println x) 1))
-    (catch :snap_type_error [x] (do (println x) 2))
-)
+;(let [[y 1] [x 1]]
+;  ((fn [] (set! x (+ x 99)) (println x)))
+;  )
+
+(((fn [x y z]
+     (let [[x 1]]
+       (fn [] (println x y z))
+       )
+     )))
+
+;(let [[x 1]]
+;  (println x)
+;  (let [[y 2]]
+;    (println x))
+;  )
+
+;(try
+;    ((+ 1 1))
+;    (+ 1 a)
+;    (catch :snap_name_error [x] (do (println x) 1))
+;    (catch :snap_type_error [x] (do (println x) 2))
+;)
 
 ;((fn [x] (println x)) "hello")
 

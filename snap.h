@@ -138,8 +138,10 @@ typedef struct SCodeGen_ {
   SScope* scope;
   SnapHash constants;
   SnapHash global_names;
+  SnapHash closed_names;
   SnapVec param_names;
   int num_locals;
+  int num_closed;
   int num_results;
   bool is_tail;
   struct SCodeGen_* up;
@@ -155,6 +157,23 @@ typedef struct SCode_ {
   int insts_count;
   SnapNode insts_debug;
 } SCode;
+
+typedef struct SnapClosed_ {
+  SValue* value;
+  SValue closed;
+} SnapClosed;
+
+typedef struct SClosedProto_ {
+  SOBJECT_FIELDS
+  SSymStr* name;
+  int index;
+} SClosedProto;
+
+typedef struct SClosure_ {
+  SOBJECT_FIELDS
+  SCode* code;
+  SnapClosed closed[0];
+} SClosure;
 
 typedef struct SnapBlock_ {
   int insts_offset;
