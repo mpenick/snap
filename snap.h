@@ -1,8 +1,7 @@
 #ifndef SNAP_H
 #define SNAP_H
 
-#include "snap_hash.h"
-#include "snap_vec.h"
+#include "mstructs.h"
 
 #include <setjmp.h>
 #include <stdbool.h>
@@ -57,14 +56,67 @@
 
 #define SNAP_MAX_BLOCKS 16
 
-typedef struct SnapNode_ {
-  struct SnapNode_* prev;
-  struct SnapNode_* next;
-} SnapNode;
+typedef int64_t SnapInt;
+typedef double SnapFloat;
+
+#define STYPE_MAPPING(XX) \
+  XX(STYPE_UNDEF, 0, "undef") \
+  XX(STYPE_DELETED, 1, "deleted") \
+  XX(STYPE_NIL, 2, "nil") \
+  XX(STYPE_BOOL, 3, "bool") \
+  XX(STYPE_INT, 4, "int") \
+  XX(STYPE_FLOAT, 5, "float") \
+  XX(STYPE_FORM, 6, "form") \
+  XX(STYPE_CFUNC, 7, "cfunc") \
+  XX(STYPE_SYM, 8, "sym") \
+  XX(STYPE_STR, 9, "str") \
+  XX(STYPE_ERR, 10, "err") \
+  XX(STYPE_CONS, 11, "cons") \
+  XX(STYPE_ARR, 12, "array") \
+  XX(STYPE_INST, 13, "inst") \
+  XX(STYPE_SCOPE, 14, "scope") \
+  XX(STYPE_CODE_GEN, 15, "codegen") \
+  XX(STYPE_CODE, 16, "code") \
+  XX(STYPE_KEY, 17, "key") \
+  XX(STYPE_TEMPSTR, 18, "tempstr")
+
+enum {
+#define XX(type, id, name) type,
+  STYPE_MAPPING(XX)
+#undef XX
+};
+
+typedef struct Snap_ Snap;
+typedef struct SObject_ SObject;
+
+typedef struct SValue_ {
+  uint8_t type;
+  union {
+    bool b;
+    SnapInt i;
+    SnapFloat f;
+    SObject* o;
+    void (*c)(Snap* snap, const struct SValue_* args, int num_args, struct SValue_* result);
+  };
+} SValue;
+
+typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
+
+int snap_hash(const SValue* val);
+int snap_compare(const SValue* val1, const SValue* val2);
 
 typedef struct SnapVec_ {
-  SNAP_VEC_FIELDS(SValue);
+  MVEC_FIELDS(SValue);
 } SnapVec;
+
+typedef struct {
+  MHASH_ENTRY_FIELDS(SValue);
+  SValue val;
+} SnapHashEntry;
+
+typedef struct {
+  MHASH_FIELDS(SnapHashEntry, SValue);
+} SnapHash;
 
 #define SOBJECT_FIELDS          \
   uint8_t type;                 \
@@ -79,15 +131,21 @@ struct SObject_ {
 typedef struct SSymStr_ {
   SOBJECT_FIELDS
   size_t len;
-  char data[0];
+  char data[1];
 } SSymStr;
 
 typedef struct SKeyword_ {
   SOBJECT_FIELDS
   int id;
   size_t len;
-  char data[0];
+  char data[1];
 } SKeyword;
+
+typedef struct STempStr_ {
+  SOBJECT_FIELDS
+  size_t len;
+  const char* data;
+} STempStr;
 
 typedef struct SErr_ {
   SOBJECT_FIELDS
@@ -104,17 +162,17 @@ typedef struct SCons_ {
 typedef struct SArr_ {
   SOBJECT_FIELDS
   int len;
-  SValue data[0];
+  SValue data[1];
 } SArr;
 
 typedef struct SnapJumpArg_ {
   int dir;
-  SnapNode* dest;
+  MList* dest;
 } SnapJumpArg;
 
 typedef struct SInst_ {
   SOBJECT_FIELDS
-  SnapNode list;
+  MList list;
   int opcode;
   union {
     int arg;
@@ -125,7 +183,7 @@ typedef struct SInst_ {
 
 typedef struct SScope_ {
   SOBJECT_FIELDS
-  SnapNode* top;
+  MList* top;
   SnapHash local_names;
   SnapVec param_names;
   struct SScope_* up;
@@ -133,7 +191,7 @@ typedef struct SScope_ {
 
 typedef struct SCodeGen_ {
   SOBJECT_FIELDS
-  SnapNode insts;
+  MList insts;
   int insts_count;
   SScope* scope;
   SnapHash constants;
@@ -153,7 +211,7 @@ typedef struct SCode_ {
   int num_locals;
   int max_stack_size;
   int insts_count;
-  SnapNode insts_debug;
+  MList insts_debug;
 } SCode;
 
 typedef struct SnapBlock_ {
@@ -176,8 +234,8 @@ struct Snap_ {
   SValue* stack;
   SValue* stack_end;
   int stack_size;
-  struct { SNAP_VEC_FIELDS(SnapFrame); } frames;
-  struct { SNAP_VEC_FIELDS(SObject*); } anchors;
+  struct { MVEC_FIELDS(SnapFrame); } frames;
+  struct { MVEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
   SObject* all;

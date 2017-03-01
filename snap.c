@@ -1,8 +1,8 @@
 #include "snap.h"
-#include "snap_hash.h"
 #include "snap_lex.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -11,12 +11,6 @@
 #include <string.h>
 
 #define GC_EVERY_NUM_BYTES 64 * 1024 * 1024
-
-#define list_entry(type, ptr, member) \
-  ((type*)(((char*)ptr) - (uintptr_t)&((type*)0)->member))
-
-#define list_foreach(list) \
-  for (pos = (list)->next; pos != (list); pos = pos->next)
 
 #define MAX_OP_ARG 33554431
 
@@ -79,13 +73,138 @@ static const char* stype_name(int  type) {
 #define XX(type, id, name) \
     case type: \
       return name;
-    STYPE_MAP(XX)
+    STYPE_MAPPING(XX)
 #undef XX
     default:
       return "invalid";
   }
 }
 
+#define compare(a, b) ((a) < (b) ? -1 : (a) > (b))
+
+static int hash_float(double n) {
+  int i;
+  unsigned int u;
+  if (!isfinite(n)) return 0;
+  n = frexp(n, &i) * -(double)INT_MIN;
+  u = (unsigned int)n + (unsigned int)i;
+  return (int)(u <= (unsigned int)INT_MAX ? u : ~u);
+}
+
+static int hash_string(SSymStr* s) {
+  return (int)mhash_fnv1a((const void*)s->data, s->len);
+}
+
+static int hash_keyword(SKeyword* k) {
+  return (int)mhash_fnv1a((const void*)k->data, k->len);
+}
+
+static int hash_tempstr(STempStr* ts) {
+  return (int)mhash_fnv1a((const void*)ts->data, ts->len);
+}
+
+static int compare_string(SSymStr* s1, SSymStr* s2) {
+  if (s1->len != s2->len) {
+    return s1->len < s2->len ? -1 : 1;
+  }
+  return strncmp(s1->data, s2->data, s1->len);
+}
+
+static int compare_tempstring(const STempStr* ts, const SValue* val) {
+  SSymStr* s;
+  SKeyword* k;
+  switch (val->type) {
+  case STYPE_SYM:
+  case STYPE_STR:
+    s = (SSymStr*)val->o;
+    if (ts->len < s->len) {
+      return ts->len < s->len ? -1 : 1;
+    }
+    return strncmp(ts->data, s->data, ts->len);
+  case STYPE_KEY:
+    k = (SKeyword*)val->o;
+    if (ts->len < k->len) {
+      return ts->len < k->len ? -1 : 1;
+    }
+    return strncmp(ts->data, k->data, ts->len);
+  default:
+    return STYPE_TEMPSTR < val->type ? -1 : 1;
+  }
+}
+
+static int hash_pointer(void* ptr) {
+  uintptr_t p = (uintptr_t)ptr;
+  return (int)((p >> 4) | (p << (8 * sizeof(ptr) - 4)));
+}
+
+int snap_hash(const SValue* val) {
+  switch (val->type) {
+    case STYPE_NIL:
+      return 0;
+    case STYPE_BOOL:
+      return val->b ? 1 : 0;
+    case STYPE_INT:
+      return val->i;
+    case STYPE_FLOAT:
+      return hash_float(val->f);
+    case STYPE_FORM:
+      return val->i;
+    case STYPE_CFUNC:
+      return hash_pointer((void*)val->c);
+    case STYPE_SYM:
+    case STYPE_STR:
+      return hash_string((SSymStr*)val->o);
+    case STYPE_KEY:
+      return hash_keyword((SKeyword*)val->o);
+    case STYPE_TEMPSTR:
+      return hash_tempstr((STempStr*)val->o);
+    case STYPE_ERR:
+    case STYPE_CONS:
+    case STYPE_SCOPE:
+    case STYPE_CODE:
+    case STYPE_CODE_GEN:
+      return hash_pointer((void*)val->o);
+  }
+  return 0;
+}
+
+int snap_compare(const SValue* val1, const SValue* val2) {
+  assert(val2->type != STYPE_TEMPSTR);
+
+  if (val1->type == STYPE_TEMPSTR) {
+    return compare_tempstring((STempStr*)val1->o, val2);
+  } else if (val1->type != val2->type) {
+    return val1->type < val2->type ? -1 : 1;
+  }
+
+  switch (val1->type) {
+    case STYPE_NIL:
+      return 0;
+    case STYPE_BOOL:
+      return compare(val1->b, val2->b);
+    case STYPE_INT:
+      return compare(val1->i, val2->i);
+    case STYPE_FLOAT:
+      return compare(val1->f, val2->f);
+    case STYPE_FORM:
+      return compare(val1->i, val2->i);
+    case STYPE_CFUNC:
+      return compare((void*)val1->c, (void*)val2->c);
+    case STYPE_SYM:
+    case STYPE_STR:
+      return compare_string((SSymStr*)val1->o, (SSymStr*)val2->o);
+    case STYPE_KEY:
+      return compare(((SKeyword*)val1->o)->id, ((SKeyword*)val2->o)->id);
+    case STYPE_ERR:
+      return snap_compare(&((SErr*)val1->o)->err, &((SErr*)val2->o)->err);
+    case STYPE_CONS:
+    case STYPE_SCOPE:
+    case STYPE_CODE:
+    case STYPE_CODE_GEN:
+      return compare(val1->o, val2->o);
+  }
+  return 0;
+}
 
 #define anchor(type, obj) (type*)snap_anchor(snap, (SObject*)obj)
 #define anchor_sym(sym) anchor(SSymStr, sym)
@@ -99,23 +218,17 @@ static SValue exec(Snap* snap);
 static void compile(Snap* snap, SCodeGen* code_gen, SValue value);
 static bool parse(Snap* snap, SnapLex* lex, SValue *result);
 
-static void list_init(SnapNode* list);
-static void list_copy(SnapNode* src, SnapNode* dst);
-static void list_append(SnapNode* list, SnapNode* node);
-static int list_forward_count(SnapNode* first, SnapNode* last);
-static int list_backward_count(SnapNode* first, SnapNode* last);
-
 static SInst* insts_append(Snap* snap, SCodeGen* code_gen, int opcode);
 static int insts_calculate_jump(SInst* inst);
-static void insts_remove_dead_code(SnapNode* insts);
-static void insts_dump(SnapNode* insts, int indent);
+static void insts_remove_dead_code(MList* insts);
+static void insts_dump(MList* insts, int indent);
 
 static void print_val(SValue val, int indent);
 static void print_code(SCode* code, int indent);
 static void print_cons(SCons* cons, int indent);
 static void print_arr(SArr* arr, int indent);
 
-static void jump_arg_init(SnapJumpArg* jump_arg, int dir, SnapNode* dest) {
+static void jump_arg_init(SnapJumpArg* jump_arg, int dir, MList* dest) {
   jump_arg->dir = dir;
   jump_arg->dest = dest;
 }
@@ -126,7 +239,7 @@ static void push_val(Snap* snap, SValue val) {
 
 static void pop_val(Snap* snap, SValue val) {
   if (is_obj(val)) {
-    assert(snap_vec_back(&snap->anchors) == val.o);
+    assert(mvec_back(&snap->anchors) == val.o);
     snap_release(snap);
   }
 }
@@ -134,6 +247,13 @@ static void pop_val(Snap* snap, SValue val) {
 SValue create_undef() {
   SValue val;
   val.type = STYPE_UNDEF;
+  val.o = NULL;
+  return val;
+}
+
+SValue create_deleted() {
+  SValue val;
+  val.type = STYPE_DELETED;
   val.o = NULL;
   return val;
 }
@@ -196,6 +316,50 @@ SValue create_object(SObject* o) {
 
 #define create_obj(o) create_object((SObject*)o)
 
+static inline MHASH_FUNC(SnapHashEntry, SValue) {
+  return snap_hash(&key);
+}
+
+static inline MHASH_EQUALS_FUNC(SnapHashEntry, SValue) {
+  return snap_compare(&key1, &key2) == 0;
+}
+
+void snap_hash_init(SnapHash* hash) {
+  mhash_init(hash, SnapHashEntry, create_undef(), create_deleted(), 0);
+}
+
+void snap_hash_put(SnapHash* hash, SValue key, SValue val) {
+  SnapHashEntry* entry;
+  mhash_find(hash, SnapHashEntry, key, entry, 1);
+  entry->val = val;
+  if (mhash_is_empty(hash, SnapHashEntry, entry) ||
+      mhash_is_deleted(hash, SnapHashEntry, entry)) {
+    entry->hkey = key;
+    mhash_add(hash, SnapHashEntry);
+  }
+}
+
+SValue* snap_hash_get(SnapHash *hash, SValue key) {
+  SnapHashEntry* entry;
+  mhash_find(hash, SnapHashEntry, key, entry, 0);
+  if (mhash_is_empty(hash, SnapHashEntry, entry)) {
+    return NULL;
+  }
+  return &entry->val;
+}
+
+SValue* snap_hash_get_str(SnapHash* hash, const char* key, size_t len) {
+  STempStr ts;
+  ts.type = STYPE_TEMPSTR;
+  ts.data = key;
+  ts.len = len;
+  return snap_hash_get(hash, create_obj(&ts));
+}
+
+void snap_hash_destroy(SnapHash* hash) {
+  mhash_destroy(hash);
+}
+
 static void gc_free(Snap* snap, SObject* obj) {
   //printf("free %p\n", obj);
   switch (obj->type) {
@@ -221,13 +385,13 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_SCOPE:
       snap->num_bytes_alloced -= sizeof(SScope);
       snap_hash_destroy(&((SScope*)obj)->local_names);
-      snap_vec_destroy(&((SScope*)obj)->param_names);
+      mvec_destroy(&((SScope*)obj)->param_names);
       break;
     case STYPE_CODE_GEN:
       snap->num_bytes_alloced -= sizeof(SCodeGen);
       snap_hash_destroy(&((SCodeGen*)obj)->global_names);
       snap_hash_destroy(&((SCodeGen*)obj)->constants);
-      snap_vec_destroy(&((SCodeGen*)obj)->param_names);
+      mvec_destroy(&((SCodeGen*)obj)->param_names);
       break;
     case STYPE_CODE:
       snap->num_bytes_alloced -= sizeof(SCode);
@@ -272,10 +436,10 @@ static void gc_mark_val(Snap* snap, SValue val) {
 
 static void gc_mark_hash(Snap* snap, SnapHash* hash) {
   int i;
-  for (i = 0; i < hash->capacity; ++i) {
-    SEntry* entry = &hash->entries[i];
-    if (!is_undef(entry->key)) {
-      gc_mark_val(snap, entry->key);
+  for (i = 0; i < hash->hcapacity; ++i) {
+    SnapHashEntry* entry = &hash->hentries[i];
+    if (!is_undef(entry->hkey)) {
+      gc_mark_val(snap, entry->hkey);
       gc_mark_val(snap, entry->val);
     }
   }
@@ -283,7 +447,7 @@ static void gc_mark_hash(Snap* snap, SnapHash* hash) {
 
 static void gc_mark_vec(Snap* snap, SnapVec* vec) {
   SValue* item;
-  snap_vec_foreach(vec, item) {
+  mvec_foreach(vec, item) {
     if (!is_undef_p(item)) {
       gc_mark_val(snap, *item);
     }
@@ -334,7 +498,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
 static void gc_collect(Snap* snap) {
   SObject** obj;
 
-  snap_vec_foreach(&snap->anchors, obj) {
+  mvec_foreach(&snap->anchors, obj) {
     gc_mark(snap, *obj);
   }
 
@@ -419,7 +583,7 @@ SKeyword* snap_key_new(Snap* snap, const char* name) {
     SKeyword* k = (SKeyword*)gc_new(snap, STYPE_KEY, sizeof(SKeyword) + len + 1);
     k->len = len;
     strcpy(k->data, name);
-    k->id = snap->keywords.count;
+    k->id = snap->keywords.hcount;
     snap_hash_put(&snap->keywords, create_obj(k), create_obj(k));
     return k;
   }
@@ -455,11 +619,11 @@ SArr* snap_arr_new(Snap* snap, int len) {
 
 SArr* arr_new_from_hash(Snap* snap, SnapHash* hash) {
   int i;
-  SArr* a = snap_arr_new(snap, hash->count);
-  for (i = 0; i < hash->capacity; ++i) {
-    SEntry* entry = &hash->entries[i];
-    if (!is_undef(entry->key)) {
-      a->data[entry->val.i] = entry->key;
+  SArr* a = snap_arr_new(snap, hash->hcount);
+  for (i = 0; i < hash->hcapacity; ++i) {
+    SnapHashEntry* entry = &hash->hentries[i];
+    if (!is_undef(entry->hkey)) {
+      a->data[entry->val.i] = entry->hkey;
     }
   }
   return a;
@@ -480,9 +644,9 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
     int count = 0;
     int stack_size = 0;
     int max_stack_size = 0;
-    SnapNode* pos;
-    list_foreach(&code_gen->insts) {
-      SInst* inst = list_entry(SInst, pos, list);
+    MList* pos;
+    mlist_foreach(&code_gen->insts) {
+      SInst* inst = mlist_entry(SInst, pos, list);
       switch(inst->opcode) {
         case LOAD_GLOBAL: case LOAD_LOCAL:
         case LOAD_CONSTANT: case LOAD_NIL:
@@ -535,7 +699,7 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
   }
   c->constants = arr_new_from_hash(snap, &code_gen->constants);
   c->global_names = arr_new_from_hash(snap, &code_gen->global_names);
-  list_copy(&code_gen->insts, &c->insts_debug);
+  mlist_copy(&code_gen->insts, &c->insts_debug);
   snap_release(snap);
   return c;
 }
@@ -554,18 +718,18 @@ SScope* snap_scope_new(Snap* snap, SScope* up) {
   SScope* s = (SScope*)gc_new(snap,  STYPE_SCOPE, sizeof(SScope));
   s->up = up;
   snap_hash_init(&s->local_names);
-  snap_vec_init(&s->param_names, SValue, 2);
+  mvec_init(&s->param_names, SValue, 2);
   return s;
 }
 
 SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
   SCodeGen* c = (SCodeGen*)gc_new(snap,  STYPE_CODE_GEN, sizeof(SCodeGen));
-  list_init(&c->insts);
+  mlist_init(&c->insts);
   c->insts_count = 0;
   c->scope = NULL;
   snap_hash_init(&c->constants);
   snap_hash_init(&c->global_names);
-  snap_vec_init(&c->param_names, SValue, 2);
+  mvec_init(&c->param_names, SValue, 2);
   c->num_locals = 0;
   c->is_tail = false;
   c->up = NULL;
@@ -590,7 +754,7 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
 // 3) [args and locals][stack...][return value]
 
 static void push_frame(Snap* snap, SCode* code, SValue* stack_base) {
-  SnapFrame* frame = snap_vec_push(&snap->frames, SnapFrame);
+  SnapFrame* frame = mvec_push(&snap->frames, SnapFrame);
   frame->code = code;
   frame->pc = code->insts;
   frame->blocks_top = 0;
@@ -604,7 +768,7 @@ static void push_frame(Snap* snap, SCode* code, SValue* stack_base) {
     snap->stack_end = stack_new + stack_size;
 
     // Update stack pointers to the new stack
-    snap_vec_foreach(&snap->frames, frame) {
+    mvec_foreach(&snap->frames, frame) {
       d = frame->stack_base - stack_old;
       frame->stack_base = stack_new + d;
       d = frame->stack_top - stack_old;
@@ -708,7 +872,7 @@ static SValue exec(Snap* snap) {
 #endif
 
 new_frame:
-    frame = &snap_vec_back(&snap->frames);
+    frame = &mvec_back(&snap->frames);
     code = frame->code;
     pc = frame->pc;
     constants = code->constants->data;
@@ -816,9 +980,9 @@ new_frame:
       }
       OP(RETURN) {
         if (snap->frames.vsize > 1) {
-          SnapFrame* frame_prev = &snap_vec_back(&snap->frames) - 1;
+          SnapFrame* frame_prev = &mvec_back(&snap->frames) - 1;
           *frame_prev->stack_top++ = *--stack;
-          snap_vec_pop(&snap->frames);
+          mvec_pop(&snap->frames);
           goto new_frame;
         }
         return *--stack;
@@ -886,9 +1050,9 @@ new_frame:
 
 raise:
   while (snap->frames.vsize > 0) {
-    frame = &snap_vec_back(&snap->frames);
+    frame = &mvec_back(&snap->frames);
     if (frame->blocks_top > 0) break;
-    snap_vec_pop(&snap->frames);
+    mvec_pop(&snap->frames);
   }
 
   if (frame->blocks_top > 0) {
@@ -944,12 +1108,12 @@ err:
 }
 
 SObject* snap_anchor(Snap* snap, SObject* obj) {
-  *snap_vec_push(&snap->anchors, SObject*) = obj;
+  *mvec_push(&snap->anchors, SObject*) = obj;
   return obj;
 }
 
 void snap_release(Snap* snap) {
-  snap_vec_pop(&snap->anchors);
+  mvec_pop(&snap->anchors);
 }
 
 static bool is_tail(SnapLex* lex, int token) {
@@ -1405,7 +1569,7 @@ static int get_or_add_index(SnapHash* hash, SValue key) {
   if (val) {
     index = val->i;
   } else {
-    index = hash->count;
+    index = hash->hcount;
     snap_hash_put(hash, key, create_int(index));
   }
   return index;
@@ -1420,7 +1584,7 @@ int add_local(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
     raise(snap, "Variable '%s' already defined in current scope", sym->data);
   }
   while (curr) {
-    index += curr->local_names.count;
+    index += curr->local_names.hcount;
     curr = curr->up;
   }
   if (index + 1 > code_gen->num_locals) {
@@ -1434,7 +1598,7 @@ int add_global(SCodeGen* code_gen, SSymStr* sym) {
   SValue key = create_obj(sym);
   SValue* val = snap_hash_get(&code_gen->global_names, key);
   if (val)  return val->i;
-  int index = code_gen->global_names.count;
+  int index = code_gen->global_names.hcount;
   snap_hash_put(&code_gen->global_names, key, create_int(index));
   return index;
 }
@@ -1601,7 +1765,7 @@ static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
 
   for (i = 0; i < args->len; ++i) {
     SSymStr* sym = as_sym(args->data[i]);
-    *snap_vec_push(&code_gen->param_names, SValue) = create_obj(sym);
+    *mvec_push(&code_gen->param_names, SValue) = create_obj(sym);
     add_local(snap, code_gen, sym);
   }
 
@@ -1626,7 +1790,7 @@ static void compile_loop_or_let(Snap* snap, SCodeGen* code_gen, int loop_or_let,
     SArr* arg = as_arr(args->data[i]);
     SSymStr* sym = as_sym(arg->data[0]);
     if (loop_or_let == TK_LOOP) {
-      *snap_vec_push(&code_gen->scope->param_names, SValue) = create_obj(sym);
+      *mvec_push(&code_gen->scope->param_names, SValue) = create_obj(sym);
     }
     add_local(snap, code_gen, sym);
   }
@@ -1691,7 +1855,7 @@ static void compile_catch(Snap* snap, SCodeGen* code_gen,
                           SCons* sexpr, SCons* next_catch) {
   bool empty_catch = true;
   SInst* jump_false = NULL;
-  SnapNode* jump_to = NULL;
+  MList* jump_to = NULL;
   SArr* arr;
 
   if (is_key(sexpr->first)) {
@@ -1859,67 +2023,10 @@ static int compile_expr_list(Snap* snap, SCodeGen* code_gen, bool pop, SCons* se
   return count;
 }
 
-static inline void list_init(SnapNode* list) {
-  list->next = list->prev = list;
-}
-
-static inline void list_copy(SnapNode* src, SnapNode* dst) {
-  src->next->prev = dst;
-  src->prev->next = dst;
-  dst->next = src->next;
-  dst->prev = src->prev;
-}
-
-static inline bool list_is_empty(SnapNode* list) {
-  return list->next == list;
-}
-
-static inline void list_add(SnapNode* prev, SnapNode* next, SnapNode* entry) {
-  prev->next = entry;
-  entry->prev = prev;
-  entry->next = next;
-  next->prev = entry;
-}
-
-static void list_remove(SnapNode* node) {
-  node->prev->next = node->next;
-  node->next->prev = node->prev;
-  node->next = NULL;
-  node->prev = NULL;
-}
-
-static inline void list_append(SnapNode* list, SnapNode* node) {
-  list_add(list->prev, list, node);
-}
-
-static inline void list_prepend(SnapNode* list, SnapNode* node) {
-  list_add(list, list->next , node);
-}
-
-static int list_forward_count(SnapNode* first, SnapNode* last) {
-  int count = 0;
-  SnapNode* curr = first;
-  while (curr != last) {
-    count++;
-    curr = curr->next;
-  }
-  return count++;
-}
-
-static int list_backward_count(SnapNode* first, SnapNode* last) {
-  int count = 0;
-  SnapNode* curr = first;
-  while (curr != last) {
-    count++;
-    curr = curr->prev;
-  }
-  return count++;
-}
-
 static SInst* insts_append(Snap* snap, SCodeGen* code_gen, int opcode) {
   SInst* inst = snap_inst_new(snap, opcode);
   code_gen->insts_count++;
-  list_append(&code_gen->insts, &inst->list);
+  mlist_append(&code_gen->insts, &inst->list);
   return inst;
 }
 
@@ -2067,15 +2174,15 @@ static int insts_calculate_jump(SInst* inst) {
     int i;
     prev_inst = inst;
     if (inst->jump_arg.dir > 0) {
-      int jump = list_forward_count(&inst->list, inst->jump_arg.dest) + 1;
+      int jump = mlist_forward_count(&inst->list, inst->jump_arg.dest) + 1;
       for (i = 0; i < jump; ++i) {
-        inst = list_entry(SInst, inst->list.next, list);
+        inst = mlist_entry(SInst, inst->list.next, list);
       }
       total += jump;
     } else {
-      int jump = list_backward_count(&inst->list, inst->jump_arg.dest);
+      int jump = mlist_backward_count(&inst->list, inst->jump_arg.dest);
       for (i = 0; i < jump; ++i) {
-        inst = list_entry(SInst, inst->list.prev, list);
+        inst = mlist_entry(SInst, inst->list.prev, list);
       }
       total -= jump;
     }
@@ -2083,10 +2190,10 @@ static int insts_calculate_jump(SInst* inst) {
   return total;
 }
 
-static void insts_remove(SnapNode* insts, SInst* to_remove) {
-  SnapNode* pos;
-  list_foreach(insts) {
-    SInst* inst = list_entry(SInst, pos, list);
+static void insts_remove(MList* insts, SInst* to_remove) {
+  MList* pos;
+  mlist_foreach(insts) {
+    SInst* inst = mlist_entry(SInst, pos, list);
     switch (inst->opcode) {
       case JUMP:
       case JUMP_FALSE:
@@ -2097,19 +2204,19 @@ static void insts_remove(SnapNode* insts, SInst* to_remove) {
         break;
     }
   }
-  list_remove(&to_remove->list);
+  mlist_remove(&to_remove->list);
 }
 
-static void insts_remove_dead_code(SnapNode* insts) {
-  SnapNode* pos = insts->next;
+static void insts_remove_dead_code(MList* insts) {
+  MList* pos = insts->next;
   while (pos != insts) {
-    SInst* inst = list_entry(SInst, pos, list);
+    SInst* inst = mlist_entry(SInst, pos, list);
     SInst* prev_inst;
     pos = pos->next;
     switch (inst->opcode) {
       case POP:
         assert(inst->list.prev != insts);
-        prev_inst = list_entry(SInst, inst->list.prev, list);
+        prev_inst = mlist_entry(SInst, inst->list.prev, list);
         switch (prev_inst->opcode) {
           case LOAD_CONSTANT:
           case LOAD_GLOBAL:
@@ -2122,7 +2229,7 @@ static void insts_remove_dead_code(SnapNode* insts) {
         break;
       case STORE_GLOBAL:
         assert(inst->list.prev != insts);
-        prev_inst = list_entry(SInst, inst->list.prev, list);
+        prev_inst = mlist_entry(SInst, inst->list.prev, list);
         if (prev_inst->opcode == LOAD_GLOBAL && prev_inst->arg == inst->arg) {
           insts_remove(insts, prev_inst);
           insts_remove(insts, inst);
@@ -2130,7 +2237,7 @@ static void insts_remove_dead_code(SnapNode* insts) {
         break;
       case STORE_LOCAL:
         assert(inst->list.prev != insts);
-        prev_inst = list_entry(SInst, inst->list.prev, list);
+        prev_inst = mlist_entry(SInst, inst->list.prev, list);
         if (prev_inst->opcode == LOAD_LOCAL && prev_inst->arg == inst->arg) {
           insts_remove(insts, prev_inst);
           insts_remove(insts, inst);
@@ -2140,12 +2247,12 @@ static void insts_remove_dead_code(SnapNode* insts) {
   }
 }
 
-static void insts_dump(SnapNode* insts, int indent) {
-  SnapNode* pos;
+static void insts_dump(MList* insts, int indent) {
+  MList* pos;
   int i = 0;
   int jump;
-  list_foreach(insts) {
-    SInst* inst = list_entry(SInst, pos, list);
+  mlist_foreach(insts) {
+    SInst* inst = mlist_entry(SInst, pos, list);
     switch(inst->opcode) {
       case LOAD_GLOBAL:
       case STORE_GLOBAL:
@@ -2220,8 +2327,8 @@ void builtin_println(Snap* snap, const SValue* args, int num_args, SValue* resul
 void snap_init(Snap* snap) {
   snap->stack = (SValue*)malloc(1024 * sizeof(SValue));
   snap->stack_end = snap->stack + 1024 * sizeof(SValue);
-  snap_vec_init(&snap->frames, SnapFrame, 32);
-  snap_vec_init(&snap->anchors, SObject*, 32);
+  mvec_init(&snap->frames, SnapFrame, 32);
+  mvec_init(&snap->anchors, SObject*, 32);
   snap->num_bytes_alloced = 0;
   snap->num_bytes_alloced_last_gc = 0;
   snap->all = NULL;
@@ -2242,8 +2349,8 @@ void snap_destroy(Snap* snap) {
     gc_free(snap, temp);
   }
   free((void*)snap->stack);
-  snap_vec_destroy(&snap->frames);
-  snap_vec_destroy(&snap->anchors);
+  mvec_destroy(&snap->frames);
+  mvec_destroy(&snap->anchors);
   snap_hash_destroy(&snap->globals);
   snap_hash_destroy(&snap->keywords);
   assert(snap->num_bytes_alloced == 0);

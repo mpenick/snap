@@ -7,16 +7,16 @@
     (catch :snap_type_error [x] (do (println x) 2))
 )
 
-;((fn [x] (println x)) "hello")
+((fn [x] (println x)) "hello")
 
-;(def test (fn [s i m]
-;              (if (< i m) (recur
-;                            (loop [[a i] [s s] [i 0] [m m]]
-;                                  (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
-;
-;                            (+ i 1) m) s)
-;              ))
-;(println (test 0 0 10000))
+(def test (fn [s i m]
+              (if (< i m) (recur
+                            (loop [[a i] [s s] [i 0] [m m]]
+                                  (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
+
+                            (+ i 1) m) s)
+              ))
+(println (test 0 0 10000))
 
 ;(define x 1)
 ;(set! x 1)

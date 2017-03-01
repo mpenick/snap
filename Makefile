@@ -2,7 +2,7 @@ CFLAGS=-g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
 #CFLAGS=-O3
 
 TARGET=snap
-SOURCES=$(filter-out snap_lex.c, $(wildcard *.c)) snap_lex.c
+SOURCES=$(wildcard *.c)
 OBJECTS=$(patsubst %.c,%.o,$(SOURCES))
 
 all: $(TARGET)
@@ -14,16 +14,16 @@ ifneq ($(MAKECMDGOALS),clean)
 -include $(SOURCES:%.c=.depends/%.d)
 endif
 
-.depends/%.d: %.c .depends
+.depends/%.d: snap_lex.h %.c .depends
 	$(CC) $(CFLAGS) -MM -c $< -o $@
 
 .depends:
 	mkdir .depends
 
-snap_lex.c: snap_lex.rl
-	ragel snap_lex.rl
+snap_lex.h: snap_lex.rh
+	ragel snap_lex.rh
 
 .PHONY: clean
 clean:
 	rm -rf $(TARGET).dSYM .depends
-	rm -f $(TARGET) *.o snap_lex.c a.out
+	rm -f $(TARGET) snap_lex.h *.o a.out

@@ -1,10 +1,15 @@
+main.c
+mstructs.h
 snap.c
+snap.c
+snap.h
 snap.h
 snap_hash.c
 snap_hash.h
-snap_lex.h
+snap_hash.h
 snap_lex.rl
 snap_val.h
 main.c
 snap_val.c
+snap_val.h
 snap_vec.h

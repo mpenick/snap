@@ -1,6 +1,6 @@
 a.out
 snap
-snap_lex.c
+snap_lex.h
 *.dSYM
 *.o
 .ycm_extra_conf.pyc
