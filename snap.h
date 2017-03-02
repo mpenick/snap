@@ -75,7 +75,8 @@
   XX(STYPE_CODE, 16, "code") \
   XX(STYPE_KEY, 17, "key") \
   XX(STYPE_TEMPSTR, 18, "tempstr") \
-  XX(STYPE_CLOSURE, 19, "closure")
+  XX(STYPE_CLOSURE, 19, "closure") \
+  XX(STYPE_CLOSED_DESC, 20, "closeddesc")
 
 enum {
 #define XX(type, id, name) type,
@@ -190,25 +191,23 @@ typedef struct SScope_ {
   struct SScope_* up;
 }  SScope;
 
+typedef struct SClosedDesc_ {
+  SOBJECT_FIELDS
+  bool onstack;
+  int index;
+  SSymStr* name;
+} SClosedDesc;
+
 typedef struct SnapClosed_ {
   SValue* value;
   SValue closed;
 } SnapClosed;
 
-typedef struct SnapClosedProto_ {
-  bool onstack;
-  int index;
-  SSymStr* name;
-} SnapClosedProto;
-
-typedef struct SnapClosedProtoVec_ {
-  MVEC_FIELDS(SnapClosedProto);
-} SnapClosedProtoVec;
-
 typedef struct SClosure_ {
   SOBJECT_FIELDS
   SCode* code;
-  SnapClosed closed[0];
+  struct SClosure_* next;
+  SnapClosed values[0];
 } SClosure;
 
 typedef struct SCodeGen_ {
@@ -219,10 +218,9 @@ typedef struct SCodeGen_ {
   SnapHash constants;
   SnapHash global_names;
   SnapHash closed_names;
-  SnapClosedProtoVec closed_protos;
+  SnapVec closed_descs;
   SnapVec param_names;
   int num_locals;
-  int num_closed;
   int num_results;
   bool is_tail;
   struct SCodeGen_* up;
@@ -233,7 +231,7 @@ struct SCode_ {
   int* insts;
   SArr* global_names;
   SArr* constants;
-  SnapClosedProtoVec closed_protos;
+  SArr* closed_descs;
   int num_locals;
   int max_stack_size;
   int insts_count;
@@ -252,6 +250,7 @@ typedef struct SnapFrame_ {
   SValue* stack_top;
   SnapBlock blocks[SNAP_MAX_BLOCKS];
   int blocks_top;
+  SClosure* closures;
 } SnapFrame;
 
 struct Snap_ {

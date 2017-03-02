@@ -34,6 +34,7 @@ enum {
   XX(ROT2, "ROT2", false) \
   XX(ROT3, "ROT3", false) \
   XX(CALL, "CALL", true) \
+  XX(CLOSURE, "CLOSURE", false) \
   XX(RETURN, "RETURN", false) \
   XX(JUMP, "JUMP", true) \
   XX(JUMP_FALSE, "JUMP_FALSE", true) \
@@ -393,14 +394,16 @@ static void gc_free(Snap* snap, SObject* obj) {
       snap->num_bytes_alloced -= sizeof(SCodeGen);
       snap_hash_destroy(&((SCodeGen*)obj)->global_names);
       snap_hash_destroy(&((SCodeGen*)obj)->closed_names);
-      mvec_destroy(&((SCodeGen*)obj)->closed_protos);
+      mvec_destroy(&((SCodeGen*)obj)->closed_descs);
       snap_hash_destroy(&((SCodeGen*)obj)->constants);
       mvec_destroy(&((SCodeGen*)obj)->param_names);
       break;
     case STYPE_CODE:
       snap->num_bytes_alloced -= sizeof(SCode);
       free(((SCode*)obj)->insts);
-      mvec_destroy(&((SCode*)obj)->closed_protos);
+      break;
+    case STYPE_CLOSED_DESC:
+      snap->num_bytes_alloced -= sizeof(SClosedDesc);
       break;
     default:
       assert(0 && "Not a GC object");
@@ -421,8 +424,10 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_CONS:
     case STYPE_ARR:
     case STYPE_SCOPE:
+    case STYPE_INST:
     case STYPE_CODE_GEN:
     case STYPE_CODE:
+    case STYPE_CLOSED_DESC:
       if (obj->mark == WHITE) {
         obj->mark = GRAY;
         obj->gc_gray_next = snap->gray;
@@ -459,13 +464,6 @@ static void gc_mark_vec(Snap* snap, SnapVec* vec) {
   }
 }
 
-static void gc_mark_closed_proto_vec(Snap* snap, SnapClosedProtoVec* vec) {
-  SnapClosedProto* proto;
-  mvec_foreach(vec, proto) {
-    gc_mark(snap, (SObject *)proto->name);
-  }
-}
-
 static void gc_mark_children(Snap* snap, SObject* obj) {
   int i;
   switch (obj->type) {
@@ -495,14 +493,17 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark_hash(snap, &((SCodeGen*)obj)->constants);
       gc_mark_hash(snap, &((SCodeGen*)obj)->global_names);
       gc_mark_hash(snap, &((SCodeGen*)obj)->closed_names);
-      gc_mark_closed_proto_vec(snap, &((SCodeGen*)obj)->closed_protos);
+      gc_mark_vec(snap, &((SCodeGen*)obj)->closed_descs);
       gc_mark_vec(snap, &((SCodeGen*)obj)->param_names);
       break;
     case STYPE_CODE:
       gc_mark(snap, (SObject*)((SCode*)obj)->constants);
       gc_mark(snap, (SObject*)((SCode*)obj)->global_names);
-      gc_mark_closed_proto_vec(snap, &((SCodeGen*)obj)->closed_protos);
+      gc_mark(snap, (SObject*)((SCode*)obj)->closed_descs);
       gc_mark(snap, (SObject*)((SCode*)obj)->insts_debug.next);
+      break;
+    case STYPE_CLOSED_DESC:
+      gc_mark(snap, (SObject*)((SClosedDesc*)obj)->name);
       break;
     default:
       assert(0 && "Not a valid gray object");
@@ -632,7 +633,7 @@ SArr* snap_arr_new(Snap* snap, int len) {
   return a;
 }
 
-SArr* arr_new_from_hash(Snap* snap, SnapHash* hash) {
+SArr* snap_array_hash_new(Snap* snap, SnapHash* hash) {
   int i;
   SArr* a = snap_arr_new(snap, hash->hcount);
   for (i = 0; i < hash->hcapacity; ++i) {
@@ -642,6 +643,24 @@ SArr* arr_new_from_hash(Snap* snap, SnapHash* hash) {
     }
   }
   return a;
+}
+
+SArr* snap_array_vec_new(Snap* snap, SnapVec* vec) {
+  int i;
+  SArr* a = snap_arr_new(snap, vec->vsize);
+  for (i = 0; i < vec->vsize; ++i) {
+    a->data[i] = vec->vitems[i];
+  }
+  return a;
+}
+
+SClosedDesc* snap_closed_desc_new(Snap* snap, bool onstack,
+                                  int index, SSymStr* name) {
+  SClosedDesc* d = (SClosedDesc*)gc_new(snap, STYPE_CLOSED_DESC, sizeof(SClosedDesc));
+  d->onstack = onstack;
+  d->index = index;
+  d->name = name;
+  return d;
 }
 
 SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
@@ -712,9 +731,9 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
     c->max_stack_size = max_stack_size + 2; /* Add enough room for raising errors */
     c->insts_count = count;
   }
-  c->constants = arr_new_from_hash(snap, &code_gen->constants);
-  c->global_names = arr_new_from_hash(snap, &code_gen->global_names);
-  mvec_dup(&code_gen->closed_protos, SnapClosedProto, &c->closed_protos);
+  c->constants = snap_array_hash_new(snap, &code_gen->constants);
+  c->global_names = snap_array_hash_new(snap, &code_gen->global_names);
+  c->closed_descs = snap_array_vec_new(snap, &code_gen->closed_descs);
   mlist_copy(&code_gen->insts, &c->insts_debug);
   snap_release(snap);
   return c;
@@ -746,7 +765,7 @@ SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
   snap_hash_init(&c->constants);
   snap_hash_init(&c->global_names);
   snap_hash_init(&c->closed_names);
-  mvec_init(&c->closed_protos, SnapClosedProto, 2);
+  mvec_init(&c->closed_descs, SValue, 2);
   mvec_init(&c->param_names, SValue, 2);
   c->num_locals = 0;
   c->is_tail = false;
@@ -1014,6 +1033,15 @@ new_frame:
           goto new_frame;
         }
         return *--stack;
+      }
+      OP(CLOSURE) {
+        NEXT(1);
+        a = --stack;
+        if (is_code_p(a)) {
+        } else {
+          RUNTIME_ERROR("snap_type_error", "Value is not callable");
+        }
+        DISPATCH();
       }
       OP(JUMP) {
         arg = GETJARG();
@@ -1646,25 +1674,29 @@ static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant) {
   inst->arg_data = constant;
 }
 
-static int find_or_add_closed(SCodeGen* code_gen, SSymStr* sym) {
+static int find_or_add_closed(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
   int index;
   SValue key = create_obj(sym);
-  SCodeGen* curr = code_gen ? code_gen->up : NULL;
+  SCodeGen* curr = code_gen->up;
+  SValue* val = snap_hash_get(&code_gen->closed_names, key);
+  if (val) {
+    return val->i;
+  }
   if (curr) {
     index = find_local(curr, sym);
     if (index >= 0) {
-      printf("load %s from stack %d\n", sym->data, code_gen->closed_protos.vsize);
-      snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_protos.vsize));
-      *mvec_push(&code_gen->closed_protos, SnapClosedProto) = (SnapClosedProto) { true, index, sym };
-      return code_gen->closed_protos.vsize - 1;
+      snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_descs.vsize));
+      *mvec_push(&code_gen->closed_descs, SValue)
+          = create_obj(snap_closed_desc_new(snap, true, index, sym));
+      return code_gen->closed_descs.vsize - 1;
     }
 
-    index = find_or_add_closed(curr, sym);
+    index = find_or_add_closed(snap, curr, sym);
     if (index >= 0) {
-      printf("load %s from closure %d\n", sym->data, code_gen->closed_protos.vsize);
-      snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_protos.vsize));
-      *mvec_push(&code_gen->closed_protos, SnapClosedProto) = (SnapClosedProto) { false, index, sym };
-      return code_gen->closed_protos.vsize - 1;
+      snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_descs.vsize));
+      *mvec_push(&code_gen->closed_descs, SValue)
+          = create_obj(snap_closed_desc_new(snap, false, index, sym));
+      return code_gen->closed_descs.vsize - 1;
     }
   }
   return -1;
@@ -1678,7 +1710,7 @@ static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
     inst->arg_data = create_obj(sym);
     return;
   }
-  index = find_or_add_closed(code_gen, sym);
+  index = find_or_add_closed(snap, code_gen, sym);
   if (index >= 0) {
     SInst* inst = insts_append(snap, code_gen, LOAD_CLOSED);
     inst->arg = index;
@@ -1701,7 +1733,7 @@ static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
     inst->arg_data = create_obj(sym);
     return;
   }
-  index = find_or_add_closed(code_gen, sym);
+  index = find_or_add_closed(snap, code_gen, sym);
   if (index >= 0) {
     SInst* inst = insts_append(snap, code_gen, STORE_CLOSED);
     inst->arg = index;
@@ -1837,6 +1869,9 @@ static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
   insts_append(snap, code_gen, RETURN);
 
   load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
+  if (code_gen->closed_descs.vsize > 0) {
+    insts_append(snap, up, CLOSURE);
+  }
 
   code_gen->scope = code_gen->scope->up;
   snap_release(snap);
@@ -2229,13 +2264,12 @@ static void print_code(SCode* code, int indent) {
     }
     iprintf(indent, "}\n");
   }
-  if (code->closed_protos.vsize > 0) {
-    SnapClosedProto* proto;
-    iprintf(indent, "closed_protos: {\n");
-    i = 0;
-    mvec_foreach(&code->closed_protos, proto) {
+  if (code->closed_descs->len > 0) {
+    iprintf(indent, "closed_descs: {\n");
+    for (i = 0; i < code->closed_descs->len; ++i) {
+      SClosedDesc* desc = (SClosedDesc*)code->closed_descs->data[i].o;
       iprintf(indent + 1, "%d => { name: %s, onstack: %s, index: %d }\n",
-              i++, proto->name->data, proto->onstack ? "true" : "false", proto->index);
+              i, desc->name->data, desc->onstack ? "true" : "false", desc->index);
     }
     iprintf(indent, "}\n");
   }
@@ -2361,6 +2395,7 @@ static void insts_dump(MList* insts, int indent) {
       case ROT2:
       case ROT3:
       case CALL:
+      case CLOSURE:
       case RETURN:
       case END_BLOCK:
       case RAISE:

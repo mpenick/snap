@@ -250,17 +250,6 @@ static inline void mvec_maybe_resize_(int size, int *capacity, size_t num_bytes,
 
 #define mvec_destroy(v) mvec_free((v)->vitems)
 
-#define mvec_dup(v, type, to)                                                  \
-  do {                                                                         \
-    if ((v)->vcapacity > 0) {                                                  \
-      (to)->vitems =                                                           \
-          (type *)mvec_realloc(NULL, sizeof(type) * (v)->vcapacity);           \
-      memcpy((to)->vitems, (v)->vitems, sizeof(type) * (v)->vcapacity);        \
-    }                                                                          \
-    (to)->vsize = (v)->vsize;                                                  \
-    (to)->vcapacity = (v)->vcapacity;                                          \
-  } while (0)
-
 #define mvec_check_size(v, type)                                               \
   mvec_maybe_resize_((v)->vsize, &(v)->vcapacity, sizeof(type),                \
                      (void **)&(v)->vitems)
