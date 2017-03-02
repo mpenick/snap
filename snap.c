@@ -25,6 +25,8 @@ enum {
   XX(STORE_GLOBAL, "STORE_GLOBAL", true) \
   XX(LOAD_LOCAL, "LOAD_LOCAL", true) \
   XX(STORE_LOCAL, "STORE_LOCAL", true) \
+  XX(LOAD_CLOSED, "LOAD_CLOSED", true) \
+  XX(STORE_CLOSED, "STORE_CLOSED", true) \
   XX(LOAD_CONSTANT, "LOAD_CONSTANT", true) \
   XX(LOAD_NIL, "LOAD_NIL", false) \
   XX(POP, "POP", false) \
@@ -390,12 +392,15 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_CODE_GEN:
       snap->num_bytes_alloced -= sizeof(SCodeGen);
       snap_hash_destroy(&((SCodeGen*)obj)->global_names);
+      snap_hash_destroy(&((SCodeGen*)obj)->closed_names);
+      mvec_destroy(&((SCodeGen*)obj)->closed_protos);
       snap_hash_destroy(&((SCodeGen*)obj)->constants);
       mvec_destroy(&((SCodeGen*)obj)->param_names);
       break;
     case STYPE_CODE:
       snap->num_bytes_alloced -= sizeof(SCode);
       free(((SCode*)obj)->insts);
+      mvec_destroy(&((SCode*)obj)->closed_protos);
       break;
     default:
       assert(0 && "Not a GC object");
@@ -454,6 +459,13 @@ static void gc_mark_vec(Snap* snap, SnapVec* vec) {
   }
 }
 
+static void gc_mark_closed_proto_vec(Snap* snap, SnapClosedProtoVec* vec) {
+  SnapClosedProto* proto;
+  mvec_foreach(vec, proto) {
+    gc_mark(snap, (SObject *)proto->name);
+  }
+}
+
 static void gc_mark_children(Snap* snap, SObject* obj) {
   int i;
   switch (obj->type) {
@@ -482,11 +494,14 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark(snap, (SObject*)((SCodeGen*)obj)->scope);
       gc_mark_hash(snap, &((SCodeGen*)obj)->constants);
       gc_mark_hash(snap, &((SCodeGen*)obj)->global_names);
+      gc_mark_hash(snap, &((SCodeGen*)obj)->closed_names);
+      gc_mark_closed_proto_vec(snap, &((SCodeGen*)obj)->closed_protos);
       gc_mark_vec(snap, &((SCodeGen*)obj)->param_names);
       break;
     case STYPE_CODE:
       gc_mark(snap, (SObject*)((SCode*)obj)->constants);
       gc_mark(snap, (SObject*)((SCode*)obj)->global_names);
+      gc_mark_closed_proto_vec(snap, &((SCodeGen*)obj)->closed_protos);
       gc_mark(snap, (SObject*)((SCode*)obj)->insts_debug.next);
       break;
     default:
@@ -648,7 +663,7 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
     mlist_foreach(&code_gen->insts) {
       SInst* inst = mlist_entry(SInst, pos, list);
       switch(inst->opcode) {
-        case LOAD_GLOBAL: case LOAD_LOCAL:
+        case LOAD_GLOBAL: case LOAD_LOCAL: case LOAD_CLOSED:
         case LOAD_CONSTANT: case LOAD_NIL:
         case DUP:
           stack_size++;
@@ -699,6 +714,7 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
   }
   c->constants = arr_new_from_hash(snap, &code_gen->constants);
   c->global_names = arr_new_from_hash(snap, &code_gen->global_names);
+  mvec_dup(&code_gen->closed_protos, SnapClosedProto, &c->closed_protos);
   mlist_copy(&code_gen->insts, &c->insts_debug);
   snap_release(snap);
   return c;
@@ -729,10 +745,12 @@ SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
   c->scope = NULL;
   snap_hash_init(&c->constants);
   snap_hash_init(&c->global_names);
+  snap_hash_init(&c->closed_names);
+  mvec_init(&c->closed_protos, SnapClosedProto, 2);
   mvec_init(&c->param_names, SValue, 2);
   c->num_locals = 0;
   c->is_tail = false;
-  c->up = NULL;
+  c->up = up;
   return c;
 }
 
@@ -918,6 +936,16 @@ new_frame:
         arg = GETARG();
         NEXT(1);
         locals[arg] = *--stack;
+        DISPATCH();
+      }
+      OP(LOAD_CLOSED) {
+        arg = GETARG();
+        NEXT(1);
+        DISPATCH();
+      }
+      OP(STORE_CLOSED) {
+        arg = GETARG();
+        NEXT(1);
         DISPATCH();
       }
       OP(LOAD_CONSTANT) {
@@ -1553,9 +1581,6 @@ static void compile(Snap* snap, SCodeGen* code_gen, SValue expr) {
     case STYPE_CONS:
       compile_sexpr(snap, code_gen, as_cons(expr));
       break;
-    case STYPE_FORM:
-      // error
-      break;
     default:
       // error
       raise(snap, "Unexpected type");
@@ -1573,6 +1598,17 @@ static int get_or_add_index(SnapHash* hash, SValue key) {
     snap_hash_put(hash, key, create_int(index));
   }
   return index;
+}
+
+static int find_local(SCodeGen* code_gen, SSymStr* sym) {
+  SScope* scope = code_gen->scope;
+  SValue key = create_obj(sym);
+  while (scope) {
+    SValue* val = snap_hash_get(&scope->local_names, key);
+    if (val) return val->i;
+    scope = scope->up;
+  }
+  return -1;
 }
 
 int add_local(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
@@ -1610,21 +1646,47 @@ static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant) {
   inst->arg_data = constant;
 }
 
-static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
-  SScope* scope = code_gen->scope;
+static int find_or_add_closed(SCodeGen* code_gen, SSymStr* sym) {
+  int index;
   SValue key = create_obj(sym);
-  while (scope) {
-    SValue* val = snap_hash_get(&scope->local_names, key);
-    if (val) {
-      SInst* inst = insts_append(snap, code_gen, LOAD_LOCAL);
-      inst->arg = val->i;
-      inst->arg_data = create_obj(sym);
-      return;
+  SCodeGen* curr = code_gen ? code_gen->up : NULL;
+  if (curr) {
+    index = find_local(curr, sym);
+    if (index >= 0) {
+      printf("load %s from stack %d\n", sym->data, code_gen->closed_protos.vsize);
+      snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_protos.vsize));
+      *mvec_push(&code_gen->closed_protos, SnapClosedProto) = (SnapClosedProto) { true, index, sym };
+      return code_gen->closed_protos.vsize - 1;
     }
-    scope = scope->up;
+
+    index = find_or_add_closed(curr, sym);
+    if (index >= 0) {
+      printf("load %s from closure %d\n", sym->data, code_gen->closed_protos.vsize);
+      snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_protos.vsize));
+      *mvec_push(&code_gen->closed_protos, SnapClosedProto) = (SnapClosedProto) { false, index, sym };
+      return code_gen->closed_protos.vsize - 1;
+    }
+  }
+  return -1;
+}
+
+static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
+  int index = find_local(code_gen, sym);
+  if (index >= 0) {
+    SInst* inst = insts_append(snap, code_gen, LOAD_LOCAL);
+    inst->arg = index;
+    inst->arg_data = create_obj(sym);
+    return;
+  }
+  index = find_or_add_closed(code_gen, sym);
+  if (index >= 0) {
+    SInst* inst = insts_append(snap, code_gen, LOAD_CLOSED);
+    inst->arg = index;
+    inst->arg_data = create_obj(sym);
+    return;
   }
   {
-    int index = get_or_add_index(&code_gen->global_names, key);
+    int index = get_or_add_index(&code_gen->global_names, create_obj(sym));
     SInst* inst = insts_append(snap, code_gen, LOAD_GLOBAL);
     inst->arg = index;
     inst->arg_data = create_obj(sym);
@@ -1632,20 +1694,22 @@ static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
 }
 
 static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
-  SScope* scope = code_gen->scope;
-  SValue key = create_obj(sym);
-  while (scope) {
-    SValue* val = snap_hash_get(&scope->local_names, key);
-    if (val) {
-      SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
-      inst->arg = val->i;
-      inst->arg_data = create_obj(sym);
-      return;
-    }
-    scope = scope->up;
+  int index = find_local(code_gen, sym);
+  if (index >= 0) {
+    SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
+    inst->arg = index;
+    inst->arg_data = create_obj(sym);
+    return;
+  }
+  index = find_or_add_closed(code_gen, sym);
+  if (index >= 0) {
+    SInst* inst = insts_append(snap, code_gen, STORE_CLOSED);
+    inst->arg = index;
+    inst->arg_data = create_obj(sym);
+    return;
   }
   {
-    int index = get_or_add_index(&code_gen->global_names, key);
+    int index = get_or_add_index(&code_gen->global_names, create_obj(sym));
     SInst* inst = insts_append(snap, code_gen, STORE_GLOBAL);
     inst->arg = index;
     inst->arg_data = create_obj(sym);
@@ -1760,7 +1824,7 @@ static void compile_set(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
 static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
   int i;
   SArr* args = as_arr(sexpr->first);
-  SCodeGen* code_gen = snap_code_gen_new(snap, up);
+  SCodeGen* code_gen = anchor_code_gen(snap_code_gen_new(snap, up));
   code_gen->scope = snap_scope_new(snap, NULL);
 
   for (i = 0; i < args->len; ++i) {
@@ -1773,6 +1837,9 @@ static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
   insts_append(snap, code_gen, RETURN);
 
   load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
+
+  code_gen->scope = code_gen->scope->up;
+  snap_release(snap);
 }
 
 static void compile_loop_or_let(Snap* snap, SCodeGen* code_gen, int loop_or_let, SCons* sexpr) {
@@ -2162,6 +2229,16 @@ static void print_code(SCode* code, int indent) {
     }
     iprintf(indent, "}\n");
   }
+  if (code->closed_protos.vsize > 0) {
+    SnapClosedProto* proto;
+    iprintf(indent, "closed_protos: {\n");
+    i = 0;
+    mvec_foreach(&code->closed_protos, proto) {
+      iprintf(indent + 1, "%d => { name: %s, onstack: %s, index: %d }\n",
+              i++, proto->name->data, proto->onstack ? "true" : "false", proto->index);
+    }
+    iprintf(indent, "}\n");
+  }
   iprintf(indent, "instructions: {\n");
   insts_dump(&code->insts_debug, indent);
   iprintf(indent, "}\n");
@@ -2221,6 +2298,7 @@ static void insts_remove_dead_code(MList* insts) {
           case LOAD_CONSTANT:
           case LOAD_GLOBAL:
           case LOAD_LOCAL:
+          case LOAD_CLOSED:
           case LOAD_NIL:
             insts_remove(insts, prev_inst);
             insts_remove(insts, inst);
@@ -2258,6 +2336,8 @@ static void insts_dump(MList* insts, int indent) {
       case STORE_GLOBAL:
       case LOAD_LOCAL:
       case STORE_LOCAL:
+      case LOAD_CLOSED:
+      case STORE_CLOSED:
         iprintf(indent + 1, "%8d %-18s %-8d (%s)\n",
                 i, opcode_name(inst->opcode), inst->arg, as_sym(inst->arg_data)->data);
         break;

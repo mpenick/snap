@@ -6,7 +6,6 @@
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdint.h>
 
 #define check(a, e) (assert(a), (e))
 
@@ -56,9 +55,6 @@
 
 #define SNAP_MAX_BLOCKS 16
 
-typedef int64_t SnapInt;
-typedef double SnapFloat;
-
 #define STYPE_MAPPING(XX) \
   XX(STYPE_UNDEF, 0, "undef") \
   XX(STYPE_DELETED, 1, "deleted") \
@@ -78,7 +74,8 @@ typedef double SnapFloat;
   XX(STYPE_CODE_GEN, 15, "codegen") \
   XX(STYPE_CODE, 16, "code") \
   XX(STYPE_KEY, 17, "key") \
-  XX(STYPE_TEMPSTR, 18, "tempstr")
+  XX(STYPE_TEMPSTR, 18, "tempstr") \
+  XX(STYPE_CLOSURE, 19, "closure")
 
 enum {
 #define XX(type, id, name) type,
@@ -87,20 +84,24 @@ enum {
 };
 
 typedef struct Snap_ Snap;
+typedef struct SCode_ SCode;
 typedef struct SObject_ SObject;
+typedef struct SValue_ SValue;
 
-typedef struct SValue_ {
+typedef long SnapInt;
+typedef double SnapFloat;
+typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
+
+struct SValue_ {
   uint8_t type;
   union {
     bool b;
     SnapInt i;
     SnapFloat f;
     SObject* o;
-    void (*c)(Snap* snap, const struct SValue_* args, int num_args, struct SValue_* result);
+    SCFunc c;
   };
-} SValue;
-
-typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
+};
 
 int snap_hash(const SValue* val);
 int snap_compare(const SValue* val1, const SValue* val2);
@@ -189,6 +190,27 @@ typedef struct SScope_ {
   struct SScope_* up;
 }  SScope;
 
+typedef struct SnapClosed_ {
+  SValue* value;
+  SValue closed;
+} SnapClosed;
+
+typedef struct SnapClosedProto_ {
+  bool onstack;
+  int index;
+  SSymStr* name;
+} SnapClosedProto;
+
+typedef struct SnapClosedProtoVec_ {
+  MVEC_FIELDS(SnapClosedProto);
+} SnapClosedProtoVec;
+
+typedef struct SClosure_ {
+  SOBJECT_FIELDS
+  SCode* code;
+  SnapClosed closed[0];
+} SClosure;
+
 typedef struct SCodeGen_ {
   SOBJECT_FIELDS
   MList insts;
@@ -196,23 +218,27 @@ typedef struct SCodeGen_ {
   SScope* scope;
   SnapHash constants;
   SnapHash global_names;
+  SnapHash closed_names;
+  SnapClosedProtoVec closed_protos;
   SnapVec param_names;
   int num_locals;
+  int num_closed;
   int num_results;
   bool is_tail;
   struct SCodeGen_* up;
 } SCodeGen;
 
-typedef struct SCode_ {
+struct SCode_ {
   SOBJECT_FIELDS
   int* insts;
   SArr* global_names;
   SArr* constants;
+  SnapClosedProtoVec closed_protos;
   int num_locals;
   int max_stack_size;
   int insts_count;
   MList insts_debug;
-} SCode;
+};
 
 typedef struct SnapBlock_ {
   int insts_offset;

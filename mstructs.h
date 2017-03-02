@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 /* Hash table */
 
@@ -230,8 +231,8 @@ static inline int mlist_backward_count(MList *first, MList *last) {
   int vcapacity;                                                               \
   int vsize
 
-static inline void mvec_maybe_resize(int size, int *capacity, size_t num_bytes,
-                                     void **items) {
+static inline void mvec_maybe_resize_(int size, int *capacity, size_t num_bytes,
+                                      void **items) {
   if (size >= *capacity) {
     *capacity *= ((*capacity < 4096) ? 4 : 2);
     *items = mvec_realloc(*items, num_bytes * *capacity);
@@ -249,9 +250,20 @@ static inline void mvec_maybe_resize(int size, int *capacity, size_t num_bytes,
 
 #define mvec_destroy(v) mvec_free((v)->vitems)
 
+#define mvec_dup(v, type, to)                                                  \
+  do {                                                                         \
+    if ((v)->vcapacity > 0) {                                                  \
+      (to)->vitems =                                                           \
+          (type *)mvec_realloc(NULL, sizeof(type) * (v)->vcapacity);           \
+      memcpy((to)->vitems, (v)->vitems, sizeof(type) * (v)->vcapacity);        \
+    }                                                                          \
+    (to)->vsize = (v)->vsize;                                                  \
+    (to)->vcapacity = (v)->vcapacity;                                          \
+  } while (0)
+
 #define mvec_check_size(v, type)                                               \
-  mvec_maybe_resize((v)->vsize, &(v)->vcapacity, sizeof(type),                 \
-                    (void **)&(v)->vitems)
+  mvec_maybe_resize_((v)->vsize, &(v)->vcapacity, sizeof(type),                \
+                     (void **)&(v)->vitems)
 
 #define mvec_push(v, type)                                                     \
   (mvec_check_size(v, type), &(v)->vitems[(v)->vsize++])

@@ -1,0 +1,14 @@
+; vi: filetype=scheme
+
+;(((fn [x y z]
+;     (let [[x 1]]
+;       (fn [] (println x y ((fn [] z))))
+;       )
+;     )))
+
+(fn [x y z]
+     (fn [] (print x)
+         (fn [] (println x y)
+             (fn [] (println x y z)))))
+
+
