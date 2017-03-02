@@ -38,6 +38,8 @@
 #define is_inst(v) ((v).type == STYPE_INST)
 #define is_code(v) ((v).type == STYPE_CODE)
 #define is_code_p(v) ((v)->type == STYPE_CODE)
+#define is_closure_p(v) ((v)->type == STYPE_CLOSURE)
+#define is_closed_desc(v) ((v).type == STYPE_CLOSED_DESC)
 
 #define as_arr(v) check(is_arr(v), (SArr*)(v).o)
 #define as_str(v) check(is_str(v), (SSymStr*)(v).o)
@@ -50,6 +52,8 @@
 #define as_err_p(v) check(is_err_p(v), (SErr*)(v)->o)
 #define as_cons(v) check(is_cons(v), (SCons*)(v).o)
 #define as_code(v) check(is_code(v), (SCode*)(v).o)
+#define as_code_p(v) check(is_code_p(v), (SCode*)(v)->o)
+#define as_closed_desc(v) check(is_closed_desc(v), (SClosedDesc*)(v).o)
 #define as_inst(v) check(is_inst(v), (SInst*)(v).o)
 #define as_fn(v) check(is_fn(v), (SFn*)(v).o)
 
@@ -193,7 +197,7 @@ typedef struct SScope_ {
 
 typedef struct SClosedDesc_ {
   SOBJECT_FIELDS
-  bool onstack;
+  bool islocal;
   int index;
   SSymStr* name;
 } SClosedDesc;
@@ -207,7 +211,7 @@ typedef struct SClosure_ {
   SOBJECT_FIELDS
   SCode* code;
   struct SClosure_* next;
-  SnapClosed values[0];
+  SnapClosed closed[0];
 } SClosure;
 
 typedef struct SCodeGen_ {
@@ -232,6 +236,7 @@ struct SCode_ {
   SArr* global_names;
   SArr* constants;
   SArr* closed_descs;
+  int num_args;
   int num_locals;
   int max_stack_size;
   int insts_count;
@@ -246,11 +251,12 @@ typedef struct SnapBlock_ {
 typedef struct SnapFrame_ {
   int* pc;
   SCode* code;
+  SClosure* closure;
+  SClosure* enclosed;
   SValue* stack_base;
   SValue* stack_top;
   SnapBlock blocks[SNAP_MAX_BLOCKS];
   int blocks_top;
-  SClosure* closures;
 } SnapFrame;
 
 struct Snap_ {

@@ -402,6 +402,9 @@ static void gc_free(Snap* snap, SObject* obj) {
       snap->num_bytes_alloced -= sizeof(SCode);
       free(((SCode*)obj)->insts);
       break;
+    case STYPE_CLOSURE:
+      snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->code->closed_descs->len * sizeof(SnapClosed));
+      break;
     case STYPE_CLOSED_DESC:
       snap->num_bytes_alloced -= sizeof(SClosedDesc);
       break;
@@ -427,6 +430,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_INST:
     case STYPE_CODE_GEN:
     case STYPE_CODE:
+    case STYPE_CLOSURE:
     case STYPE_CLOSED_DESC:
       if (obj->mark == WHITE) {
         obj->mark = GRAY;
@@ -501,6 +505,13 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark(snap, (SObject*)((SCode*)obj)->global_names);
       gc_mark(snap, (SObject*)((SCode*)obj)->closed_descs);
       gc_mark(snap, (SObject*)((SCode*)obj)->insts_debug.next);
+    case STYPE_CLOSURE:
+      gc_mark(snap, (SObject*)((SClosure*)obj)->code);
+      for (i = 0; i < ((SClosure*)obj)->code->closed_descs->len; ++i) {
+        if (((SClosure*)obj)->closed[i].value == &((SClosure*)obj)->closed[i].closed) {
+          gc_mark_val(snap, ((SClosure*)obj)->closed[i].closed);
+        }
+      }
       break;
     case STYPE_CLOSED_DESC:
       gc_mark(snap, (SObject*)((SClosedDesc*)obj)->name);
@@ -654,13 +665,25 @@ SArr* snap_array_vec_new(Snap* snap, SnapVec* vec) {
   return a;
 }
 
-SClosedDesc* snap_closed_desc_new(Snap* snap, bool onstack,
+SClosedDesc* snap_closed_desc_new(Snap* snap, bool islocal,
                                   int index, SSymStr* name) {
   SClosedDesc* d = (SClosedDesc*)gc_new(snap, STYPE_CLOSED_DESC, sizeof(SClosedDesc));
-  d->onstack = onstack;
+  d->islocal = islocal;
   d->index = index;
   d->name = name;
   return d;
+}
+
+SClosure* snap_closure_new(Snap* snap, SCode* code, SClosure* next) {
+  int num_closed = code->closed_descs->len;
+  SClosure* cl = (SClosure*)gc_new(snap,
+                                   STYPE_CLOSURE,
+                                   sizeof(SClosure) +
+                                   sizeof(SnapClosed) *
+                                   num_closed);
+  cl->code = code;
+  cl->next = next;
+  return cl;
 }
 
 SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
@@ -728,6 +751,7 @@ SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
       }
     }
     c->num_locals = code_gen->num_locals;
+    c->num_args = code_gen->param_names.vsize;
     c->max_stack_size = max_stack_size + 2; /* Add enough room for raising errors */
     c->insts_count = count;
   }
@@ -790,9 +814,11 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
 // 2) [args and locals][stack...][args and locals][stack...]
 // 3) [args and locals][stack...][return value]
 
-static void push_frame(Snap* snap, SCode* code, SValue* stack_base) {
+static void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* closure) {
   SnapFrame* frame = mvec_push(&snap->frames, SnapFrame);
   frame->code = code;
+  frame->closure = closure;
+  frame->enclosed = NULL;
   frame->pc = code->insts;
   frame->blocks_top = 0;
   if (stack_base + code->max_stack_size >= snap->stack_end) {
@@ -891,6 +917,7 @@ static SValue exec(Snap* snap) {
   SnapFrame* frame;
   SnapBlock* block;
   SCode* code;
+  SClosure* closure;
   int* pc;
   SValue* constants;
   SValue* global_names;
@@ -911,6 +938,7 @@ static SValue exec(Snap* snap) {
 new_frame:
     frame = &mvec_back(&snap->frames);
     code = frame->code;
+    closure = frame->closure;
     pc = frame->pc;
     constants = code->constants->data;
     global_names = code->global_names->data;
@@ -960,11 +988,13 @@ new_frame:
       OP(LOAD_CLOSED) {
         arg = GETARG();
         NEXT(1);
+        *stack++ = *closure->closed[arg].value;
         DISPATCH();
       }
       OP(STORE_CLOSED) {
         arg = GETARG();
         NEXT(1);
+        *closure->closed[arg].value = *--stack;
         DISPATCH();
       }
       OP(LOAD_CONSTANT) {
@@ -1016,16 +1046,63 @@ new_frame:
           stack -= arg; // Pop arguments
           *stack++ = temp;
         } else if (is_code_p(a)){
+          code = (SCode*)a->o;
+          if (arg != code->num_args) {
+            RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
+          }
           frame->pc = pc;
           frame->stack_top = stack - arg; // Pop arguments
-          push_frame(snap, (SCode*)a->o, frame->stack_top);
+          push_frame(snap, code, frame->stack_top, NULL);
+          goto new_frame;
+        } else if (is_closure_p(a)){
+          closure = (SClosure*)a->o;
+          if (arg != closure->code->num_args) {
+            RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
+          }
+          frame->pc = pc;
+          frame->stack_top = stack - arg; // Pop arguments
+          push_frame(snap, closure->code, frame->stack_top, closure);
           goto new_frame;
         } else {
           RUNTIME_ERROR("snap_type_error", "Value is not callable");
         }
         DISPATCH();
       }
+      OP(CLOSURE) {
+        NEXT(1);
+        a = --stack;
+        if (is_code_p(a)) {
+          int i;
+          SClosure* enclosed = snap_closure_new(snap, as_code_p(a), frame->enclosed);
+          SArr* descs = enclosed->code->closed_descs;
+          for (i = 0; i < descs->len; ++i) {
+            SClosedDesc* desc = as_closed_desc(descs->data[i]);
+            SnapClosed* closed = &enclosed->closed[i];
+            if (desc->islocal) {
+              closed->value = &locals[desc->index];
+            } else {
+              closed->value = closure->closed[desc->index].value;
+            }
+          }
+          frame->enclosed = enclosed;
+          *stack++ = create_obj(enclosed);
+        } else {
+          RUNTIME_ERROR("snap_type_error", "Value is not callable");
+        }
+        DISPATCH();
+      }
       OP(RETURN) {
+        while (frame->enclosed != NULL) {
+          int i;
+          SClosure* enclosed = frame->enclosed;
+          SArr* descs = enclosed->code->closed_descs;
+          for (i = 0; i < descs->len; ++i) {
+            SnapClosed* closed = &enclosed->closed[i];
+            closed->closed = *closed->value;
+            closed->value = &closed->closed;
+          }
+          frame->enclosed = enclosed->next;
+        }
         if (snap->frames.vsize > 1) {
           SnapFrame* frame_prev = &mvec_back(&snap->frames) - 1;
           *frame_prev->stack_top++ = *--stack;
@@ -1033,15 +1110,6 @@ new_frame:
           goto new_frame;
         }
         return *--stack;
-      }
-      OP(CLOSURE) {
-        NEXT(1);
-        a = --stack;
-        if (is_code_p(a)) {
-        } else {
-          RUNTIME_ERROR("snap_type_error", "Value is not callable");
-        }
-        DISPATCH();
       }
       OP(JUMP) {
         arg = GETJARG();
@@ -1154,7 +1222,7 @@ SValue snap_exec(Snap* snap, const char* str) {
 
   code = anchor_code(snap_code_new(snap, code_gen));
   print_code(code, 0);
-  push_frame(snap, code, snap->stack);
+  push_frame(snap, code, snap->stack, NULL);
   result = exec(snap);
   snap_release(snap);
 
@@ -2268,8 +2336,8 @@ static void print_code(SCode* code, int indent) {
     iprintf(indent, "closed_descs: {\n");
     for (i = 0; i < code->closed_descs->len; ++i) {
       SClosedDesc* desc = (SClosedDesc*)code->closed_descs->data[i].o;
-      iprintf(indent + 1, "%d => { name: %s, onstack: %s, index: %d }\n",
-              i, desc->name->data, desc->onstack ? "true" : "false", desc->index);
+      iprintf(indent + 1, "%d => { name: %s, islocal: %s, index: %d }\n",
+              i, desc->name->data, desc->islocal ? "true" : "false", desc->index);
     }
     iprintf(indent, "}\n");
   }
@@ -2389,12 +2457,15 @@ static void insts_dump(MList* insts, int indent) {
                   stype_name(inst->arg_data.type), inst->arg_data.o);
         }
         break;
+      case CALL:
+        iprintf(indent + 1, "%8d %-18s %-8d\n",
+                i, opcode_name(inst->opcode), inst->arg);
+        break;
       case LOAD_NIL:
       case POP:
       case DUP:
       case ROT2:
       case ROT3:
-      case CALL:
       case CLOSURE:
       case RETURN:
       case END_BLOCK:

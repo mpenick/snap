@@ -1,14 +1,30 @@
 ; vi: filetype=scheme
 
-;(((fn [x y z]
-;     (let [[x 1]]
-;       (fn [] (println x y ((fn [] z))))
-;       )
-;     )))
+(((fn [x y z]
+     (let [[x 99]]
+       (fn [] (println x y ((fn [] z))))
+       )
+     ) 1 2 3))
 
-(fn [x y z]
-     (fn [] (print x)
-         (fn [] (println x y)
-             (fn [] (println x y z)))))
+((fn [x y z]
+     ((fn [] (println x)
+          ((fn [] (println x y)
+               ((fn [] (println x y z))
 
+                )))
+          ))
+     ) 4 5 6)
+
+((fn [x]
+     (let [
+           [inner1 (fn [] (set! x (+ x 1)) (println "add1" x))]
+           [inner2 (fn [] (set! x (+ x 2)) (println "add2" x))]
+           ]
+       (inner1)
+       (inner2)
+       (inner1)
+       (inner2)
+       )
+     (println "last" x)
+     x) 1)
 
