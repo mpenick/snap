@@ -38,6 +38,7 @@
 #define is_inst(v) ((v).type == STYPE_INST)
 #define is_code(v) ((v).type == STYPE_CODE)
 #define is_code_p(v) ((v)->type == STYPE_CODE)
+#define is_closure(v) ((v).type == STYPE_CLOSURE)
 #define is_closure_p(v) ((v)->type == STYPE_CLOSURE)
 #define is_closed_desc(v) ((v).type == STYPE_CLOSED_DESC)
 
@@ -53,6 +54,8 @@
 #define as_cons(v) check(is_cons(v), (SCons*)(v).o)
 #define as_code(v) check(is_code(v), (SCode*)(v).o)
 #define as_code_p(v) check(is_code_p(v), (SCode*)(v)->o)
+#define as_closure(v) check(is_closure(v), (SClosure*)(v).o)
+#define as_closure_p(v) check(is_closure_p(v), (SClosure*)(v)->o)
 #define as_closed_desc(v) check(is_closed_desc(v), (SClosedDesc*)(v).o)
 #define as_inst(v) check(is_inst(v), (SInst*)(v).o)
 #define as_fn(v) check(is_fn(v), (SFn*)(v).o)

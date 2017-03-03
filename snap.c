@@ -85,6 +85,11 @@ static const char* stype_name(int  type) {
 
 #define compare(a, b) ((a) < (b) ? -1 : (a) > (b))
 
+#define isclosed(c) ((c).value == &(c).closed)
+
+#define relocate(stack_old, stack_new, stack_curr) \
+  stack_curr = ((stack_new) + ((stack_curr) - (stack_old)))
+
 static int hash_float(double n) {
   int i;
   unsigned int u;
@@ -228,6 +233,7 @@ static void insts_dump(MList* insts, int indent);
 
 static void print_val(SValue val, int indent);
 static void print_code(SCode* code, int indent);
+static void print_closure(SClosure* closure, int indent);
 static void print_cons(SCons* cons, int indent);
 static void print_arr(SArr* arr, int indent);
 
@@ -508,7 +514,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
     case STYPE_CLOSURE:
       gc_mark(snap, (SObject*)((SClosure*)obj)->code);
       for (i = 0; i < ((SClosure*)obj)->code->closed_descs->len; ++i) {
-        if (((SClosure*)obj)->closed[i].value == &((SClosure*)obj)->closed[i].closed) {
+        if (isclosed(((SClosure*)obj)->closed[i])) {
           gc_mark_val(snap, ((SClosure*)obj)->closed[i].closed);
         }
       }
@@ -816,32 +822,42 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
 
 static void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* closure) {
   SnapFrame* frame = mvec_push(&snap->frames, SnapFrame);
+
   frame->code = code;
   frame->closure = closure;
   frame->enclosed = NULL;
   frame->pc = code->insts;
   frame->blocks_top = 0;
+  frame->stack_base = stack_base;
+  frame->stack_top = stack_base + code->num_locals;
+
   if (stack_base + code->max_stack_size >= snap->stack_end) {
-    SnapFrame* frame;
-    uintptr_t d;
-    // TODO: Grow more intelligently than this
-    int stack_size = (snap->stack_end - snap->stack) + code->max_stack_size;
+    int stack_size = snap->stack_size * (snap->stack_size < 4096 ? 4 : 2) + code->max_stack_size;
     SValue* stack_old = snap->stack;
-    SValue* stack_new = snap->stack = (SValue*)realloc(snap->stack, stack_size);
+    SValue* stack_new = (SValue*)realloc(snap->stack, stack_size * sizeof(SValue));
+    snap->stack_size = stack_size;
+    snap->stack = stack_new;
     snap->stack_end = stack_new + stack_size;
 
     // Update stack pointers to the new stack
     mvec_foreach(&snap->frames, frame) {
-      d = frame->stack_base - stack_old;
-      frame->stack_base = stack_new + d;
-      d = frame->stack_top - stack_old;
-      frame->stack_top = stack_new + d;
+      SClosure* enclosed;
+
+      relocate(stack_old, stack_new, frame->stack_base);
+      relocate(stack_old, stack_new, frame->stack_top);
+
+      enclosed = frame->enclosed;
+      while (enclosed) {
+        int i;
+        for (i = 0; i < enclosed->code->closed_descs->len; ++i) {
+          if (!isclosed(enclosed->closed[i])) {
+            relocate(stack_old, stack_new, enclosed->closed[i].value);
+          }
+        }
+        enclosed  = enclosed->next;
+      }
     }
-    d = stack_base - stack_old;
-    stack_base = stack_new + d;
   }
-  frame->stack_base = stack_base;
-  frame->stack_top = stack_base + code->num_locals;
 }
 
 #define binary_op(name, iop, fop) \
@@ -1044,6 +1060,11 @@ new_frame:
           frame->stack_top = stack - arg;
           a->c(snap, stack - arg, arg, &temp);
           stack -= arg; // Pop arguments
+          if (temp.type == STYPE_ERR) {
+            *stack++ = as_err(temp)->msg;
+            *stack++ = as_err(temp)->err;
+            goto raise;
+          }
           *stack++ = temp;
         } else if (is_code_p(a)){
           code = (SCode*)a->o;
@@ -1603,6 +1624,7 @@ static SValue parse_sexpr(Snap* snap, SnapLex* lex, int token) {
       raise(snap, "Expected id, special form or expr at %d", lex->line);
       break;
   }
+  snap_release(snap);
   return create_obj(sexpr);
 }
 
@@ -2280,6 +2302,10 @@ static void print_val(SValue val, int indent) {
       iprintf(indent, "<code object (%p)>:\n", val.o);
       print_code(as_code(val), indent + 1);
       break;
+    case STYPE_CLOSURE:
+      iprintf(indent, "<closure object (%p)>:\n", val.o);
+      print_closure((SClosure*)as_closure(val), indent + 1);
+      break;
   }
 }
 
@@ -2345,6 +2371,21 @@ static void print_code(SCode* code, int indent) {
   insts_dump(&code->insts_debug, indent);
   iprintf(indent, "}\n");
 }
+
+static void print_closure(SClosure* closure, int indent) {
+  int i;
+  iprintf(indent, "code: {\n");
+  print_code(closure->code, indent + 1);
+  iprintf(indent, "}\n");
+  iprintf(indent, "closed: {\n");
+  for (i = 0; i < closure->code->closed_descs->len; ++i) {
+    iprintf(indent + 1, "%d => ", i);
+    print_val(*closure->closed[i].value, 0);
+    printf("\n");
+  }
+  iprintf(indent, "}\n");
+}
+
 
 static int insts_calculate_jump(SInst* inst) {
   int total = 0;
@@ -2510,9 +2551,18 @@ void builtin_println(Snap* snap, const SValue* args, int num_args, SValue* resul
   printf("\n");
 }
 
+void builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) {
+    *result = create_obj(snap_err_new_str(snap, "snap_arity_error", "Invalid number of arguments"));
+    return;
+  }
+  *result = create_bool(args[0].type == STYPE_NIL);
+}
+
 void snap_init(Snap* snap) {
-  snap->stack = (SValue*)malloc(1024 * sizeof(SValue));
-  snap->stack_end = snap->stack + 1024 * sizeof(SValue);
+  snap->stack_size = 64;
+  snap->stack = (SValue*)malloc(snap->stack_size * sizeof(SValue));
+  snap->stack_end = snap->stack + snap->stack_size;
   mvec_init(&snap->frames, SnapFrame, 32);
   mvec_init(&snap->anchors, SObject*, 32);
   snap->num_bytes_alloced = 0;
@@ -2525,6 +2575,7 @@ void snap_init(Snap* snap) {
 
   snap_def(snap, "print", create_cfunc(builtin_print));
   snap_def(snap, "println", create_cfunc(builtin_println));
+  snap_def(snap, "nil?", create_cfunc(builtin_isnil));
 }
 
 void snap_destroy(Snap* snap) {

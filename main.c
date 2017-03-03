@@ -22,10 +22,10 @@ int main(int argc, char** argv) {
     fseek(file, 0, SEEK_END);
     end = ftell(file);
     fseek(file, 0, SEEK_SET);
-    buf = malloc(end + 1);
+    buf = (char*)malloc(end + 1);
     if ((num_bytes = fread(buf, 1, end, file)) > 0) {
       int i;
-      SValue val;
+      SValue val, result;
       SCons* first = NULL;
       SCons** args = &first;
       for (i = 2; i < argc; ++i) {
@@ -41,8 +41,12 @@ int main(int argc, char** argv) {
       snap_def(&snap, "args", val);
       if (first) snap_release(&snap);
       buf[num_bytes] = '\0';
-      snap_print(snap_exec(&snap, buf));
-      printf("\n");
+      result = snap_exec(&snap, buf);
+      if (result.type == STYPE_ERR) {
+        snap_print(result);
+        printf("\n");
+        return -1;
+      }
     } else {
       fprintf(stderr, "Unable to read %s\n", filename);
     }

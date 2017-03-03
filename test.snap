@@ -1,114 +1,48 @@
 ; vi: filetype=scheme
 
 ; args
-(print "args:" args)
+(println "args:" args)
 
 ; tail recursion
-(print "tail recursion:")
-(def countdown (fn (x)
+(println "tail recursion:")
+(def countdown (fn [x]
            (if (> x 0)
-             (do (print x) (recur (sub x 1)))
+             (do (println x) (recur (- x 1)))
              0)
            ))
 
 (print
-  (countdown 10))
+  (countdown 1000))
+
 
 ; let
-(print "let:")
-(print (let ((a 1)
-             (b 2))
-         (add a b)))
+(println "let:")
+(println (let [[a 1]
+               [b 2]]
+           (+ a b)))
 
 ; closure
-(print "closure:")
-(def inc (fn (x)
-             (fn ()
+(println "closure:")
+(def inc (fn [x]
+             (fn []
                  (do
-                   (set! x (add x 1))
+                   (set! x (+ x 1))
                    x)
                  )
              ))
 
 (def inc1 (inc 0))
-(print (inc1))
-(print (inc1))
-(print (inc1))
-(print (inc1))
+(println (inc1))
+(println (inc1))
+(println (inc1))
+(println (inc1))
 
-; recursion
-(print "recursion:")
-(def fact (fn (n)
-              (if (= n 1) 1
-                (mul n (fact (sub n 1)))
-                )
-              ))
-(print (fact 20))
-
-; loop
-(print "loop:")
-(def i 0)
-(print
-  ((fn (n)
-        (print n) (set! i (add i 10)) (if (< n 9) (recur (add n 1)) n)
-        ) 0)
-  )
-(print i)
-
-; fibonacci
-(print "fibonacci:")
-(def fib
-     (fn (c p n)
-         (print c)
-         (if (> n 0)
-           (recur p (add c p) (sub n 1))
-            nil
-           )
-         )
-     )
-(fib 1 1 10)
-
-; error
-(print "errors:")
-(def nested (fn ()
-             (try
-               (try
-                 (throw 1 "Error happened")
-                 (fn (e) (do (print "Inner handler") (throw 2 "Error in inner handler happened")))
-                 )
-               (fn (e) (do (print "Outer handler") (throw 3 "Error in outer handler happened")))
-               )
-             ))
-(try
-  (nested)
-  (fn (e) (print "Error calling func"))
-  )
-
-(def recerr (fn (n)
-             (print n)
-             (if (= n 1)
-               (do (print "Going to throw") (throw 4 "Inside a recursive func"))
-               (recerr (sub n 1)))
-             )
-     )
-
-(try
-  (recerr 10)
-  (fn (e) (print "From a recursive func"))
-  )
-
-; varargs
-(print "varargs:")
-((fn (a b c...)
-    (print a b c)) 1 2 3 4)
-
-
-(def counter (fn (n)
-                 (let ((s 0))
-                   (fn ()
-                       (let ((c s))
+(def counter (fn [n]
+                 (let [[s 0]]
+                   (fn []
+                       (let [[c s]]
                          (if (< s n)
-                           (do (set! s (add s 1)) c)
+                           (do (set! s (+ s 1)) c)
                            nil
                            )
                          )
@@ -117,20 +51,77 @@
                  ))
 
 (def a (counter 10))
-((fn ()
-     (let ((r (a)))
-           (if (nil? r) nil (do (print r) (recur)))
+((fn []
+     (let [[r (a)]]
+           (if (nil? r) nil (do (println r) (recur)))
            )
      ))
 
-; hash
-(print "hash:")
-(def k (fn () "a"))
-(def v 1)
-(def h {(k) v "b" (fn () (print "Called fn from hash"))})
-((get h "b"))
-(print h)
-(put! h "a" '(1 2 3))
-(print h)
-(del! h "a" '(1 2 3))
-(print h)
+; recursion
+(println "recursion:")
+(def fact (fn [n]
+              (if (= n 1) 1
+                (* n (fact (- n 1)))
+                )
+              ))
+(println (fact 20))
+
+; loop
+(println "loop:")
+(def i 0)
+(println
+  ((fn [n]
+        (println n) (set! i (+ i 10)) (if (< n 9) (recur (+ n 1)) n)
+        ) 0)
+  )
+(println i)
+
+; fibonacci
+(println "fibonacci:")
+(def fib
+     (fn [c p n]
+         (println c)
+         (if (> n 0)
+           (recur p (+ c p) (- n 1))
+            nil
+           )
+         )
+     )
+(fib 1 1 1000)
+
+; error
+(def recerr (fn [n]
+             (println n)
+             (if (= n 1)
+               (do (println "Going to throw") (raise :err "Inside a recursive func"))
+               (recerr (- n 1)))
+             )
+     )
+
+(try
+  (recerr 10)
+  (catch :err [msg] (println "Error from a recursive func" msg))
+)
+
+(println "errors:")
+(def nested (fn []
+             (try
+               (try
+                 (raise :err1 "Error happened")
+                 (catch :err1 [] (do (println "Inner handler") (raise :err2 "Error in inner handler happened")))
+                 )
+               (catch :err2 [] (do (println "Outer handler") (raise :err3 "Error in outer handler happened")))
+               )
+             ))
+(try
+  (nested)
+  (catch :err3 [] (println "Error calling func"))
+  )
+
+
+;; varargs
+;(print "varargs:")
+;((fn (a b c...)
+;    (print a b c)) 1 2 3 4)
+;
+;
