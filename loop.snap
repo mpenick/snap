@@ -2,12 +2,20 @@
 
 ; s += a * b
 
-(def inner (fn (a s i m)
-               (if (< i m) (recur a (add s (mul a i)) (add i 1) m) s)
-               ))
-; (print (inner 1 0 0 10000))
-(def loop (fn (s i m)
-              (if (< i m) (recur (inner i 0 s m) (add i 1) m) s)
-     ))
+;(def inner (fn [a s i m]
+;               (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s)
+;               ))
+;(def looper (fn [s i m]
+;              (if (< i m) (recur (inner i 0 s m) (+ i 1) m) s)
+;     ))
+;
+;(println (looper 0 0 10000))
 
-(print (loop 0 0 1000))
+(def test (fn [s i m]
+              (if (< i m) (recur
+                            (loop [[a i] [s s] [i 0] [m m]]
+                                  (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
+
+                            (+ i 1) m) s)
+              ))
+(println (test 0 0 10000))

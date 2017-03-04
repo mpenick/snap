@@ -7,6 +7,7 @@ snap.h
 snap_hash.c
 snap_hash.h
 snap_hash.h
+snap_lex.rh
 snap_lex.rl
 snap_val.h
 main.c

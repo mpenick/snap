@@ -12,7 +12,7 @@ enum {
   TK_TRUE,
   TK_FALSE,
   TK_NIL,
-  TK_DO,
+  TK_BEGIN,
   TK_DEF,
   TK_ELLIPSIS,
   TK_IF,
@@ -25,7 +25,7 @@ enum {
   TK_RAISE, TK_TRY, TK_CATCH,
   TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
   TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ,
-  TK_NOT,
+  TK_AND, TK_OR, TK_NOT,
   TK_EOF
 };
 
@@ -86,7 +86,7 @@ int snap_lex_next_token(SnapLex* lex) {
     string = "\"" ([^\r\n\"] | "\\\"")* "\"";
 
     main := |*
-      'do' => { token = TK_DO; fbreak; };
+      'begin' => { token = TK_BEGIN; fbreak; };
       'def' | 'define' => { token = TK_DEF; fbreak; };
       'if' => { token = TK_IF; fbreak; };
       'fn' => { token = TK_FN; fbreak; };
@@ -113,6 +113,8 @@ int snap_lex_next_token(SnapLex* lex) {
       '>=' => { token = TK_GE; fbreak; };
       '=' => { token = TK_EQ; fbreak; };
       'not' => { token = TK_NOT; fbreak; };
+      'and' => { token = TK_AND; fbreak; };
+      'or' => { token = TK_OR; fbreak; };
       chars => { token = *ts; fbreak; };
       integer => { token = copy_value(lex, ts, te, TK_INT); fbreak; };
       floating => { token = copy_value(lex, ts, te, TK_FLOAT); fbreak; };

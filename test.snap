@@ -7,7 +7,7 @@
 (println "tail recursion:")
 (def countdown (fn [x]
            (if (> x 0)
-             (do (println x) (recur (- x 1)))
+             (begin (println x) (recur (- x 1)))
              0)
            ))
 
@@ -25,7 +25,7 @@
 (println "closure:")
 (def inc (fn [x]
              (fn []
-                 (do
+                 (begin
                    (set! x (+ x 1))
                    x)
                  )
@@ -42,7 +42,7 @@
                    (fn []
                        (let [[c s]]
                          (if (< s n)
-                           (do (set! s (+ s 1)) c)
+                           (begin (set! s (+ s 1)) c)
                            nil
                            )
                          )
@@ -53,7 +53,7 @@
 (def a (counter 10))
 ((fn []
      (let [[r (a)]]
-           (if (nil? r) nil (do (println r) (recur)))
+           (if (nil? r) nil (begin (println r) (recur)))
            )
      ))
 
@@ -93,7 +93,7 @@
 (def recerr (fn [n]
              (println n)
              (if (= n 1)
-               (do (println "Going to throw") (raise :err "Inside a recursive func"))
+               (begin (println "Going to throw") (raise :err "Inside a recursive func"))
                (recerr (- n 1)))
              )
      )
@@ -108,9 +108,9 @@
              (try
                (try
                  (raise :err1 "Error happened")
-                 (catch :err1 [] (do (println "Inner handler") (raise :err2 "Error in inner handler happened")))
+                 (catch :err1 [] (begin (println "Inner handler") (raise :err2 "Error in inner handler happened")))
                  )
-               (catch :err2 [] (do (println "Outer handler") (raise :err3 "Error in outer handler happened")))
+               (catch :err2 [] (begin (println "Outer handler") (raise :err3 "Error in outer handler happened")))
                )
              ))
 (try

@@ -60,6 +60,8 @@
 #define as_inst(v) check(is_inst(v), (SInst*)(v).o)
 #define as_fn(v) check(is_fn(v), (SFn*)(v).o)
 
+#define is_empty(v) (is_cons(v) && as_cons(v) == NULL)
+
 #define SNAP_MAX_BLOCKS 16
 
 #define STYPE_MAPPING(XX) \
@@ -290,7 +292,6 @@ SValue create_obj(SObject* o);
 SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
 SErr* snap_err_new(Snap* snap, SValue err, SValue msg);
-SErr* snap_err_new_str(Snap* snap, const char* code, const char* msg);
 SCons* snap_cons_new(Snap* snap);
 SInst* snap_inst_new(Snap* snap, int opcode);
 SScope* snap_scope_new(Snap* snap, SScope* up);

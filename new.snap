@@ -13,8 +13,8 @@
 (try
     ((+ 1 1))
     (+ 1 a)
-    (catch :snap_name_error [x] (do (println x) 1))
-    (catch :snap_type_error [x] (do (println x) 2))
+    (catch :snap_name_error [x] (begin (println x) 1))
+    (catch :snap_type_error [x] (begin (println x) 2))
 )
 
 ((fn [x] (println x)) "hello")
@@ -45,7 +45,7 @@
 ;(define func2 (fn [] (println "here") (func1)))
 ;(try
 ;  (func2)
-;  (do (println "success") 0)
+;  (begin (println "success") 0)
 ;  (catch :error1 [t x] (raise t x))
 ;  (catch :error2 [x] (println x) 2)
 ;  )
@@ -53,9 +53,9 @@
 ;(try
 ;  ;(raise :error1 "something happened")
 ;  (raise "something happened")
-;  (do (println "success") 0)
-;  (catch :error1 (fn (x) (do (println x) 1)))
-;  (catch :error2 (fn (x) (do (println x) 2))))
+;  (begin (println "success") 0)
+;  (catch :error1 (fn (x) (begin (println x) 1)))
+;  (catch :error2 (fn (x) (begin (println x) 2))))
 ;
 ;(if false
 ;  (if true (if true (print "true")
@@ -66,13 +66,13 @@
 ;
 ;(define r
 ;  (fn [x]
-;      (do (println x)
+;      (begin (println x)
 ;        (if (< x 10)
 ;          (recur (+ x 1)) nil))))
 ;(r 1)
 ;
 ;(if false
-;  (do true (if false false true)) true)
+;  (begin true (if false false true)) true)
 ;
 ;(define p (fn [x] (println x)))
 ;(define add (fn [x y] (+ x y)))
@@ -87,7 +87,7 @@
 ;
 ;(loop [[x 100]]
 ;      (if (> x 0)
-;        (do
+;        (begin
 ;          (println (loop [[a 1] [s 0] [i 0] [m 10000]]
 ;                         (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s)))
 ;          (recur (- x 1))
