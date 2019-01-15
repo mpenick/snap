@@ -1682,9 +1682,7 @@ static SValue parse_sexpr(Snap* snap, SnapLex* lex) {
   }
   snap_release(snap);
   if (token != ')') {
-    raise(snap,
-          "snap_parse_error",
-          "Expected ')' to terminate s-expression at %d", lex->line);
+    raise(snap, "snap_parse_error", "Expected ')' to terminate s-expression at %d", lex->line);
   }
   return create_obj(sexpr);
 }
@@ -1733,9 +1731,7 @@ static SValue parse_arr(Snap* snap, SnapLex* lex) {
   }
 
   if (token != ']') {
-    raise(snap,
-          "snap_parse_error",
-          "Expected ']' to terminate array at %d", lex->line);
+    raise(snap, "snap_parse_error", "Expected ']' to terminate array at %d", lex->line);
   }
 
   snap_release(snap);
@@ -1790,20 +1786,14 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case TK_NOT: case TK_AND: case TK_OR:
       return create_form(token);
     case TK_EOF:
-      raise(snap,
-            "snap_parse_error",
-            "Premature end of file on line %d", lex->line);
+      raise(snap, "snap_parse_error", "Premature end of file on line %d", lex->line);
       break;
     case TK_TOO_BIG:
-      raise(snap,
-            "snap_parse_error",
-            "Literal or identifier is too big on line %d", lex->line);
+      raise(snap, "snap_parse_error", "Literal or identifier is too big on line %d", lex->line);
       break;
     case TK_INVALID:
     default:
-      raise(snap,
-            "snap_parse_error",
-            "Invalid token on line %d", lex->line);
+      raise(snap, "snap_parse_error", "Invalid token on line %d", lex->line);
       break;
   }
   return create_nil();
@@ -1979,19 +1969,13 @@ static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
 static void compile_def(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   SSymStr* sym;
   if (!sexpr || !is_sym(sexpr->first)) {
-    raise(snap,
-          "snap_compile_error",
-          "Expected id for first argument of define");
+    raise(snap, "snap_compile_error", "Expected id for first argument of define");
   }
   if (!as_cons(sexpr->rest)) {
-    raise(snap,
-          "snap_compile_error",
-          "Expected expression");
+    raise(snap, "snap_compile_error", "Expected expression");
   }
   if (!is_empty(as_cons(sexpr->rest)->rest)) {
-    raise(snap,
-          "snap_compile_error",
-          "No more expressions expected");
+    raise(snap, "snap_compile_error", "No more expressions expected");
   }
   sym = as_sym(sexpr->first);
   compile(snap, code_gen, as_cons(sexpr->rest)->first);
@@ -2011,15 +1995,11 @@ static void compile_if(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   SInst* cond_jump, * jump;
 
   if (!sexpr || !as_cons(sexpr->rest) || !as_cons(as_cons(sexpr->rest)->rest)) {
-    raise(snap,
-          "snap_compile_error",
-          "Expected expressions");
+    raise(snap, "snap_compile_error", "Expected expressions");
   }
 
   if (!is_empty(as_cons(as_cons(sexpr->rest)->rest)->rest)) {
-    raise(snap,
-          "snap_compile_error",
-          "No more expressions expected");
+    raise(snap, "snap_compile_error", "No more expressions expected");
   }
 
   compile(snap, code_gen, sexpr->first);
@@ -2041,15 +2021,11 @@ static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
   SCodeGen* code_gen;
 
   if (!sexpr || !is_arr(sexpr->first)) {
-    raise(snap,
-          "snap_compile_error",
-          "Expected parameter list");
+    raise(snap, "snap_compile_error", "Expected parameter list");
   }
 
   if (!as_cons(sexpr->rest)) {
-    raise(snap,
-          "snap_compile_error",
-          "Expected expressions");
+    raise(snap, "snap_compile_error", "Expected expressions");
   }
 
   args = as_arr(sexpr->first);
@@ -2109,9 +2085,15 @@ static void compile_cond_expr_inner(Snap* snap, SCodeGen* code_gen, int opcode, 
 
 static void compile_cond_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
   int i;
-  int opcode = (sexpr->first.i - TK_LT) + LESS_THAN;
-  SCons* curr = as_cons(sexpr->rest);
+  int opcode;
+  SCons* curr;
   SInst* jump_false = NULL;
+  if (!as_cons(sexpr->rest) || !as_cons(as_cons(sexpr->rest)->rest)) {
+    raise(snap, "snap_compile_error", "Expected expressions");
+  }
+  opcode = (sexpr->first.i - TK_LT) + LESS_THAN;
+  curr = as_cons(sexpr->rest);
+  jump_false = NULL;
 
   for (i = 0; i < 2; ++i) {
     compile(snap, code_gen, curr->first);
@@ -2136,6 +2118,9 @@ static void compile_cond_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
 }
 
 static void compile_cond_not_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
+  if (!sexpr) {
+    raise(snap, "snap_compile_error", "Expected expression");
+  }
   compile(snap, code_gen, sexpr->first);
   insts_append(snap, code_gen, NOT);
 }
@@ -2169,7 +2154,11 @@ static void compile_cond_and_or_expr(Snap* snap, SCodeGen* code_gen, SCons* sexp
 }
 
 static void compile_call(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int count = compile_expr_list(snap, code_gen, false, as_cons(sexpr->rest));
+  int count;
+  if (!is_sym(sexpr->first))  {
+    raise(snap, "snap_compile_error", "Expected symbol or lambda");
+  }
+  count = compile_expr_list(snap, code_gen, false, as_cons(sexpr->rest));
   load_variable(snap, code_gen, as_sym(sexpr->first));
   insts_append(snap, code_gen, CALL)->arg = count;
 }
@@ -2804,6 +2793,22 @@ void builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result)
 void builtin_println(Snap* snap, const SValue* args, int num_args, SValue* result) {
   builtin_print(snap, args, num_args, result);
   printf("\n");
+}
+
+void builtin_eval(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i;
+  if (num_args !=  1) {
+    *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
+  }
+  if (setjmp(snap->jmp) > 0) {
+    *result =  create_obj(snap->cause);
+  } else {
+    SCodeGen* code_gen = anchor_code_gen(snap_code_gen_new(snap, NULL));
+
+    compile(snap, code_gen, expr);
+    insts_append(snap, code_gen, POP);
+
+  }
 }
 
 void builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result) {
