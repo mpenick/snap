@@ -168,6 +168,7 @@ typedef struct SCons_ {
   SOBJECT_FIELDS
   SValue first;
   SValue rest;
+  // TODO: Add metadata
 } SCons;
 
 typedef struct SArr_ {
@@ -194,7 +195,7 @@ typedef struct SInst_ {
 
 typedef struct SScope_ {
   SOBJECT_FIELDS
-  MList* top;
+  MList* top; // Top of code for looping/tail recursion
   SnapHash local_names;
   SnapVec param_names;
   struct SScope_* up;

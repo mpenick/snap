@@ -41,3 +41,10 @@
 ;(println (begin 1 2 3))
 
 ;(let [[1 1]] (println 1))
+
+;(not 1)
+
+;(println (and))
+;(println (or))
+
+'(123)

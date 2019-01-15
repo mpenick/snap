@@ -98,27 +98,6 @@
              )
      )
 
-(try
-  (recerr 10)
-  (catch :err [msg] (println "Error from a recursive func" msg))
-)
-
-(println "errors:")
-(def nested (fn []
-             (try
-               (try
-                 (raise :err1 "Error happened")
-                 (catch :err1 [] (begin (println "Inner handler") (raise :err2 "Error in inner handler happened")))
-                 )
-               (catch :err2 [] (begin (println "Outer handler") (raise :err3 "Error in outer handler happened")))
-               )
-             ))
-(try
-  (nested)
-  (catch :err3 [] (println "Error calling func"))
-  )
-
-
 ;; varargs
 ;(print "varargs:")
 ;((fn (a b c...)

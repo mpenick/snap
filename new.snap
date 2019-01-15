@@ -10,13 +10,6 @@
 ;    (println x))
 ;  )
 
-(try
-    ((+ 1 1))
-    (+ 1 a)
-    (catch :snap_name_error [x] (begin (println x) 1))
-    (catch :snap_type_error [x] (begin (println x) 2))
-)
-
 ((fn [x] (println x)) "hello")
 
 (def test (fn [s i m]
@@ -32,30 +25,9 @@
 ;(set! x 1)
 ;(< 1 2 3 4)
 ;
-;(try
-;  (println "hello")
-;  (raise :error3 "raised an error")
-;  (catch :error1 [type val] (println type val))
-;  (catch :error2 [type val] (println type val))
-;  (catch [type val] (println type val)))
-;
-;(raise :error1 "some error")
 ;
 ;(define func1 (fn [] (raise :error1 "some error")))
 ;(define func2 (fn [] (println "here") (func1)))
-;(try
-;  (func2)
-;  (begin (println "success") 0)
-;  (catch :error1 [t x] (raise t x))
-;  (catch :error2 [x] (println x) 2)
-;  )
-;
-;(try
-;  ;(raise :error1 "something happened")
-;  (raise "something happened")
-;  (begin (println "success") 0)
-;  (catch :error1 (fn (x) (begin (println x) 1)))
-;  (catch :error2 (fn (x) (begin (println x) 2))))
 ;
 ;(if false
 ;  (if true (if true (print "true")

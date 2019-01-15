@@ -1,5 +1,6 @@
 CFLAGS=-g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
 #CFLAGS=-O3
+LDFLAGS=-lm
 
 TARGET=snap
 SOURCES=$(wildcard *.c)
