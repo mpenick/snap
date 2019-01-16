@@ -284,7 +284,7 @@ static void gc_semi_space_reset(SnapSemiSpace* from_space) {
   stack__.objs = objs__; \
   stack__.count = sizeof(objs__) / sizeof(SObject**)
 
-#define SNAP_OBJECT(obj) ((SObject**)&(obj))
+#define SNAP_OBJECT(obj) ((SObject**)(obj = NULL, &(obj)))
 
 #define SNAP_STACK_END() \
   snap->roots = stack__.next
@@ -454,7 +454,7 @@ void snap_many(Snap* snap) {
   arr = snap_arr_new(snap, 4000);
 
   for (i = 0; i < 4000; ++i) {
-    SSymStr* str = NULL;
+    SSymStr* str;
 
     SNAP_STACK_BEGIN(SNAP_OBJECT(str));
 
@@ -475,13 +475,13 @@ void snap_many(Snap* snap) {
 }
 
 int main() {
-  //Snap snap;
-  //snap_init(&snap);
+  Snap snap;
+  snap_init(&snap);
 
-  //snap_many(&snap);
+  snap_many(&snap);
 
   //snap_dummy1(&snap);
   //snap_dummy3(&snap);
 
-  printf("%zx\n", (~((size_t)0)) - 1);
+  //printf("%zx\n", (~((size_t)0)) - 1);
 }
