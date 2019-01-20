@@ -95,7 +95,7 @@ enum {
 
 typedef struct Snap_ Snap;
 typedef struct SCode_ SCode;
-typedef struct SObject_ SObject;
+typedef struct SObject_ GCObject;
 typedef struct SValue_ SValue;
 
 typedef long SnapInt;
@@ -108,7 +108,7 @@ struct SValue_ {
     bool b;
     SnapInt i;
     SnapFloat f;
-    SObject* o;
+    GCObject* o;
     SCFunc c;
   };
 };
@@ -271,11 +271,11 @@ struct Snap_ {
   SValue* stack_end;
   int stack_size;
   struct { MVEC_FIELDS(SnapFrame); } frames;
-  struct { MVEC_FIELDS(SObject*); } anchors;
+  struct { MVEC_FIELDS(GCObject*); } anchors;
   size_t num_bytes_alloced;
   size_t num_bytes_alloced_last_gc;
-  SObject* all;
-  SObject* gray;
+  GCObject* all;
+  GCObject* gray;
   SErr* cause;
   jmp_buf jmp;
 };
@@ -287,7 +287,7 @@ SValue create_bool(bool b);
 SValue create_int(SnapInt i);
 SValue create_float(SnapFloat f);
 SValue create_cfunc(SCFunc c);
-SValue create_obj(SObject* o);
+SValue create_obj(GCObject* o);
 
 SSymStr* snap_str_new(Snap* snap, const char* str);
 SSymStr* snap_sym_new(Snap* snap, const char* sym);
@@ -297,7 +297,7 @@ SInst* snap_inst_new(Snap* snap, int opcode);
 SScope* snap_scope_new(Snap* snap, SScope* up);
 SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up);
 
-SObject* snap_anchor(Snap* snap, SObject* obj);
+GCObject* snap_anchor(Snap* snap, GCObject* obj);
 void snap_release(Snap* snap);
 
 void snap_def(Snap* snap, const char* name, SValue val);

@@ -6,22 +6,201 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "gc.h"
 #include "mstructs.h"
 
-#define SNAP_SEMI_SPACE_CHUNK_SIZE (256 * 1024)
+#define gc_set_relocated_flag(obj) \
+  ((obj)->flags |= 0x1)
 
-#define SNAP_YOUNG_GEN_MAX_SIZE (2 * 1024 * 1024)
-#define SNAP_YOUNG_GEN_MAX_OBJECT_SIZE 64 * 1024
+#define gc_relocated_flag(obj) \
+  ((obj)->flags & 0x1)
+
+#define gc_set_is_container(obj) \
+  ((obj)->flags |= (0x1 << 1))
+
+#define gc_is_container(obj) \
+  (((obj)->flags >> 1) & 0x1)
+
+#define gc_size(obj) ((obj)->size > 0 ? (obj)->size : gc->slow_size(obj))
+
+static inline size_t round_to_alignment(size_t value, size_t alignment) {
+   return (value + (alignment - 1)) & ~(alignment - 1);
+}
+
+static size_t gc_size_slow(GCObject* obj) {
+  assert(false && "Not implemented");
+  return 0;
+}
+
+static GCSemiSpace* gc_semi_space_new(GC* gc, GCSemiSpace* next);
+static GCObject* gc_semi_space_allocate(GCSemiSpace* space, uint8_t type, size_t size);
+
+static GCSemiSpace* gc_semi_space_new(GC* gc, GCSemiSpace* next) {
+  GCSemiSpace* space = (GCSemiSpace*)gc->malloc(sizeof(GCSemiSpace) + gc->semi_chuck_size);
+  space->pos = space->begin;
+  space->end = space->begin + gc->semi_chuck_size;
+  space->next = next;
+  return space;
+}
+
+static void gc_semi_space_delete(GC* gc, GCSemiSpace* semi) {
+  GCSemiSpace* curr = gc->to_space;
+  printf("delete\n");
+  while (curr) {
+    printf("%p\n", curr);
+    GCSemiSpace* temp = curr->next;
+    gc->free(curr);
+    curr = temp;
+  }
+}
+
+static GCObject* gc_semi_space_allocate(GCSemiSpace* space, uint8_t type, size_t size) {
+  GCObject* obj;
+  if (space->pos + size > space->end) {
+    if (space->next) {
+      return gc_semi_space_allocate(space->next, type, size);
+    }
+    return NULL;
+  }
+  obj = (GCObject*)space->pos;
+  space->pos += size;
+  obj->type = type;
+  obj->flags = 0;
+  obj->size = size > UINT16_MAX ? 0 : size;
+  return obj;
+}
+
+static void gc_semi_space_collect(GC* gc, GCSemiSpace* to_space) {
+  char* pos = to_space->begin;
+  char* end = to_space->pos;
+  while (pos < end) {
+    GCObject* obj = (GCObject*) pos;
+    if (gc_is_container(obj)) {
+      gc->mark_children(gc, obj);
+    }
+    pos += gc_size(obj);
+  }
+}
+
+static size_t gc_semi_space_allocated(GCSemiSpace* to_space) {
+  size_t size = 0;
+  GCSemiSpace* space = to_space;
+  while (space) {
+    size = space->pos - space->begin;
+    space = space->next;
+  }
+  return size;
+}
+
+static void gc_semi_space_reset(GCSemiSpace* from_space) {
+  GCSemiSpace* space = from_space;
+  while (space) {
+    space->pos = space->begin;
+    space = space->next;
+  }
+}
+
+void gc_mark(GC* gc, GCObject** ptr) {
+  GCObject* obj = *ptr;
+  if (!obj) return;
+  GCObject* location;
+  if (!gc_relocated_flag(obj)) {
+    size_t size = gc_size(obj);
+    location = gc_semi_space_allocate(gc->to_space, obj->type, size);
+    if (!location) {
+      gc->to_space = gc_semi_space_new(gc, gc->to_space);
+      location = gc_semi_space_allocate(gc->to_space, obj->type, size);
+    }
+    memcpy(location, obj, size);
+    gc_set_relocated_flag(obj);
+    ((GCObjectRelocated*)obj)->location = location;
+  } else {
+    location = ((GCObjectRelocated*)obj)->location;
+  }
+  *ptr = location;
+}
+
+void gc_collect(GC* gc) {
+  GCStack* root;
+
+  /* Swap the to/from spaces */
+  {
+    GCSemiSpace* temp = gc->to_space;
+    gc->to_space = gc->from_space;
+    gc->from_space = temp;
+  }
+
+  if (gc->to_space) {
+    gc_semi_space_reset(gc->to_space);
+  } else {
+    gc->to_space = gc_semi_space_new(gc, NULL);
+  }
+
+  for (root = gc->roots; root != NULL; root = root->next) {
+    size_t i;
+    for (i = 0; i < root->count; ++i) {
+      gc_mark(gc, root->objs[i]);
+    }
+  }
+
+  gc_semi_space_collect(gc, gc->to_space);
+  gc->allocated = gc_semi_space_allocated(gc->to_space);
+}
+
+void gc_init(GC* gc,
+             GCMarkChildren mark_children,
+             GCSlowSize slow_size) {
+  gc->semi_chuck_size = 256 * 1024; // 256kb
+  gc->semi_max_allocated = 2 * 1024 * 1024; // 2mb
+  gc->malloc = malloc;
+  gc->free = free;
+
+  gc->to_space = gc_semi_space_new(gc, NULL);
+  gc->from_space = NULL;
+  gc->allocated = 0;
+  gc->mark_children = mark_children;
+  gc->slow_size = slow_size;
+  gc->roots = NULL;
+}
+
+void gc_destroy(GC* gc) {
+  // TODO
+  gc_semi_space_delete(gc, gc->to_space);
+  gc_semi_space_delete(gc, gc->from_space);
+}
+
+GCObject* gc_new(GC* gc, uint8_t type, size_t size) {
+  GCObject* obj;
+  size = round_to_alignment(size, sizeof(GCObjectRelocated));
+  if (size > gc->semi_chuck_size) abort(); // TODO
+  if (gc->allocated > gc->semi_max_allocated) {
+    gc_collect(gc);
+  }
+  obj = gc_semi_space_allocate(gc->to_space, type, size);
+  if (!obj) {
+    gc->to_space = gc_semi_space_new(gc, gc->to_space);
+    obj = gc_semi_space_allocate(gc->to_space, type, size);
+  }
+  gc->allocated += size;
+  return obj;
+}
+
+GCObject* gc_new_container(GC* gc, uint8_t type, size_t size) {
+  GCObject* obj = gc_new(gc, type, size);
+  gc_set_is_container(obj);
+  return obj;
+}
 
 // Marked == Moved
 
 #define PTRMASK (~((size_t)0)) - 1)
 #define RB(obj) (obj & 0x1) ?
 
+typedef struct GCObject SObject;
+
 typedef struct Snap_ Snap;
 
 typedef struct SCode_ SCode;
-typedef struct SObject_ SObject;
 typedef struct SValue_ SValue;
 
 typedef long SnapInt;
@@ -65,7 +244,7 @@ struct SValue_ {
     bool b;
     SnapInt i;
     SnapFloat f;
-    SObject* o;
+    GCObject* o;
     SCFunc c;
   };
 };
@@ -83,45 +262,31 @@ typedef struct {
   MHASH_FIELDS(SnapHashEntry, SValue);
 } SnapHash;
 
-#define SOBJECT_FIELDS \
-  uint8_t type;        \
-  uint8_t flags;       \
-  uint16_t size;
-
 typedef struct SSymStr_ {
-  SOBJECT_FIELDS
+  GC_OBJECT_FIELDS
   size_t len;
   char data[0];
 } SSymStr;
 
 typedef struct SKeyword_ {
-  SOBJECT_FIELDS
+  GC_OBJECT_FIELDS
   int id;
   size_t len;
   char data[0];
 } SKeyword;
 
 typedef struct SArr_ {
-  SOBJECT_FIELDS
+  GC_OBJECT_FIELDS
   int len;
   SValue data[0];
 } SArr;
 
 typedef struct SStuff_ {
-  SOBJECT_FIELDS
+  GC_OBJECT_FIELDS
   int stuff;
 } SStuff;
 
-typedef struct SObject_ {
-  SOBJECT_FIELDS
-} SObject;
-
-typedef struct SObjectRelocated_ {
-  SOBJECT_FIELDS
-  SObject* location;
-} SObjectRelocated;
-
-SValue create_obj_(SObject* o) {
+SValue create_obj_(GCObject* o) {
   SValue val;
   val.type = o->type;
   val.o = o;
@@ -130,218 +295,9 @@ SValue create_obj_(SObject* o) {
 
 #define create_obj(o) create_obj_((SObject*)o)
 
-typedef struct SnapStack_ {
-  struct SnapStack_* next;
-  SObject*** objs;
-  size_t count;
-} SnapStack;
-
-typedef struct SnapSemiSpace_ {
-  char* pos;
-  char* end;
-  struct SnapSemiSpace_* next;
-  char begin[0];
-} SnapSemiSpace;
-
 struct Snap_ {
-  SnapSemiSpace* to_space;
-  SnapSemiSpace* from_space;
-  size_t young_gen_allocated;
-  SnapStack* roots;
+  GC gc;
 };
-
-static SObject* gc_semi_space_allocate(SnapSemiSpace* space, uint8_t type, size_t size);
-static SnapSemiSpace* gc_semi_space_new(size_t size, SnapSemiSpace* next);
-
-enum {
-  GC_YOUNG_GEN,
-  GC_MATURE_GEN
-};
-
-static inline size_t round_to_alignment(size_t value, size_t alignment) {
-   return (value + (alignment - 1)) & ~(alignment - 1);
-}
-
-#define gc_set_relocated_flag(obj) \
-  ((obj)->flags |= 0x1)
-
-#define gc_relocated_flag(obj) \
-  ((obj)->flags & 0x1)
-
-#define gc_set_gen_flag(obj, gen) \
-  ((obj)->flags |= (((gen) & 0x3) << 1))
-
-#define gc_gen_flag(obj) \
-  (((obj)->flags >> 1) & 0x3)
-
-#define gc_size(obj) ((obj)->size > 0 ? (obj)->size : gc_size_slow(obj))
-
-static size_t gc_size_slow(SObject* obj) {
-  assert(false && "Not implemented");
-  return 0;
-}
-
-static void gc_mark(Snap* snap, SObject** ptr) {
-  SObject* obj = *ptr;
-  if (!obj) return;
-  if (gc_gen_flag(obj) == GC_YOUNG_GEN) {
-    SObject* location;
-    if ((char*)obj >= snap->to_space->begin &&
-        (char*)obj < snap->to_space->end) {
-      return;
-    }
-    if (!gc_relocated_flag(obj)) {
-      size_t size = gc_size(obj);
-      location = gc_semi_space_allocate(snap->to_space, obj->type, size);
-      if (!location) {
-        snap->to_space = gc_semi_space_new(SNAP_SEMI_SPACE_CHUNK_SIZE, snap->to_space);
-        location = gc_semi_space_allocate(snap->to_space, obj->type, size);
-      }
-      memcpy(location, obj, size);
-      gc_set_relocated_flag(obj);
-      ((SObjectRelocated*)obj)->location = location;
-    } else {
-      location = ((SObjectRelocated*)obj)->location;
-    }
-    *ptr = location;
-  } else {
-    assert(false && "Not implemented");
-  }
-}
-
-static void gc_mark_val(Snap* snap, SValue* val) {
-  if (is_obj_p(val)) gc_mark(snap, &val->o);
-}
-
-static void gc_mark_children(Snap* snap, SObject* obj) {
-  int i;
-  switch (obj->type) {
-    case STYPE_ARR:
-      for (i = 0; i < ((SArr*)obj)->len; ++i) {
-        gc_mark_val(snap, &((SArr*)obj)->data[i]);
-      }
-      break;
-  }
-}
-
-static SnapSemiSpace* gc_semi_space_new(size_t size, SnapSemiSpace* next) {
-  SnapSemiSpace* space = (SnapSemiSpace*)malloc(sizeof(SnapSemiSpace) + size);
-  space->pos = space->begin;
-  space->end = space->begin + size;
-  space->next = next;
-  return space;
-}
-
-static SObject* gc_semi_space_allocate(SnapSemiSpace* space, uint8_t type, size_t size) {
-  SObject* obj;
-  if (space->pos + size > space->end) {
-    if (space->next) {
-      return gc_semi_space_allocate(space->next, type, size);
-    }
-    return NULL;
-  }
-  obj = (SObject*)space->pos;
-  space->pos += size;
-  obj->type = type;
-  obj->flags = 0;
-  obj->size = size > UINT16_MAX ? 0 : size;
-  return obj;
-}
-
-static void gc_semi_space_collect(Snap* snap, SnapSemiSpace* to_space) {
-  char* pos = to_space->begin;
-  char* end = to_space->pos;
-  while (pos < end) {
-    SObject* obj = (SObject*) pos;
-    gc_mark_children(snap, obj);
-    pos += gc_size(obj);
-  }
-}
-
-static size_t gc_semi_space_allocated(SnapSemiSpace* to_space) {
-  size_t size = 0;
-  SnapSemiSpace* space = to_space;
-  while (space) {
-    size = space->pos - space->begin;
-    space = space->next;
-  }
-  return size;
-}
-
-static void gc_semi_space_reset(SnapSemiSpace* from_space) {
-  SnapSemiSpace* space = from_space;
-  while (space) {
-    space->pos = space->begin;
-    space = space->next;
-  }
-}
-
-#define SNAP_STACK_BEGIN(...) \
-  SnapStack stack__; \
-  SObject** objs__[] = { __VA_ARGS__ }; \
-  stack__.next = snap->roots; \
-  snap->roots = &stack__; \
-  stack__.objs = objs__; \
-  stack__.count = sizeof(objs__) / sizeof(SObject**)
-
-#define SNAP_OBJECT(obj) ((SObject**)(obj = NULL, &(obj)))
-
-#define SNAP_STACK_END() \
-  snap->roots = stack__.next
-
-#define SNAP_RETURN_WITH(value) \
-  SNAP_STACK_END(); \
-  return (value);
-
-#define SNAP_RETURN() \
-  SNAP_STACK_END(); \
-  return;
-
-void gc_collect(Snap* snap, bool young_only) {
-  SnapStack* root;
-
-  /* Swap the to/from spaces */
-  {
-    SnapSemiSpace* temp = snap->to_space;
-    snap->to_space = snap->from_space;
-    snap->from_space = temp;
-  }
-
-  if (snap->to_space) {
-    gc_semi_space_reset(snap->to_space);
-  } else {
-    snap->to_space = gc_semi_space_new(SNAP_SEMI_SPACE_CHUNK_SIZE, NULL);
-  }
-
-  for (root = snap->roots; root != NULL; root = root->next) {
-    size_t i;
-    for (i = 0; i < root->count; ++i) {
-      gc_mark(snap, root->objs[i]);
-    }
-  }
-
-  gc_semi_space_collect(snap, snap->to_space);
-  snap->young_gen_allocated = gc_semi_space_allocated(snap->to_space);
-}
-
-SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
-  SObject* obj;
-  size = round_to_alignment(size, sizeof(SObjectRelocated));
-  if (size <= SNAP_YOUNG_GEN_MAX_OBJECT_SIZE) {
-    if (snap->young_gen_allocated > SNAP_YOUNG_GEN_MAX_SIZE) {
-      gc_collect(snap, true);
-    }
-    obj = gc_semi_space_allocate(snap->to_space, type, size);
-    if (!obj) {
-      snap->to_space = gc_semi_space_new(SNAP_SEMI_SPACE_CHUNK_SIZE, snap->to_space);
-      obj = gc_semi_space_allocate(snap->to_space, type, size);
-    }
-    snap->young_gen_allocated += size;
-  } else {
-    assert(false && "Not implemented");
-  }
-  return obj;
-}
 
 SSymStr* snap_str_new(Snap* snap, const char* str) {
   size_t len = strlen(str);
@@ -352,29 +308,47 @@ SSymStr* snap_str_new(Snap* snap, const char* str) {
 }
 
 SArr* snap_arr_new(Snap* snap, int len) {
-  SArr* a = (SArr*)gc_new(snap, STYPE_ARR, sizeof(SArr) + len * sizeof(SValue));
+  SArr* a = (SArr*)gc_new_container(snap, STYPE_ARR, sizeof(SArr) + len * sizeof(SValue));
   a->len = len;
   return a;
 }
 
-void snap_init(Snap* snap) {
-  snap->to_space = gc_semi_space_new(SNAP_SEMI_SPACE_CHUNK_SIZE, NULL);
-  snap->from_space = NULL;
-  snap->young_gen_allocated = 0;
-  snap->roots = NULL;
+static void snap_gc_mark_val(GC* gc, SValue* val) {
+  if (is_obj_p(val)) gc_mark(gc, &val->o);
 }
 
+static void snap_gc_mark_children(GC* gc, GCObject* obj) {
+  int i;
+  switch (obj->type) {
+    case STYPE_ARR:
+      for (i = 0; i < ((SArr*)obj)->len; ++i) {
+        snap_gc_mark_val(gc, &((SArr*)obj)->data[i]);
+      }
+      break;
+  }
+}
+
+void snap_init(Snap* snap) {
+  gc_init(&snap->gc, snap_gc_mark_children, NULL);
+}
+
+void snap_destroy(Snap* snap) {
+  gc_destroy(&snap->gc);
+}
+
+#define GETGC() (&snap->gc)
+
 int snap_dummy1(Snap* snap) {
-  SObject* obj1 = NULL;
-  SObject* obj2 = NULL;
+  GCObject* obj1 = NULL;
+  GCObject* obj2 = NULL;
   SStuff* stuff1 = NULL;
 
-  SNAP_STACK_BEGIN(SNAP_OBJECT(obj1),
-                   SNAP_OBJECT(obj1),
-                   SNAP_OBJECT(obj2),
-                   SNAP_OBJECT(stuff1));
+  GC_BEGIN(GC_OBJ(obj1),
+           GC_OBJ(obj1),
+           GC_OBJ(obj2),
+           GC_OBJ(stuff1));
 
-  obj1 = gc_new(snap, 0, sizeof(SObject));
+  obj1 = gc_new(snap, 0, sizeof(GCObject));
   obj2 = obj1;
   stuff1 = (SStuff*)gc_new(snap, 0, sizeof(SStuff));
 
@@ -382,7 +356,7 @@ int snap_dummy1(Snap* snap) {
   printf("obj2 %p\n", obj2);
   printf("stuff1 %p\n", stuff1);
 
-  gc_collect(snap, true);
+  gc_collect(snap);
 
 #if 0
   {
@@ -402,15 +376,15 @@ int snap_dummy1(Snap* snap) {
   printf("obj2 %p\n", obj2);
   printf("stuff1 %p\n", stuff1);
 
-  SNAP_RETURN_WITH(0);
+  GC_RETURN_WITH(0);
 }
 
 void snap_dummy2(Snap* snap) {
-  SObject* obj1 = NULL;
-  SObject* obj2 = NULL;
+  GCObject* obj1 = NULL;
+  GCObject* obj2 = NULL;
 
-  SNAP_STACK_BEGIN(SNAP_OBJECT(obj1),
-                   SNAP_OBJECT(obj2));
+  GC_BEGIN(GC_OBJ(obj1),
+           GC_OBJ(obj2));
 
   printf("obj1 %p\n", obj1);
   printf("obj2 %p\n", obj2);
@@ -420,17 +394,17 @@ void snap_dummy2(Snap* snap) {
   printf("obj1 %p\n", obj1);
   printf("obj2 %p\n", obj2);
 
-  SNAP_RETURN();
+  GC_RETURN();
 }
 
 void snap_dummy3(Snap* snap) {
-  SObject* obj1 = NULL;
-  SObject* obj2 = NULL;
-  SObject* obj3 = NULL;
+  GCObject* obj1 = NULL;
+  GCObject* obj2 = NULL;
+  GCObject* obj3 = NULL;
 
-  SNAP_STACK_BEGIN(SNAP_OBJECT(obj1),
-                   SNAP_OBJECT(obj2),
-                   SNAP_OBJECT(obj3));
+  GC_BEGIN(GC_OBJ(obj1),
+                   GC_OBJ(obj2),
+                   GC_OBJ(obj3));
 
   printf("obj1 %p\n", obj1);
   printf("obj2 %p\n", obj2);
@@ -442,36 +416,44 @@ void snap_dummy3(Snap* snap) {
   printf("obj2 %p\n", obj2);
   printf("obj2 %p\n", obj3);
 
-  SNAP_RETURN();
+  GC_RETURN();
 }
 
 void snap_many(Snap* snap) {
   int i;
   SArr* arr = NULL;
 
-  SNAP_STACK_BEGIN(SNAP_OBJECT(arr));
+  GC_BEGIN(GC_OBJ(arr));
 
   arr = snap_arr_new(snap, 4000);
 
   for (i = 0; i < 4000; ++i) {
     SSymStr* str;
 
-    SNAP_STACK_BEGIN(SNAP_OBJECT(str));
+    GC_BEGIN(GC_OBJ(str));
 
     char buf[1024];
     sprintf(buf, "%d "
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
+                 "0123456701234567012345670123456701234567012345670123456701234567"
                  "0123456701234567012345670123456701234567012345670123456701234567"
                  "0123456701234567012345670123456701234567012345670123456701234567", i);
     str = snap_str_new(snap, buf);
 
     arr->data[i] = create_obj(str);
 
-    SNAP_STACK_END();
+    GC_END();
   }
 
-  gc_collect(snap, true);
+  gc_collect(&snap->gc);
 
-  SNAP_RETURN();
+  GC_RETURN();
 }
 
 int main() {
@@ -479,6 +461,8 @@ int main() {
   snap_init(&snap);
 
   snap_many(&snap);
+
+  snap_destroy(&snap);
 
   //snap_dummy1(&snap);
   //snap_dummy3(&snap);

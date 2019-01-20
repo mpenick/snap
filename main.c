@@ -30,14 +30,14 @@ int main(int argc, char** argv) {
       SCons** args = &first;
       for (i = 2; i < argc; ++i) {
         *args = first ? snap_cons_new(&snap)
-          : (SCons*)snap_anchor(&snap, (SObject*)snap_cons_new(&snap));
+          : (SCons*)snap_anchor(&snap, (GCObject*)snap_cons_new(&snap));
         val.type = STYPE_STR;
-        val.o = (SObject*)snap_str_new(&snap, argv[i]);
+        val.o = (GCObject*)snap_str_new(&snap, argv[i]);
         (*args)->first = val;
         args = (SCons**)&(*args)->rest.o;
       }
       val.type = STYPE_CONS;
-      val.o = (SObject*)first;
+      val.o = (GCObject*)first;
       snap_def(&snap, "args", val);
       if (first) snap_release(&snap);
       buf[num_bytes] = '\0';

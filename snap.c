@@ -309,7 +309,7 @@ SValue create_cfunc(SCFunc c) {
   return val;
 }
 
-SValue create_object(SObject* o) {
+SValue create_object(GCObject* o) {
   SValue val;
   val.type = o->type;
   val.o = o;
@@ -362,7 +362,7 @@ void snap_hash_destroy(SnapHash* hash) {
   mhash_destroy(hash);
 }
 
-static void gc_free(Snap* snap, SObject* obj) {
+static void gc_free(Snap* snap, GCObject* obj) {
   //printf("free %p\n", obj);
   switch (obj->type) {
     case STYPE_SYM:
@@ -414,7 +414,7 @@ static void gc_free(Snap* snap, SObject* obj) {
   free(obj);
 }
 
-static void gc_mark(Snap* snap, SObject* obj) {
+static void gc_mark(Snap* snap, GCObject* obj) {
   if (!obj) return;
   switch (obj->type) {
     case STYPE_SYM:
@@ -467,7 +467,7 @@ static void gc_mark_vec(Snap* snap, SnapVec* vec) {
   }
 }
 
-static void gc_mark_children(Snap* snap, SObject* obj) {
+static void gc_mark_children(Snap* snap, GCObject* obj) {
   int i;
   switch (obj->type) {
     case STYPE_ERR:
@@ -489,10 +489,10 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       break;
     case STYPE_INST:
       gc_mark_val(snap, ((SInst*)obj)->arg_data);
-      gc_mark(snap, (SObject*)((SInst*)obj)->list.next);
+      gc_mark(snap, (GCObject*)((SInst*)obj)->list.next);
       break;
     case STYPE_CODE_GEN:
-      gc_mark(snap, (SObject*)((SCodeGen*)obj)->scope);
+      gc_mark(snap, (GCObject*)((SCodeGen*)obj)->scope);
       gc_mark_hash(snap, &((SCodeGen*)obj)->constants);
       gc_mark_hash(snap, &((SCodeGen*)obj)->global_names);
       gc_mark_hash(snap, &((SCodeGen*)obj)->closed_names);
@@ -500,12 +500,12 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark_vec(snap, &((SCodeGen*)obj)->param_names);
       break;
     case STYPE_CODE:
-      gc_mark(snap, (SObject*)((SCode*)obj)->constants);
-      gc_mark(snap, (SObject*)((SCode*)obj)->global_names);
-      gc_mark(snap, (SObject*)((SCode*)obj)->closed_descs);
-      gc_mark(snap, (SObject*)((SCode*)obj)->insts_debug.next);
+      gc_mark(snap, (GCObject*)((SCode*)obj)->constants);
+      gc_mark(snap, (GCObject*)((SCode*)obj)->global_names);
+      gc_mark(snap, (GCObject*)((SCode*)obj)->closed_descs);
+      gc_mark(snap, (GCObject*)((SCode*)obj)->insts_debug.next);
     case STYPE_CLOSURE:
-      gc_mark(snap, (SObject*)((SClosure*)obj)->code);
+      gc_mark(snap, (GCObject*)((SClosure*)obj)->code);
       for (i = 0; i < ((SClosure*)obj)->code->closed_descs->len; ++i) {
         if (isclosed(((SClosure*)obj)->closed[i])) {
           gc_mark_val(snap, ((SClosure*)obj)->closed[i].closed);
@@ -513,7 +513,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       }
       break;
     case STYPE_CLOSED_DESC:
-      gc_mark(snap, (SObject*)((SClosedDesc*)obj)->name);
+      gc_mark(snap, (GCObject*)((SClosedDesc*)obj)->name);
       break;
     default:
       assert(0 && "Not a valid gray object");
@@ -522,7 +522,7 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
 }
 
 static void gc_collect(Snap* snap) {
-  SObject** obj;
+  GCObject** obj;
 
   mvec_foreach(&snap->anchors, obj) {
     gc_mark(snap, *obj);
@@ -530,10 +530,10 @@ static void gc_collect(Snap* snap) {
 
   gc_mark_hash(snap, &snap->globals);
   gc_mark_hash(snap, &snap->keywords);
-  gc_mark(snap, (SObject*)snap->cause);
+  gc_mark(snap, (GCObject*)snap->cause);
 
   while (snap->gray) {
-    SObject* temp = snap->gray;
+    GCObject* temp = snap->gray;
     snap->gray = snap->gray->gc_gray_next;
     gc_mark_children(snap, temp);
   }
@@ -542,7 +542,7 @@ static void gc_collect(Snap* snap) {
 
   while (*obj) {
     if ((*obj)->mark == WHITE) {
-      SObject* temp = *obj;
+      GCObject* temp = *obj;
       *obj = (*obj)->gc_next;
       gc_free(snap, temp);
     } else {
@@ -552,13 +552,13 @@ static void gc_collect(Snap* snap) {
   }
 }
 
-static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
-  assert(size > sizeof(SObject));
+static GCObject* gc_new(Snap* snap, uint8_t type, size_t size) {
+  assert(size > sizeof(GCObject));
   if (snap->num_bytes_alloced_last_gc > GC_EVERY_NUM_BYTES) {
     gc_collect(snap);
     snap->num_bytes_alloced_last_gc = 0;
   }
-  SObject* obj = (SObject*)malloc(size);
+  GCObject* obj = (GCObject*)malloc(size);
   //printf("new %p (type: %d)\n", obj, type);
   obj->type = type;
   obj->mark = WHITE;
@@ -699,7 +699,7 @@ SClosure* snap_closure_new(Snap* snap, SCode* code, SClosure* next) {
 
 SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
   SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
-  snap_anchor(snap, (SObject*)c);
+  snap_anchor(snap, (GCObject*)c);
 
   //insts_dump(&code_gen->insts, 0);
   //printf("\n");
@@ -1288,8 +1288,8 @@ err:
   return result;
 }
 
-SObject* snap_anchor(Snap* snap, SObject* obj) {
-  *mvec_push(&snap->anchors, SObject*) = obj;
+GCObject* snap_anchor(Snap* snap, GCObject* obj) {
+  *mvec_push(&snap->anchors, GCObject*) = obj;
   return obj;
 }
 
@@ -2824,7 +2824,7 @@ void snap_init(Snap* snap) {
   snap->stack = (SValue*)malloc(snap->stack_size * sizeof(SValue));
   snap->stack_end = snap->stack + snap->stack_size;
   mvec_init(&snap->frames, SnapFrame, 32);
-  mvec_init(&snap->anchors, SObject*, 32);
+  mvec_init(&snap->anchors, GCObject*, 32);
   snap->num_bytes_alloced = 0;
   snap->num_bytes_alloced_last_gc = 0;
   snap->all = NULL;
@@ -2839,9 +2839,9 @@ void snap_init(Snap* snap) {
 }
 
 void snap_destroy(Snap* snap) {
-  SObject* obj = snap->all;
+  GCObject* obj = snap->all;
   while (obj) {
-    SObject* temp = obj;
+    GCObject* temp = obj;
     obj = obj->gc_next;
     gc_free(snap, temp);
   }
