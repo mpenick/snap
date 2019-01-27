@@ -4,24 +4,40 @@
 #include <stdint.h>
 #include <stddef.h>
 
-enum {
-  GC_YOUNG_GEN,
-  GC_MATURE_GEN
-};
+typedef enum {
+  GC_YOUNG_GEN = 0,
+  GC_MATURE_GEN = 0xF
+} GCGen;
 
-#define GC_OBJECT_FIELDS \
-  uint8_t type;          \
-  uint8_t flags;         \
-  uint16_t size;
+typedef enum {
+  GC_WHITE,
+  GC_GRAY,
+  GC_BLACK
+} GCColor;
 
 typedef struct {
-  GC_OBJECT_FIELDS
+  uint8_t mark : 2;
+  uint8_t is_container : 1;
+  uint8_t gen : 4;
+  uint8_t reserved : 1;
+} GCFlags;
+
+typedef struct {
+  uint8_t type;
+  GCFlags flags;
+  uint16_t size;
 } GCObject;
 
 typedef struct {
-  GC_OBJECT_FIELDS
-  GCObject* location;
+  GCObject gc_obj;
+  void* location;
 } GCObjectRelocated;
+
+typedef struct GCObjectMature_ {
+  struct GCObjectMature_* next;
+  struct GCObjectMature_* gray_next;
+  GCObjectRelocated obj;
+} GCObjectMature;
 
 typedef struct GCStack_ {
   struct GCStack_* next;
@@ -30,10 +46,10 @@ typedef struct GCStack_ {
 } GCStack;
 
 typedef struct GCSemiSpace_ {
-  char* pos;
-  char* end;
+  uintptr_t pos;
+  uintptr_t end;
   struct GCSemiSpace_* next;
-  char begin[1];
+  GCObjectRelocated begin[1];
 } GCSemiSpace;
 
 typedef struct GC_ GC;
@@ -47,8 +63,11 @@ typedef void (*GCFree)(void*);
 typedef struct GC_ {
   GCSemiSpace* to_space;
   GCSemiSpace* from_space;
+  GCObjectMature* mature_all;
+  GCObjectMature* mature_gray;
   size_t semi_chuck_size;
   size_t semi_max_allocated;
+  size_t semi_too_large;
   size_t allocated;
   GCMalloc malloc;
   GCFree free;
@@ -67,6 +86,33 @@ GCObject* gc_new_container(GC* gc, uint8_t type, size_t size);
 
 void gc_mark(GC* gc, GCObject** ptr);
 void gc_collect(GC* gc);
+
+#define gc_is_mature(obj) \
+  ((obj)->flags.gen == GC_MATURE_GEN)
+
+#define gc_is_young(obj) \
+  ((obj)->flags.gen < GC_MATURE_GEN)
+
+#define gc_is_gray(obj) \
+  ((obj)->flags.mark == GC_GRAY)
+
+inline void gc_barrier(GC* gc, GCObject* obj, GCObject* container) {
+  if (gc_is_young(obj) &&
+      gc_is_mature(container) && !gc_is_gray(container)) {
+    // TODO: Calculate GCObjectMature
+    //void* ptr = container;
+    //((GCObjectMature*)ptr)->gray_next = gc->mature_gray;
+    //gc->mature_gray = ((GCObjectMature*)ptr);
+  }
+}
+
+#define GC_MATURE(type) type##Mature
+
+#define GC_MATURE_DECL(type) \
+typedef struct {               \
+  GCObjectMature gc_mature;    \
+  type obj;                    \
+} GC_MATURE(type)              \
 
 #define GC_BEGIN(...) \
   GCStack stack__; \

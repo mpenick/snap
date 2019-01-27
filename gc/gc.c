@@ -10,16 +10,16 @@
 #include "mstructs.h"
 
 #define gc_set_relocated_flag(obj) \
-  ((obj)->flags |= 0x1)
+  (obj)->flags.mark = 1
 
 #define gc_relocated_flag(obj) \
-  ((obj)->flags & 0x1)
+  ((obj)->flags.mark)
 
 #define gc_set_is_container(obj) \
-  ((obj)->flags |= (0x1 << 1))
+  (obj)->flags.is_container = 1
 
 #define gc_is_container(obj) \
-  (((obj)->flags >> 1) & 0x1)
+  ((obj)->flags.is_container)
 
 #define gc_size(obj) ((obj)->size > 0 ? (obj)->size : gc->slow_size(obj))
 
@@ -27,54 +27,44 @@ static inline size_t round_to_alignment(size_t value, size_t alignment) {
    return (value + (alignment - 1)) & ~(alignment - 1);
 }
 
-static size_t gc_size_slow(GCObject* obj) {
-  assert(false && "Not implemented");
-  return 0;
-}
-
 static GCSemiSpace* gc_semi_space_new(GC* gc, GCSemiSpace* next);
-static GCObject* gc_semi_space_allocate(GCSemiSpace* space, uint8_t type, size_t size);
+static void* gc_semi_space_allocate(GCSemiSpace* space, size_t size);
 
 static GCSemiSpace* gc_semi_space_new(GC* gc, GCSemiSpace* next) {
   GCSemiSpace* space = (GCSemiSpace*)gc->malloc(sizeof(GCSemiSpace) + gc->semi_chuck_size);
-  space->pos = space->begin;
-  space->end = space->begin + gc->semi_chuck_size;
+  space->pos = (uintptr_t)space->begin;
+  space->end = (uintptr_t)space->begin + gc->semi_chuck_size;
   space->next = next;
   return space;
 }
 
 static void gc_semi_space_delete(GC* gc, GCSemiSpace* semi) {
   GCSemiSpace* curr = gc->to_space;
-  printf("delete\n");
   while (curr) {
-    printf("%p\n", curr);
     GCSemiSpace* temp = curr->next;
     gc->free(curr);
     curr = temp;
   }
 }
 
-static GCObject* gc_semi_space_allocate(GCSemiSpace* space, uint8_t type, size_t size) {
-  GCObject* obj;
+static void* gc_semi_space_allocate(GCSemiSpace* space, size_t size) {
+  void* ptr;
   if (space->pos + size > space->end) {
     if (space->next) {
-      return gc_semi_space_allocate(space->next, type, size);
+      return gc_semi_space_allocate(space->next, size);
     }
     return NULL;
   }
-  obj = (GCObject*)space->pos;
+  ptr = (void*)space->pos;
   space->pos += size;
-  obj->type = type;
-  obj->flags = 0;
-  obj->size = size > UINT16_MAX ? 0 : size;
-  return obj;
+  return ptr;
 }
 
 static void gc_semi_space_collect(GC* gc, GCSemiSpace* to_space) {
-  char* pos = to_space->begin;
-  char* end = to_space->pos;
+  uintptr_t pos = (uintptr_t)to_space->begin;
+  uintptr_t end = to_space->pos;
   while (pos < end) {
-    GCObject* obj = (GCObject*) pos;
+    GCObject* obj = (GCObject*)pos;
     if (gc_is_container(obj)) {
       gc->mark_children(gc, obj);
     }
@@ -86,7 +76,7 @@ static size_t gc_semi_space_allocated(GCSemiSpace* to_space) {
   size_t size = 0;
   GCSemiSpace* space = to_space;
   while (space) {
-    size = space->pos - space->begin;
+    size = (size_t)(space->pos - (uintptr_t)space->begin);
     space = space->next;
   }
   return size;
@@ -95,29 +85,28 @@ static size_t gc_semi_space_allocated(GCSemiSpace* to_space) {
 static void gc_semi_space_reset(GCSemiSpace* from_space) {
   GCSemiSpace* space = from_space;
   while (space) {
-    space->pos = space->begin;
+    space->pos = (uintptr_t)space->begin;
     space = space->next;
   }
 }
 
 void gc_mark(GC* gc, GCObject** ptr) {
-  GCObject* obj = *ptr;
-  if (!obj) return;
-  GCObject* location;
-  if (!gc_relocated_flag(obj)) {
-    size_t size = gc_size(obj);
-    location = gc_semi_space_allocate(gc->to_space, obj->type, size);
-    if (!location) {
+  void* new_location;
+  void* old_location = *ptr;
+  if (!old_location) return;
+  if (!gc_relocated_flag(*ptr)) {
+    size_t size = gc_size(*ptr);
+    new_location = gc_semi_space_allocate(gc->to_space, size);
+    if (!new_location) {
       gc->to_space = gc_semi_space_new(gc, gc->to_space);
-      location = gc_semi_space_allocate(gc->to_space, obj->type, size);
+      new_location = gc_semi_space_allocate(gc->to_space, size);
     }
-    memcpy(location, obj, size);
-    gc_set_relocated_flag(obj);
-    ((GCObjectRelocated*)obj)->location = location;
+    memcpy(new_location, old_location, size);
+    ((GCObjectRelocated*)old_location)->location = old_location;
   } else {
-    location = ((GCObjectRelocated*)obj)->location;
+    new_location = ((GCObjectRelocated*)old_location)->location;
   }
-  *ptr = location;
+  *ptr = new_location;
 }
 
 void gc_collect(GC* gc) {
@@ -152,11 +141,14 @@ void gc_init(GC* gc,
              GCSlowSize slow_size) {
   gc->semi_chuck_size = 256 * 1024; // 256kb
   gc->semi_max_allocated = 2 * 1024 * 1024; // 2mb
+  gc->semi_too_large = (gc->semi_chuck_size * 10) / 100; // 10% of chunk size
   gc->malloc = malloc;
   gc->free = free;
 
   gc->to_space = gc_semi_space_new(gc, NULL);
   gc->from_space = NULL;
+  gc->mature_all = NULL;
+  gc->mature_gray = NULL;
   gc->allocated = 0;
   gc->mark_children = mark_children;
   gc->slow_size = slow_size;
@@ -169,18 +161,36 @@ void gc_destroy(GC* gc) {
   gc_semi_space_delete(gc, gc->from_space);
 }
 
+void gc_obj_init(GCObject* obj, uint8_t type, GCGen gen, size_t size) {
+  obj->type = type;
+  obj->flags = (GCFlags) { 0, 0, (uint8_t)gen };
+  obj->size = size > UINT16_MAX ? 0 : (uint16_t)size;
+}
+
 GCObject* gc_new(GC* gc, uint8_t type, size_t size) {
   GCObject* obj;
-  size = round_to_alignment(size, sizeof(GCObjectRelocated));
-  if (size > gc->semi_chuck_size) abort(); // TODO
-  if (gc->allocated > gc->semi_max_allocated) {
-    gc_collect(gc);
+  GCGen gen;
+  size_t aligned_size = round_to_alignment(size, sizeof(GCObjectRelocated));
+  if (aligned_size < gc->semi_too_large) {
+    size = aligned_size;
+    if (gc->allocated > gc->semi_max_allocated) {
+      gc_collect(gc);
+    }
+    obj = gc_semi_space_allocate(gc->to_space, size);
+    if (!obj) {
+      gc->to_space = gc_semi_space_new(gc, gc->to_space);
+      obj = gc_semi_space_allocate(gc->to_space, size);
+    }
+    gen = GC_YOUNG_GEN;
+  } else {
+    GCObjectMature* mature = gc->malloc((sizeof(GCObjectMature) - offsetof(GCObjectMature, obj)) + size);
+    mature->next = gc->mature_all;
+    gc->mature_all = mature;
+    mature->gray_next = NULL;
+    obj = &mature->obj.gc_obj;
+    gen = GC_MATURE_GEN;
   }
-  obj = gc_semi_space_allocate(gc->to_space, type, size);
-  if (!obj) {
-    gc->to_space = gc_semi_space_new(gc, gc->to_space);
-    obj = gc_semi_space_allocate(gc->to_space, type, size);
-  }
+  gc_obj_init(obj, type, gen, size);
   gc->allocated += size;
   return obj;
 }
@@ -191,6 +201,7 @@ GCObject* gc_new_container(GC* gc, uint8_t type, size_t size) {
   return obj;
 }
 
+#if 0
 // Marked == Moved
 
 #define PTRMASK (~((size_t)0)) - 1)
@@ -455,17 +466,39 @@ void snap_many(Snap* snap) {
 
   GC_RETURN();
 }
+#endif
+
+typedef struct {
+  GCObject gc_obj;
+  size_t len;
+  char data[1];
+} SSymStr;
+
+GC_MATURE_DECL(SSymStr);
 
 int main() {
-  Snap snap;
-  snap_init(&snap);
+  //Snap snap;
+  //snap_init(&snap);
 
-  snap_many(&snap);
+  //snap_many(&snap);
 
-  snap_destroy(&snap);
+  //snap_destroy(&snap);
 
   //snap_dummy1(&snap);
   //snap_dummy3(&snap);
 
   //printf("%zx\n", (~((size_t)0)) - 1);
+  //GCObjectMature m;
+  //printf("sizeof(SArr) = %zu\n", sizeof(SArr));
+  //printf("offsetof(SArr, type) = %zu\n", offsetof(SArr, type));
+  //printf("offsetof(SArr, len) = %zu\n", offsetof(SArr, len));
+
+  printf("sizeof(GCObject) = %zu\n", sizeof(GCObject));
+  printf("sizeof(GCObjectRelocated) = %zu\n", sizeof(GCObjectRelocated));
+  printf("sizeof(SSymStr) = %zu\n", sizeof(SSymStr));
+  printf("sizeof(SSymStrMature) = %zu\n", sizeof(GC_MATURE(SSymStr)));
+
+  //printf("sizeof(GCObjectMature) = %zu\n", sizeof(GCObjectMature));
+  //printf("offsetof(GCObjectMature, next) = %zu\n", offsetof(GCObjectMature, next));
+  //printf("offsetof(GCObjectMature, obj) = %zu\n", offsetof(GCObjectMature, obj));
 }
