@@ -132,6 +132,10 @@ void gc_calc_size_classes(GC* gc) {
 
 static size_t gc_size_to_index(size_t size);
 
+static size_t gc_ptr_to_page_index(GC* gc, void* ptr) {
+  return ((uintptr_t)ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
+}
+
 static Span* gc_alloc_span(GC* gc, void* ptr, Span* next, size_t num_pages, size_t size_index) {
   assert(gc->free_spans != NULL && "A span should alway be available");
 
@@ -139,7 +143,7 @@ static Span* gc_alloc_span(GC* gc, void* ptr, Span* next, size_t num_pages, size
   gc->free_spans = span->next;
 
   // Mark first and last pages in the mapping
-  uintptr_t page_index = ((uintptr_t)ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
+  uintptr_t page_index = gc_ptr_to_page_index(gc, ptr);
   gc->page_span_map[page_index] = span;
   gc->page_span_map[page_index + num_pages - 1] = span;
 
@@ -164,6 +168,8 @@ static void gc_dalloc(GC* gc, void* ptr, size_t size) {
     // Check to see if slab is empty
     // If empty then move to first non-slab bin of the correct page size
   } else {
+    uintptr_t page_index = gc_ptr_to_page_index(gc, ptr);
+    Span* span = gc->page_span_map[page_index];
   }
 }
 
