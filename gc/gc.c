@@ -6,499 +6,299 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "gc.h"
+#include <sys/mman.h>
+
 #include "mstructs.h"
 
-#define gc_set_relocated_flag(obj) \
-  (obj)->flags.mark = 1
+#define ZU(x) ((size_t)x)
 
-#define gc_relocated_flag(obj) \
-  ((obj)->flags.mark)
+#define LG_PTR_SIZE 8
+#define LG_BITMAP_WORD_SIZE 8
 
-#define gc_set_is_container(obj) \
-  (obj)->flags.is_container = 1
+#define LG_NUM_GROUPS 2
+#define LG_QUANTUM 4
+#define LG_MIN_SIZE LG_QUANTUM
+#define LG_VADDR_SIZE 48
+#define LG_PAGE_SIZE 12
 
-#define gc_is_container(obj) \
-  ((obj)->flags.is_container)
+#define NUM_GROUPS (ZU(1) << LG_NUM_GROUPS)
+#define PAGE_SIZE (ZU(1) << LG_PAGE_SIZE)
+#define NUM_SIZE_CLASSES (NUM_GROUPS * (LG_VADDR_SIZE + LG_PAGE_SIZE - LG_QUANTUM - 1))
 
-#define gc_size(obj) ((obj)->size > 0 ? (obj)->size : gc->slow_size(obj))
+#define MAX_SLAB_ENTRIES (PAGE_SIZE >> LG_MIN_SIZE)
 
-static inline size_t round_to_alignment(size_t value, size_t alignment) {
+static inline uintptr_t round_to_alignment(uintptr_t value, uintptr_t alignment) {
    return (value + (alignment - 1)) & ~(alignment - 1);
 }
 
-static GCSemiSpace* gc_semi_space_new(GC* gc, GCSemiSpace* next);
-static void* gc_semi_space_allocate(GCSemiSpace* space, size_t size);
-
-static GCSemiSpace* gc_semi_space_new(GC* gc, GCSemiSpace* next) {
-  GCSemiSpace* space = (GCSemiSpace*)gc->malloc(sizeof(GCSemiSpace) + gc->semi_chuck_size);
-  space->pos = (uintptr_t)space->begin;
-  space->end = (uintptr_t)space->begin + gc->semi_chuck_size;
-  space->next = next;
-  return space;
-}
-
-static void gc_semi_space_delete(GC* gc, GCSemiSpace* semi) {
-  GCSemiSpace* curr = gc->to_space;
-  while (curr) {
-    GCSemiSpace* temp = curr->next;
-    gc->free(curr);
-    curr = temp;
-  }
-}
-
-static void* gc_semi_space_allocate(GCSemiSpace* space, size_t size) {
+typedef struct Span_ {
+  struct Span_* next;
   void* ptr;
-  if (space->pos + size > space->end) {
-    if (space->next) {
-      return gc_semi_space_allocate(space->next, size);
-    }
-    return NULL;
-  }
-  ptr = (void*)space->pos;
-  space->pos += size;
-  return ptr;
-}
-
-static void gc_semi_space_collect(GC* gc, GCSemiSpace* to_space) {
-  uintptr_t pos = (uintptr_t)to_space->begin;
-  uintptr_t end = to_space->pos;
-  while (pos < end) {
-    GCObject* obj = (GCObject*)pos;
-    if (gc_is_container(obj)) {
-      gc->mark_children(gc, obj);
-    }
-    pos += gc_size(obj);
-  }
-}
-
-static size_t gc_semi_space_allocated(GCSemiSpace* to_space) {
-  size_t size = 0;
-  GCSemiSpace* space = to_space;
-  while (space) {
-    size = (size_t)(space->pos - (uintptr_t)space->begin);
-    space = space->next;
-  }
-  return size;
-}
-
-static void gc_semi_space_reset(GCSemiSpace* from_space) {
-  GCSemiSpace* space = from_space;
-  while (space) {
-    space->pos = (uintptr_t)space->begin;
-    space = space->next;
-  }
-}
-
-void gc_mark(GC* gc, GCObject** ptr) {
-  void* new_location;
-  void* old_location = *ptr;
-  if (!old_location) return;
-  if (!gc_relocated_flag(*ptr)) {
-    size_t size = gc_size(*ptr);
-    new_location = gc_semi_space_allocate(gc->to_space, size);
-    if (!new_location) {
-      gc->to_space = gc_semi_space_new(gc, gc->to_space);
-      new_location = gc_semi_space_allocate(gc->to_space, size);
-    }
-    memcpy(new_location, old_location, size);
-    ((GCObjectRelocated*)old_location)->location = old_location;
-  } else {
-    new_location = ((GCObjectRelocated*)old_location)->location;
-  }
-  *ptr = new_location;
-}
-
-void gc_collect(GC* gc) {
-  GCStack* root;
-
-  /* Swap the to/from spaces */
-  {
-    GCSemiSpace* temp = gc->to_space;
-    gc->to_space = gc->from_space;
-    gc->from_space = temp;
-  }
-
-  if (gc->to_space) {
-    gc_semi_space_reset(gc->to_space);
-  } else {
-    gc->to_space = gc_semi_space_new(gc, NULL);
-  }
-
-  for (root = gc->roots; root != NULL; root = root->next) {
-    size_t i;
-    for (i = 0; i < root->count; ++i) {
-      gc_mark(gc, root->objs[i]);
-    }
-  }
-
-  gc_semi_space_collect(gc, gc->to_space);
-  gc->allocated = gc_semi_space_allocated(gc->to_space);
-}
-
-void gc_init(GC* gc,
-             GCMarkChildren mark_children,
-             GCSlowSize slow_size) {
-  gc->semi_chuck_size = 256 * 1024; // 256kb
-  gc->semi_max_allocated = 2 * 1024 * 1024; // 2mb
-  gc->semi_too_large = (gc->semi_chuck_size * 10) / 100; // 10% of chunk size
-  gc->malloc = malloc;
-  gc->free = free;
-
-  gc->to_space = gc_semi_space_new(gc, NULL);
-  gc->from_space = NULL;
-  gc->mature_all = NULL;
-  gc->mature_gray = NULL;
-  gc->allocated = 0;
-  gc->mark_children = mark_children;
-  gc->slow_size = slow_size;
-  gc->roots = NULL;
-}
-
-void gc_destroy(GC* gc) {
-  // TODO
-  gc_semi_space_delete(gc, gc->to_space);
-  gc_semi_space_delete(gc, gc->from_space);
-}
-
-void gc_obj_init(GCObject* obj, uint8_t type, GCGen gen, size_t size) {
-  obj->type = type;
-  obj->flags = (GCFlags) { 0, 0, (uint8_t)gen };
-  obj->size = size > UINT16_MAX ? 0 : (uint16_t)size;
-}
-
-GCObject* gc_new(GC* gc, uint8_t type, size_t size) {
-  GCObject* obj;
-  GCGen gen;
-  size_t aligned_size = round_to_alignment(size, sizeof(GCObjectRelocated));
-  if (aligned_size < gc->semi_too_large) {
-    size = aligned_size;
-    if (gc->allocated > gc->semi_max_allocated) {
-      gc_collect(gc);
-    }
-    obj = gc_semi_space_allocate(gc->to_space, size);
-    if (!obj) {
-      gc->to_space = gc_semi_space_new(gc, gc->to_space);
-      obj = gc_semi_space_allocate(gc->to_space, size);
-    }
-    gen = GC_YOUNG_GEN;
-  } else {
-    GCObjectMature* mature = gc->malloc((sizeof(GCObjectMature) - offsetof(GCObjectMature, obj)) + size);
-    mature->next = gc->mature_all;
-    gc->mature_all = mature;
-    mature->gray_next = NULL;
-    obj = &mature->obj.gc_obj;
-    gen = GC_MATURE_GEN;
-  }
-  gc_obj_init(obj, type, gen, size);
-  gc->allocated += size;
-  return obj;
-}
-
-GCObject* gc_new_container(GC* gc, uint8_t type, size_t size) {
-  GCObject* obj = gc_new(gc, type, size);
-  gc_set_is_container(obj);
-  return obj;
-}
-
-#if 0
-// Marked == Moved
-
-#define PTRMASK (~((size_t)0)) - 1)
-#define RB(obj) (obj & 0x1) ?
-
-typedef struct GCObject SObject;
-
-typedef struct Snap_ Snap;
-
-typedef struct SCode_ SCode;
-typedef struct SValue_ SValue;
-
-typedef long SnapInt;
-typedef double SnapFloat;
-typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
-
-#define is_obj_p(v) ((v)->type > STYPE_CFUNC)
-
-#define STYPE_MAPPING(XX) \
-  XX(STYPE_UNDEF, 0, "undef") \
-  XX(STYPE_DELETED, 1, "deleted") \
-  XX(STYPE_NIL, 2, "nil") \
-  XX(STYPE_BOOL, 3, "bool") \
-  XX(STYPE_INT, 4, "int") \
-  XX(STYPE_FLOAT, 5, "float") \
-  XX(STYPE_FORM, 6, "form") \
-  XX(STYPE_CFUNC, 7, "cfunc") \
-  XX(STYPE_SYM, 8, "sym") \
-  XX(STYPE_STR, 9, "str") \
-  XX(STYPE_ERR, 10, "err") \
-  XX(STYPE_CONS, 11, "cons") \
-  XX(STYPE_ARR, 12, "array") \
-  XX(STYPE_INST, 13, "inst") \
-  XX(STYPE_SCOPE, 14, "scope") \
-  XX(STYPE_CODE_GEN, 15, "codegen") \
-  XX(STYPE_CODE, 16, "code") \
-  XX(STYPE_KEY, 17, "key") \
-  XX(STYPE_TEMPSTR, 18, "tempstr") \
-  XX(STYPE_CLOSURE, 19, "closure") \
-  XX(STYPE_CLOSED_DESC, 20, "closeddesc")
-
-enum {
-#define XX(type, id, name) type,
-  STYPE_MAPPING(XX)
-#undef XX
-};
-
-struct SValue_ {
-  uint8_t type;
   union {
-    bool b;
-    SnapInt i;
-    SnapFloat f;
-    GCObject* o;
-    SCFunc c;
+    struct {
+      unsigned long long small_alloced[MAX_SLAB_ENTRIES >> LG_BITMAP_WORD_SIZE];
+      unsigned long long small_marked[MAX_SLAB_ENTRIES >> LG_BITMAP_WORD_SIZE];
+    };
+    struct {
+      bool large_marked;
+    };
   };
-};
+  size_t num_pages;
+  size_t size_index;
+} Span;
 
-typedef struct SnapVec_ {
-  MVEC_FIELDS(SValue);
-} SnapVec;
+static size_t gc_page_span_map_metadata_size(size_t page_count) {
+  return page_count * sizeof(Span*);
+}
+
+static size_t gc_page_all_metadata_size(size_t page_count) {
+  return  gc_page_span_map_metadata_size(page_count) + page_count * sizeof(Span);
+}
 
 typedef struct {
-  MHASH_ENTRY_FIELDS(SValue);
-  SValue val;
-} SnapHashEntry;
+  Span* free;
+  Span* full;
+  size_t num_pages;
+  bool is_slab;
+} Bin;
 
 typedef struct {
-  MHASH_FIELDS(SnapHashEntry, SValue);
-} SnapHash;
+  Bin bins[NUM_SIZE_CLASSES];
+  Span* huge;
+  Span* free_spans;
+  Span** page_span_map;
+  Span* spans;
+  void* pages;
+  void* mem;
+} GC;
 
-typedef struct SSymStr_ {
-  GC_OBJECT_FIELDS
-  size_t len;
-  char data[0];
-} SSymStr;
-
-typedef struct SKeyword_ {
-  GC_OBJECT_FIELDS
-  int id;
-  size_t len;
-  char data[0];
-} SKeyword;
-
-typedef struct SArr_ {
-  GC_OBJECT_FIELDS
-  int len;
-  SValue data[0];
-} SArr;
-
-typedef struct SStuff_ {
-  GC_OBJECT_FIELDS
-  int stuff;
-} SStuff;
-
-SValue create_obj_(GCObject* o) {
-  SValue val;
-  val.type = o->type;
-  val.o = o;
-  return val;
+static size_t gc_calc_num_pages(size_t size) {
+  size_t num_pages = 1;
+  size_t num_entries = PAGE_SIZE / size;
+  while (true) {
+    if (num_pages * PAGE_SIZE ==  num_entries * size) {
+      return num_pages;
+    }
+    num_pages++;
+    num_entries = (num_pages * PAGE_SIZE) / size;
+  }
 }
 
-#define create_obj(o) create_obj_((SObject*)o)
-
-struct Snap_ {
-  GC gc;
-};
-
-SSymStr* snap_str_new(Snap* snap, const char* str) {
-  size_t len = strlen(str);
-  SSymStr* s = (SSymStr*)gc_new(snap, STYPE_STR, sizeof(SSymStr) + len + 1);
-  s->len = len;
-  strcpy(s->data, str);
-  return s;
+void gc_bin_init(Bin* bin, bool is_slab, size_t num_pages) {
+  bin->is_slab = is_slab;
+  bin->num_pages = num_pages;
+  bin->free = bin->free = NULL;
 }
 
-SArr* snap_arr_new(Snap* snap, int len) {
-  SArr* a = (SArr*)gc_new_container(snap, STYPE_ARR, sizeof(SArr) + len * sizeof(SValue));
-  a->len = len;
-  return a;
-}
+void gc_calc_size_classes(GC* gc) {
+  size_t lg_base = LG_MIN_SIZE;
+  size_t lg_delta = LG_QUANTUM;
 
-static void snap_gc_mark_val(GC* gc, SValue* val) {
-  if (is_obj_p(val)) gc_mark(gc, &val->o);
-}
+  size_t index = 0;
 
-static void snap_gc_mark_children(GC* gc, GCObject* obj) {
-  int i;
-  switch (obj->type) {
-    case STYPE_ARR:
-      for (i = 0; i < ((SArr*)obj)->len; ++i) {
-        snap_gc_mark_val(gc, &((SArr*)obj)->data[i]);
+  for (size_t n = 0; n < 2 * NUM_GROUPS; ++n) {
+    size_t size = ((size_t)1 << lg_base) + (n << lg_delta);
+    gc_bin_init(&gc->bins[index], true, gc_calc_num_pages(size));
+    index++;
+  }
+
+  lg_base+=2;
+
+  while (((size_t)1 << lg_base) + (NUM_GROUPS << lg_delta) < ((size_t)1 << LG_VADDR_SIZE) * PAGE_SIZE) {
+    lg_base++;
+    lg_delta++;
+    for (size_t n = 1; n <= NUM_GROUPS; ++n) {
+      size_t size = ((size_t)1 << lg_base) + (n << lg_delta);
+
+      size_t next_size;
+      if (n < NUM_GROUPS) {
+        next_size = ((size_t)1 << lg_base) + ((n + 1) << lg_delta);
+      } else {
+        next_size = ((size_t)1 << (lg_base + 1)) + ((size_t)1 << (lg_delta + 1));
       }
-      break;
+
+      if (size < 4 * PAGE_SIZE) {
+        size_t num_pages = gc_calc_num_pages(size);
+        bool is_slab = size < PAGE_SIZE || size % PAGE_SIZE != 0;
+        gc_bin_init(&gc->bins[index], is_slab, num_pages);
+      } else {
+        gc_bin_init(&gc->bins[index], false, size >> LG_PAGE_SIZE);
+      }
+      index++;
+    }
+  }
+  assert(index == NUM_SIZE_CLASSES && "Calculated an invalid number of size classes");
+}
+
+static size_t gc_size_to_index(size_t size);
+
+static Span* gc_alloc_span(GC* gc, void* ptr, Span* next, size_t num_pages, size_t size_index) {
+  assert(gc->free_spans != NULL && "A span should alway be available");
+
+  Span* span = gc->free_spans;
+  gc->free_spans = span->next;
+
+  // Mark first and last pages in the mapping
+  uintptr_t page_index = ((uintptr_t)ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
+  gc->page_span_map[page_index] = span;
+  gc->page_span_map[page_index + num_pages - 1] = span;
+
+  span->ptr = ptr;
+  span->next = next;
+  span->num_pages = num_pages;
+  span->size_index = size_index;
+
+  return span;
+}
+
+static void gc_dalloc_span(GC* gc, Span* span) {
+  span->next = gc->free_spans;
+  gc->free_spans = span;
+}
+
+static void gc_dalloc(GC* gc, void* ptr, size_t size) {
+  size_t index = gc_size_to_index(size);
+  Bin* bin = &gc->bins[index];
+  if (bin->is_slab) {
+    // Free slab bit
+    // Check to see if slab is empty
+    // If empty then move to first non-slab bin of the correct page size
+  } else {
   }
 }
 
-void snap_init(Snap* snap) {
-  gc_init(&snap->gc, snap_gc_mark_children, NULL);
-}
+bool gc_init(GC* gc, size_t heap_size) {
+  size_t page_count = (heap_size - gc_page_all_metadata_size(heap_size / PAGE_SIZE)) / PAGE_SIZE;
+  size_t metadata_size = gc_page_all_metadata_size(page_count);
 
-void snap_destroy(Snap* snap) {
-  gc_destroy(&snap->gc);
-}
+  // TODO: Minimum heap size
 
-#define GETGC() (&snap->gc)
-
-int snap_dummy1(Snap* snap) {
-  GCObject* obj1 = NULL;
-  GCObject* obj2 = NULL;
-  SStuff* stuff1 = NULL;
-
-  GC_BEGIN(GC_OBJ(obj1),
-           GC_OBJ(obj1),
-           GC_OBJ(obj2),
-           GC_OBJ(stuff1));
-
-  obj1 = gc_new(snap, 0, sizeof(GCObject));
-  obj2 = obj1;
-  stuff1 = (SStuff*)gc_new(snap, 0, sizeof(SStuff));
-
-  printf("obj1 %p\n", obj1);
-  printf("obj2 %p\n", obj2);
-  printf("stuff1 %p\n", stuff1);
-
-  gc_collect(snap);
-
-#if 0
-  {
-    SObject* local1 = NULL;
-
-    SNAP_STACK_BEGIN(SNAP_OBJECT(local1));
-
-    printf("local1 %p\n", local1);
-
-    printf("local1 %p\n", local1);
-
-    SNAP_STACK_END();
+  gc->mem = mmap(NULL, heap_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
+  if (gc->mem == NULL) {
+    return false;
   }
-#endif
+  gc->page_span_map = (Span**)gc->mem;
+  gc->spans = (Span*)((uintptr_t)gc->mem + gc_page_span_map_metadata_size(page_count));
+  gc->pages = (void*)(round_to_alignment((uintptr_t)gc->mem + metadata_size + PAGE_SIZE / 2, PAGE_SIZE));
 
-  printf("obj1 %p\n", obj1);
-  printf("obj2 %p\n", obj2);
-  printf("stuff1 %p\n", stuff1);
-
-  GC_RETURN_WITH(0);
-}
-
-void snap_dummy2(Snap* snap) {
-  GCObject* obj1 = NULL;
-  GCObject* obj2 = NULL;
-
-  GC_BEGIN(GC_OBJ(obj1),
-           GC_OBJ(obj2));
-
-  printf("obj1 %p\n", obj1);
-  printf("obj2 %p\n", obj2);
-
-  snap_dummy1(snap);
-
-  printf("obj1 %p\n", obj1);
-  printf("obj2 %p\n", obj2);
-
-  GC_RETURN();
-}
-
-void snap_dummy3(Snap* snap) {
-  GCObject* obj1 = NULL;
-  GCObject* obj2 = NULL;
-  GCObject* obj3 = NULL;
-
-  GC_BEGIN(GC_OBJ(obj1),
-                   GC_OBJ(obj2),
-                   GC_OBJ(obj3));
-
-  printf("obj1 %p\n", obj1);
-  printf("obj2 %p\n", obj2);
-  printf("obj2 %p\n", obj3);
-
-  snap_dummy2(snap);
-
-  printf("obj1 %p\n", obj1);
-  printf("obj2 %p\n", obj2);
-  printf("obj2 %p\n", obj3);
-
-  GC_RETURN();
-}
-
-void snap_many(Snap* snap) {
-  int i;
-  SArr* arr = NULL;
-
-  GC_BEGIN(GC_OBJ(arr));
-
-  arr = snap_arr_new(snap, 4000);
-
-  for (i = 0; i < 4000; ++i) {
-    SSymStr* str;
-
-    GC_BEGIN(GC_OBJ(str));
-
-    char buf[1024];
-    sprintf(buf, "%d "
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567"
-                 "0123456701234567012345670123456701234567012345670123456701234567", i);
-    str = snap_str_new(snap, buf);
-
-    arr->data[i] = create_obj(str);
-
-    GC_END();
+  gc->free_spans = gc->spans;
+  gc->free_spans[page_count - 1].next = NULL;
+  for (size_t i = 0; i < page_count - 1; ++i) {
+    gc->free_spans[i].next = &gc->free_spans[i + 1];
   }
 
-  gc_collect(&snap->gc);
+  gc_calc_size_classes(gc);
 
-  GC_RETURN();
+  uintptr_t available = (uintptr_t)gc->pages - (uintptr_t)gc->mem;
+
+  size_t index = gc_size_to_index(available);
+  Bin* bin = &gc->bins[index];
+  bin->free = gc_alloc_span(gc, gc->pages, bin->free, available >> LG_PAGE_SIZE, index);
+
+  printf("%zu %f\n", available, (double)available / heap_size);
+  printf("num spans lost to metadata %zu of %zu\n", metadata_size / PAGE_SIZE, heap_size / PAGE_SIZE);
+
+  return true;
 }
-#endif
 
-typedef struct {
-  GCObject gc_obj;
-  size_t len;
-  char data[1];
-} SSymStr;
+static size_t gc_size_to_index(size_t size) {
+  assert(size > 0 && "Size cannot be zero");
 
-GC_MATURE_DECL(SSymStr);
+  // Each group doubles so this rounds up over the size of the group
+  // ((size * 2) - 1) then takes the floor of that.
+  size_t group_index_max = (size_t)(__builtin_clzll((size << 1) - 1) ^ 63);
+
+  size_t group_index = group_index_max < LG_NUM_GROUPS + LG_MIN_SIZE
+                       ? 0
+                       : group_index_max - (LG_NUM_GROUPS + LG_MIN_SIZE);
+
+  size_t lg_delta = (group_index_max < LG_NUM_GROUPS + LG_MIN_SIZE + 1)
+                    ? LG_MIN_SIZE
+                    : group_index_max - LG_NUM_GROUPS - 1;
+
+  size_t mask = ZU(-1) << lg_delta;
+  size_t group_mask = (ZU(1) << LG_NUM_GROUPS) - 1;
+  size_t index_in_group = (((size - 1) & mask) >> lg_delta) & group_mask;
+
+  return (group_index << LG_NUM_GROUPS) + index_in_group;
+}
+
+static Span* gc_find_free_span(GC* gc, size_t num_pages) {
+  Span* span = NULL;
+  size_t first_index =  gc_size_to_index(num_pages * PAGE_SIZE);
+  for (size_t i = first_index; i < NUM_SIZE_CLASSES; ++i) {
+    Bin* bin = &gc->bins[i];
+    if (!bin->is_slab && bin->free && bin->free->num_pages >= num_pages) {
+      span = bin->free;
+      bin->free = bin->free->next;
+    }
+  }
+  return span;
+}
+
+static Span* gc_split_free_span(GC* gc, Span* span, size_t dest_index, Bin* dest_bin) {
+  if (span->num_pages > dest_bin->num_pages) {
+    Span* first_span = gc_alloc_span(gc, span->ptr, NULL, dest_bin->num_pages, dest_index);
+
+    if (dest_bin->is_slab) {
+      first_span->next = dest_bin->free;
+      dest_bin->free = first_span;
+    } else {
+      first_span->next = dest_bin->full;
+      dest_bin->full = first_span;
+    }
+
+    size_t remaining_pages = span->num_pages - dest_bin->num_pages;
+    size_t index = gc_size_to_index(remaining_pages);
+    Bin* bin = &gc->bins[index];
+    void* ptr = (void*)((uintptr_t)span->ptr + (dest_bin->num_pages << LG_PAGE_SIZE));
+    bin->free = gc_alloc_span(gc, ptr,  bin->free, remaining_pages, index);
+
+    gc_dalloc_span(gc, span);
+
+    return first_span;
+  }
+  return span;
+}
+
+void* gc_alloc(GC* gc, size_t size) {
+  size_t index = gc_size_to_index(size);
+  Bin* bin = &gc->bins[index];
+  Span* span = bin->free;
+
+  if (span == NULL) {
+    span = gc_find_free_span(gc, bin->num_pages);
+    if (span == NULL) {
+      // No free span. On no!
+      return NULL;
+    }
+    span = gc_split_free_span(gc, span, index, bin);
+  }
+
+  if (bin->is_slab) {
+    // TODO: Find first empty entry in slab
+    return NULL;
+  } else {
+    return span->ptr;
+  }
+}
+
+char* to_binary(size_t value, char* buf) {
+  for (int b = 0; b < 64; ++b) {
+      buf[b] = ((value >> (63 - b)) & 0x1) ? '1' : '0';
+  }
+  buf[64] = '\0';
+  return buf;
+}
+
+void print_binary(size_t value) {
+  char buf[65];
+  printf("%s\n", to_binary(value, buf));
+}
 
 int main() {
-  //Snap snap;
-  //snap_init(&snap);
-
-  //snap_many(&snap);
-
-  //snap_destroy(&snap);
-
-  //snap_dummy1(&snap);
-  //snap_dummy3(&snap);
-
-  //printf("%zx\n", (~((size_t)0)) - 1);
-  //GCObjectMature m;
-  //printf("sizeof(SArr) = %zu\n", sizeof(SArr));
-  //printf("offsetof(SArr, type) = %zu\n", offsetof(SArr, type));
-  //printf("offsetof(SArr, len) = %zu\n", offsetof(SArr, len));
-
-  printf("sizeof(GCObject) = %zu\n", sizeof(GCObject));
-  printf("sizeof(GCObjectRelocated) = %zu\n", sizeof(GCObjectRelocated));
-  printf("sizeof(SSymStr) = %zu\n", sizeof(SSymStr));
-  printf("sizeof(SSymStrMature) = %zu\n", sizeof(GC_MATURE(SSymStr)));
-
-  //printf("sizeof(GCObjectMature) = %zu\n", sizeof(GCObjectMature));
-  //printf("offsetof(GCObjectMature, next) = %zu\n", offsetof(GCObjectMature, next));
-  //printf("offsetof(GCObjectMature, obj) = %zu\n", offsetof(GCObjectMature, obj));
+  GC gc;
+  gc_init(&gc, 160 * 1024 * 1024);
+  void* m = gc_alloc(&gc, 16);
+  gc_dalloc(&gc, m, 16);
 }
