@@ -32,7 +32,7 @@ static inline uintptr_t round_to_alignment(uintptr_t value, uintptr_t alignment)
 }
 
 typedef struct Span_ {
-  struct Span_* next;
+  MList list;
   void* ptr;
   union {
     struct {
@@ -44,7 +44,7 @@ typedef struct Span_ {
     };
   };
   size_t num_pages;
-  uint16_t size_index;
+  size_t size_index;
   bool is_free;
 } Span;
 
@@ -57,8 +57,8 @@ static size_t gc_page_all_metadata_size(size_t page_count) {
 }
 
 typedef struct {
-  Span* free;
-  Span* full;
+  MList free;
+  MList full;
   size_t num_pages;
   bool is_slab;
 } Bin;
@@ -66,7 +66,7 @@ typedef struct {
 typedef struct {
   Bin bins[NUM_SIZE_CLASSES];
   Span* huge;
-  Span* free_spans;
+  MList free_spans;
   Span** page_span_map;
   Span* spans;
   void* pages;
@@ -89,7 +89,8 @@ static size_t gc_calc_num_pages(size_t size) {
 void gc_bin_init(Bin* bin, bool is_slab, size_t num_pages) {
   bin->is_slab = is_slab;
   bin->num_pages = num_pages;
-  bin->free = bin->free = NULL;
+  mlist_init(&bin->free);
+  mlist_init(&bin->full);
 }
 
 void gc_calc_size_classes(GC* gc) {
@@ -138,11 +139,11 @@ static size_t gc_ptr_to_page_index(GC* gc, void* ptr) {
   return ((uintptr_t)ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
 }
 
-static Span* gc_alloc_span(GC* gc, void* ptr, Span* next, size_t num_pages, size_t size_index, bool is_free) {
-  assert(gc->free_spans != NULL && "A span should alway be available");
+static Span* gc_alloc_span(GC* gc, void* ptr, MList* list, size_t size_index, size_t num_pages, bool is_free) {
+  assert(!mlist_is_empty(&gc->free_spans) && "A span should alway be available");
 
-  Span* span = gc->free_spans;
-  gc->free_spans = span->next;
+  Span* span = mlist_entry(Span, gc->free_spans.next, list);
+  mlist_pop_front(&gc->free_spans);
 
   // Mark first and last pages in the mapping
   size_t page_index = gc_ptr_to_page_index(gc, ptr);
@@ -150,19 +151,20 @@ static Span* gc_alloc_span(GC* gc, void* ptr, Span* next, size_t num_pages, size
   gc->page_span_map[page_index + num_pages - 1] = span;
 
   span->ptr = ptr;
-  span->next = next;
   span->num_pages = num_pages;
   span->size_index = size_index;
   span->is_free = is_free;
+
+  if (list) {
+    mlist_prepend(list, &span->list);
+  }
 
   return span;
 }
 
 static void gc_dalloc_span(GC* gc, Span* span) {
-  span->next = gc->free_spans;
-  gc->free_spans = span;
+  mlist_prepend(&gc->free_spans, &span->list);
 }
-
 
 static void gc_dalloc(GC* gc, void* ptr, size_t size) {
   size_t index = gc_size_to_index(size);
@@ -172,51 +174,51 @@ static void gc_dalloc(GC* gc, void* ptr, size_t size) {
     // Check to see if slab is empty
     // If empty then move to first non-slab bin of the correct page size
   } else {
-    // FIXME: Deal with removing from the "full" list!!!
-
     size_t page_index = gc_ptr_to_page_index(gc, ptr);
     Span* span = gc->page_span_map[page_index];
     uintptr_t next_page_index = page_index + span->num_pages;
-    bool is_merged = false;
+
+    mlist_remove(&span->list); // Remove from full list
+    span->is_free = true;
 
     if (page_index >= 1) {
       Span* prev_span = gc->page_span_map[page_index - 1];
       if (prev_span && prev_span->is_free) {
-        is_merged = true;
-
         size_t merged_num_pages = prev_span->num_pages + span->num_pages;
         size_t merged_index = gc_size_to_index(merged_num_pages << LG_PAGE_SIZE);
         Bin* merged_bin = &gc->bins[merged_index];
-        Span* merged_span = gc_alloc_span(gc, prev_span->ptr, merged_bin->free, merged_num_pages, merged_index, true);
-        merged_bin->free = merged_span;
+
+        span->ptr = prev_span->ptr;
+        span->num_pages =  merged_num_pages;
+        span->size_index = merged_index;
+        mlist_prepend(&merged_bin->free, &span->list);
+
         // Clear middle mappings. That is the end of the previous and the beginning of the current.
         gc->page_span_map[page_index - 1] = NULL;
         gc->page_span_map[page_index] = NULL;
-        gc_dalloc_span(gc, span);
-        // Update span for the next check
-        span = merged_span;
+
+        gc_dalloc_span(gc, prev_span);
       }
     }
 
     if (next_page_index < gc->page_count - 1) {
       Span* next_span = gc->page_span_map[next_page_index];
       if (next_span && next_span->is_free) {
-        is_merged = true;
         size_t merged_num_pages = span->num_pages + next_span->num_pages;
         size_t merged_index = gc_size_to_index(merged_num_pages << LG_PAGE_SIZE);
         Bin* merged_bin = &gc->bins[merged_index];
-        merged_bin->free = gc_alloc_span(gc, span->ptr, merged_bin->free, merged_num_pages, merged_index, true);
+
+        // Updating the span's ptr isn't needed because it's the first span.
+        span->num_pages = merged_num_pages;
+        span->size_index = merged_index;
+        mlist_prepend(&merged_bin->free, &span->list);
+
         // Clear middle mappings. That is the end of the current and the beginning of the next.
         gc->page_span_map[next_page_index - 1] = NULL;
         gc->page_span_map[next_page_index] = NULL;
-        gc_dalloc_span(gc, span);
-      }
-    }
 
-    if (!is_merged) {
-      span->is_free = true;
-      span->next = bin->free;
-      bin->free = span;
+        gc_dalloc_span(gc, next_span);
+      }
     }
   }
 }
@@ -233,24 +235,22 @@ bool gc_init(GC* gc, size_t heap_size) {
   }
   gc->page_span_map = (Span**)gc->mem;
   gc->spans = (Span*)((uintptr_t)gc->mem + gc_page_span_map_metadata_size(page_count));
-  gc->pages = (void*)(round_to_alignment((uintptr_t)gc->mem + metadata_size + PAGE_SIZE / 2, PAGE_SIZE));
+  gc->pages = (void*)((uintptr_t)gc->mem + round_to_alignment(metadata_size + PAGE_SIZE / 2, PAGE_SIZE));
   gc->page_count = page_count;
 
-  gc->free_spans = gc->spans;
-  gc->free_spans[page_count - 1].next = NULL;
-  for (size_t i = 0; i < page_count - 1; ++i) {
-    gc->free_spans[i].next = &gc->free_spans[i + 1];
+  mlist_init(&gc->free_spans);
+  for (size_t i = 0; i < page_count; ++i) {
+    mlist_prepend(&gc->free_spans, &gc->spans[i].list);
   }
 
   gc_calc_size_classes(gc);
 
-  uintptr_t available = (uintptr_t)gc->pages - (uintptr_t)gc->mem;
+  uintptr_t available =  heap_size - ((uintptr_t)gc->pages - (uintptr_t)gc->mem);
 
   size_t index = gc_size_to_index(available);
-  Bin* bin = &gc->bins[index];
-  bin->free = gc_alloc_span(gc, gc->pages, bin->free, available >> LG_PAGE_SIZE, index, true);
+  gc_alloc_span(gc, gc->pages, &gc->bins[index].free, index, available >> LG_PAGE_SIZE, true);
 
-  printf("%zu %f\n", available, (double)available / heap_size);
+  printf("%f%% lost to metadata\n", (1.0 - (double)available / heap_size) * 100.0);
   printf("num spans lost to metadata %zu of %zu\n", metadata_size / PAGE_SIZE, heap_size / PAGE_SIZE);
 
   return true;
@@ -279,36 +279,30 @@ static size_t gc_size_to_index(size_t size) {
 }
 
 static Span* gc_find_free_span(GC* gc, size_t num_pages) {
-  Span* span = NULL;
   size_t first_index =  gc_size_to_index(num_pages * PAGE_SIZE);
   for (size_t i = first_index; i < NUM_SIZE_CLASSES; ++i) {
     Bin* bin = &gc->bins[i];
-    if (!bin->is_slab && bin->free && bin->free->num_pages >= num_pages) {
-      span = bin->free;
-      bin->free = bin->free->next;
-      break;
+    if (!bin->is_slab && !mlist_is_empty(&bin->free)) {
+      Span* span = mlist_entry(Span, bin->free.next, list);
+      if (span->num_pages >= num_pages) {
+        mlist_pop_front(&bin->free);
+        return span;
+      }
     }
   }
-  return span;
+  return NULL;
 }
 
 static Span* gc_split_free_span(GC* gc, Span* span, size_t dest_index, Bin* dest_bin) {
   if (span->num_pages > dest_bin->num_pages) {
-    Span* dest_span = gc_alloc_span(gc, span->ptr, NULL, dest_bin->num_pages, dest_index, false);
-
-    if (dest_bin->is_slab) {
-      dest_span->next = dest_bin->free;
-      dest_bin->free = dest_span;
-    } else {
-      dest_span->next = dest_bin->full;
-      dest_bin->full = dest_span;
-    }
+    MList* dest_list =  dest_bin->is_slab ? &dest_bin->free : &dest_bin->full;
+    Span* dest_span = gc_alloc_span(gc, span->ptr, dest_list, dest_index, dest_bin->num_pages, false);
 
     size_t remaining_pages = span->num_pages - dest_bin->num_pages;
     size_t index = gc_size_to_index(remaining_pages << LG_PAGE_SIZE);
     Bin* bin = &gc->bins[index];
     void* ptr = (void*)((uintptr_t)span->ptr + (dest_bin->num_pages << LG_PAGE_SIZE));
-    bin->free = gc_alloc_span(gc, ptr,  bin->free, remaining_pages, index, true);
+    gc_alloc_span(gc, ptr,  &bin->free, index, remaining_pages, true);
     gc_dalloc_span(gc, span);
 
     return dest_span;
@@ -319,9 +313,9 @@ static Span* gc_split_free_span(GC* gc, Span* span, size_t dest_index, Bin* dest
 void* gc_alloc(GC* gc, size_t size) {
   size_t index = gc_size_to_index(size);
   Bin* bin = &gc->bins[index];
-  Span* span = bin->free;
+  Span* span = NULL;
 
-  if (span == NULL) {
+  if (mlist_is_empty(&bin->free)) {
     span = gc_find_free_span(gc, bin->num_pages);
     if (span == NULL) {
       // No free span. On no!
@@ -353,7 +347,7 @@ void print_binary(size_t value) {
 
 int main() {
   GC gc;
-  gc_init(&gc, 160 * 1024 * 1024);
+  gc_init(&gc, 1 * 1024 * 1024);
   void* m1 = gc_alloc(&gc, 4096);
   void* m2 = gc_alloc(&gc, 4096);
   gc_dalloc(&gc, m1, 4096);

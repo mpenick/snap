@@ -158,14 +158,17 @@ typedef struct MList_ {
 } MList;
 
 #define mlist_entry(type, ptr, member)                                         \
-  ((type *)(((char *)ptr) - (uintptr_t) & ((type *)0)->member))
+  ((type *)(((uintptr_t)ptr) - (uintptr_t) & ((type *)0)->member))
 
 #define mlist_foreach(list)                                                    \
   for (pos = (list)->next; pos != (list); pos = pos->next)
 
-#define mlist_is_empty(list) (list)->next == (list);
+#define mlist_is_empty(list) ((list)->next == (list))
+
+#define mlist_pop_front(list) mlist_remove((list)->next)
 
 static inline void mlist_init(MList *list) { list->next = list->prev = list; }
+
 
 static inline void mlist_copy(MList *src, MList *dst) {
   src->next->prev = dst;
