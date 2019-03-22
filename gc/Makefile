@@ -1,4 +1,4 @@
-CFLAGS=-g -O0 -std=gnu11
+CFLAGS=-g -O0 -Wall -Werror -std=gnu11
 
 all: gc
 
