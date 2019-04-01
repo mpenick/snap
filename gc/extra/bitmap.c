@@ -32,7 +32,7 @@ size_t bitmap_alloc_size(size_t num_bits) {
 }
 
 void bitmap_init(Bitmap* bitmap, size_t num_bits) {
-  memset(bitmap, 0, num_bits / 8);
+  memset(bitmap, 0xFF, num_bits / 8);
 }
 
 void bitmap_set(Bitmap* bitmap, size_t bit) {

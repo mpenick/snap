@@ -1,9 +1,17 @@
-CFLAGS=-g -O0 -Wall -Werror -std=gnu11
+UNITY_CLAGS=
+CFLAGS=-g -O0 -Wno-unused-function -Wall -Werror -std=gnu11
 
-all: gc
+all: test_bitmap test_alloc
 
-gc: gc.o
-	gcc -o gc gc.o
+test_bitmap: CFLAGS+=-Ivendor/Unity/src
+test_bitmap: test_bitmap.o gc.o vendor/Unity/src/unity.o
+	gcc -o test_bitmap test_bitmap.o gc.o vendor/Unity/src/unity.o
+
+test_alloc: CFLAGS+=-Ivendor/Unity/src
+test_alloc: test_alloc.o gc.o vendor/Unity/src/unity.o
+	gcc -o test_alloc test_alloc.o gc.o vendor/Unity/src/unity.o
+
+gc.o: gc.h mstructs.h
 
 clean:
-	rm -f gc gc.o
+	rm -f gc test_bitmap *.o

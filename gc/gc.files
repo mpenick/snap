@@ -1,2 +1,10 @@
+extra/bitmap.c
+extra/semispace_gc.c
+extra/semispace_gc.h
+gc.c
+gc.h
 mstructs.h
 gc.c
+mstructs.h
+test_alloc.c
+test_bitmap.c

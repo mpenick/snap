@@ -1,138 +1,130 @@
 #ifndef SNAP_GC_H_H
 #define SNAP_GC_H_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-typedef enum {
-  GC_YOUNG_GEN = 0,
-  GC_MATURE_GEN = 0xF
-} GCGen;
+#include "mstructs.h"
 
-typedef enum {
-  GC_WHITE,
-  GC_GRAY,
-  GC_BLACK
-} GCColor;
+#define ZU(x) ((size_t)x)
+
+#define LG_NUM_GROUPS 2
+#define LG_QUANTUM 4
+#define LG_MIN_SIZE LG_QUANTUM
+#define LG_VADDR_SIZE 48
+#define LG_PAGE_SIZE 12
+
+#define NUM_GROUPS (ZU(1) << LG_NUM_GROUPS)
+#define PAGE_SIZE (ZU(1) << LG_PAGE_SIZE)
+#define NUM_SIZE_CLASSES (NUM_GROUPS * (LG_VADDR_SIZE + LG_PAGE_SIZE - LG_QUANTUM - 1))
+
+#define MAX_SLAB_ENTRIES (PAGE_SIZE >> LG_MIN_SIZE)
+
+typedef unsigned long Bitmap;
+
+// FIXME
+#ifdef __x86_64__
+#define BITMAP_WORD_NUM_BITS 64
+#define LG_BITMAP_WORD_NUM_BITS 6
+#else
+#define BITMAP_WORD_NUM_BITS 32
+#define LG_BITMAP_WORD_NUM_BITS 5
+#endif
+
+#define BITMAP_WORD_NUM_BITS_MASK (BITMAP_WORD_NUM_BITS - 1)
+
+#define SLAB_BITMAP_NUM_WORDS (MAX_SLAB_ENTRIES >> LG_BITMAP_WORD_NUM_BITS)
+
+typedef struct Span_ {
+  MList list;
+  void* ptr;
+  union {
+    struct {
+      Bitmap small_alloced[SLAB_BITMAP_NUM_WORDS];
+      Bitmap small_marked[SLAB_BITMAP_NUM_WORDS];
+    };
+    struct {
+      bool large_marked;
+    };
+  };
+  size_t num_pages;
+  uint8_t size_index;
+  uint16_t slab_entry_count;
+  bool is_free;
+} Span;
 
 typedef struct {
-  uint8_t mark : 2;
-  uint8_t is_container : 1;
-  uint8_t gen : 4;
-  uint8_t reserved : 1;
-} GCFlags;
+  MList free;
+  MList full;
+  size_t num_pages;
+  size_t size;
+  uint16_t num_slab_entries;
+  bool is_slab;
+} Bin;
 
 typedef struct {
-  uint8_t type;
-  GCFlags flags;
-  uint16_t size;
-} GCObject;
-
-typedef struct {
-  GCObject gc_obj;
-  void* location;
-} GCObjectRelocated;
-
-typedef struct GCObjectMature_ {
-  struct GCObjectMature_* next;
-  struct GCObjectMature_* gray_next;
-  GCObjectRelocated obj;
-} GCObjectMature;
-
-typedef struct GCStack_ {
-  struct GCStack_* next;
-  GCObject*** objs;
-  size_t count;
-} GCStack;
-
-typedef struct GCSemiSpace_ {
-  uintptr_t pos;
-  uintptr_t end;
-  struct GCSemiSpace_* next;
-  GCObjectRelocated begin[1];
-} GCSemiSpace;
-
-typedef struct GC_ GC;
-
-typedef void (*GCMarkChildren)(GC*, GCObject*);
-typedef size_t (*GCSlowSize)(GCObject*);
-
-typedef void* (*GCMalloc)(size_t);
-typedef void (*GCFree)(void*);
-
-typedef struct GC_ {
-  GCSemiSpace* to_space;
-  GCSemiSpace* from_space;
-  GCObjectMature* mature_all;
-  GCObjectMature* mature_gray;
-  size_t semi_chuck_size;
-  size_t semi_max_allocated;
-  size_t semi_too_large;
-  size_t allocated;
-  GCMalloc malloc;
-  GCFree free;
-  GCMarkChildren mark_children;
-  GCSlowSize slow_size;
-  GCStack* roots;
+  Bin bins[NUM_SIZE_CLASSES];
+  Span* huge;
+  MList free_spans;
+  Span** span_map;
+  Span* spans;
+  void* pages;
+  size_t page_count;
+  void* mem;
 } GC;
 
-void gc_init(GC* gc,
-             GCMarkChildren mark_children,
-             GCSlowSize slow_size);
-void gc_destroy(GC* gc);
-
-GCObject* gc_new(GC* gc, uint8_t type, size_t size);
-GCObject* gc_new_container(GC* gc, uint8_t type, size_t size);
-
-void gc_mark(GC* gc, GCObject** ptr);
-void gc_collect(GC* gc);
-
-#define gc_is_mature(obj) \
-  ((obj)->flags.gen == GC_MATURE_GEN)
-
-#define gc_is_young(obj) \
-  ((obj)->flags.gen < GC_MATURE_GEN)
-
-#define gc_is_gray(obj) \
-  ((obj)->flags.mark == GC_GRAY)
-
-inline void gc_barrier(GC* gc, GCObject* obj, GCObject* container) {
-  if (gc_is_young(obj) &&
-      gc_is_mature(container) && !gc_is_gray(container)) {
-    // TODO: Calculate GCObjectMature
-    //void* ptr = container;
-    //((GCObjectMature*)ptr)->gray_next = gc->mature_gray;
-    //gc->mature_gray = ((GCObjectMature*)ptr);
+static inline char* to_binary(size_t value, char* buf) {
+  for (int b = 0; b < 64; ++b) {
+      buf[b] = ((value >> (63 - b)) & 0x1) ? '1' : '0';
   }
+  buf[64] = '\0';
+  return buf;
 }
 
-#define GC_MATURE(type) type##Mature
+size_t bitmap_alloc_size(size_t num_bits);
+void bitmap_init(Bitmap* bitmap, size_t num_bits);
 
-#define GC_MATURE_DECL(type) \
-typedef struct {               \
-  GCObjectMature gc_mature;    \
-  type obj;                    \
-} GC_MATURE(type)              \
+static inline void bitmap_set(Bitmap* bitmap, size_t index) {
+  size_t i = index >> LG_BITMAP_WORD_NUM_BITS;
+  bitmap[i] ^= (((Bitmap)0x1) << (index & BITMAP_WORD_NUM_BITS_MASK));
+}
 
-#define GC_BEGIN(...) \
-  GCStack stack__; \
-  GCObject** objs__[] = { __VA_ARGS__ }; \
-  stack__.next = (GETGC())->roots; \
-  (GETGC())->roots = &stack__; \
-  stack__.objs = objs__; \
-  stack__.count = sizeof(objs__) / sizeof(GCObject**)
+static inline void bitmap_unset(Bitmap* bitmap, size_t index) {
+  size_t i = index >> LG_BITMAP_WORD_NUM_BITS;
+  bitmap[i] |= (((Bitmap)0x1) << (index & BITMAP_WORD_NUM_BITS_MASK));
+}
 
-#define GC_OBJ(obj) ((GCObject**)(obj = NULL, &(obj)))
+static inline bool bitmap_is_set(Bitmap* bitmap, size_t index) {
+  size_t i = index >> LG_BITMAP_WORD_NUM_BITS;
+  return !(bitmap[i] & ((Bitmap)0x1) << (index & BITMAP_WORD_NUM_BITS_MASK));
+}
 
-#define GC_END() \
-  (GETGC())->roots = stack__.next
+static inline bool bitmap_is_full(Bitmap* bitmap, size_t num_bits) {
+  size_t num_words = (num_bits + (BITMAP_WORD_NUM_BITS - 1)) >> LG_BITMAP_WORD_NUM_BITS;
+  for (size_t i = 0; i < num_words; ++i) {
+    if (bitmap[i] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
 
-#define GC_RETURN_WITH(value) \
-  GC_END(); \
-  return (value);
+static inline size_t bitmap_sfu(Bitmap* bitmap) {
+  size_t i = 0;
+  size_t bit;
+  while ((bit = (size_t)__builtin_ffsl(bitmap[i])) == 0) {
+    i++;
+  }
+  size_t index = (i << LG_BITMAP_WORD_NUM_BITS) + (bit - 1);
+  bitmap_set(bitmap, index);
+  return index;
+}
 
-#define GC_RETURN() \
-  GC_END(); \
-  return;
+bool gc_init(GC* gc, size_t heap_size);
+
+void* gc_alloc(GC* gc, size_t size);
+
+void gc_dalloc(GC* gc, void* ptr);
 
 #endif // SNAP_GC_H_H
