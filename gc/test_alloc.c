@@ -59,6 +59,29 @@ void test_alloc_slab_pages() {
   TEST_ASSERT_EQUAL_INT(1, count_spans(&gc));
 }
 
+void test_alloc_multiple_page_slab() {
+  GC gc;
+  gc_init(&gc, GC_HEAP_SIZE);
+
+  // Fill up the first page
+  void* m[PAGE_SIZE / 48];
+  for (size_t i = 0; i < PAGE_SIZE / 48; ++i) {
+    m[i] = gc_alloc(&gc, 48);
+  }
+  TEST_ASSERT_EQUAL_INT(2, count_spans(&gc));
+
+  void* n = gc_alloc(&gc, 48); // Allocate on the middle page
+  TEST_ASSERT_EQUAL_INT(2, count_spans(&gc));
+
+  gc_dalloc(&gc, n); // Deallocate on the middle page
+  TEST_ASSERT_EQUAL_INT(2, count_spans(&gc));
+
+  for (size_t i = 0; i < PAGE_SIZE / 48; ++i) {
+    gc_dalloc(&gc, m[i]);
+  }
+  TEST_ASSERT_EQUAL_INT(1, count_spans(&gc));
+}
+
 void test_alloc_multiples_of_page_size() {
   GC gc;
   gc_init(&gc, GC_HEAP_SIZE);
@@ -75,6 +98,7 @@ int main() {
   UNITY_BEGIN();
   RUN_TEST(test_alloc_full_pages);
   RUN_TEST(test_alloc_slab_pages);
+  RUN_TEST(test_alloc_multiple_page_slab);
   RUN_TEST(test_alloc_multiples_of_page_size);
   UNITY_END();
 }

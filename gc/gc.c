@@ -92,8 +92,12 @@ static void gc_calc_size_classes(GC* gc) {
 static uint8_t gc_size_to_index(size_t size);
 
 static size_t gc_ptr_to_page_index(GC* gc, void* ptr) {
+  assert((uintptr_t)ptr >= (uintptr_t)gc->pages &&
+         (uintptr_t)ptr < (uintptr_t)gc->pages + PAGE_SIZE * gc->page_count &&
+         "Pointer is not own by this allocator");
   uintptr_t page_ptr = (uintptr_t)ptr& (ZU(-1) << LG_PAGE_SIZE);
-  return (page_ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
+  size_t page_index = (page_ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
+  return page_index;
 }
 
 static void gc_mark_span_map(GC*gc, Span* span) {
@@ -291,8 +295,7 @@ static void gc_dalloc_span(GC* gc, Span* span, size_t page_index) {
   }
 
   if (is_coalesced) {
-    // Fix mappings.
-    gc_mark_span_map(gc, span);
+    gc_mark_span_map(gc, span); // Fix mappings
   } else {
     size_t index = gc_size_to_index(span->num_pages << LG_PAGE_SIZE);
     Bin* bin = &gc->bins[index];
@@ -304,6 +307,11 @@ static void gc_dalloc_span(GC* gc, Span* span, size_t page_index) {
 void gc_dalloc(GC* gc, void* ptr) {
   size_t page_index = gc_ptr_to_page_index(gc, ptr);
   Span* span = gc->span_map[page_index];
+  while (span == NULL && page_index > 0) {
+    span = gc->span_map[--page_index];
+  }
+  assert((span != NULL || page_index > 0) &&
+         "Span mapping doesn't have a proper lower bound");
   Bin* bin = &gc->bins[span->size_index];
 
   if (bin->is_slab) {
