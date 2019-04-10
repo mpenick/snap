@@ -125,6 +125,8 @@ bool gc_init(GC* gc, size_t heap_size);
 
 void* gc_alloc(GC* gc, size_t size);
 
+void gc_mark(GC* gc, void* ptr);
+
 void gc_dalloc(GC* gc, void* ptr);
 
 #endif // SNAP_GC_H_H

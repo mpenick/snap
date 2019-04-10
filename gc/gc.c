@@ -91,6 +91,18 @@ static void gc_calc_size_classes(GC* gc) {
 
 static uint8_t gc_size_to_index(size_t size);
 
+static size_t gc_ptr_to_bit_index(Span* span, Bin* bin, void* ptr) {
+  size_t bit_index = ((uintptr_t)ptr - (uintptr_t)span->ptr) / bin->size;
+  assert(span->slab_entry_count > 0 && "Object not allocated in the span");
+  assert(bit_index < bin->num_slab_entries && "Invalid slab entry");
+  return bit_index;
+}
+
+static Bin* gc_span_to_bin(GC* gc, Span* span) {
+  assert(span && span->size_index < NUM_SIZE_CLASSES && "Invalid span");
+  return &gc->bins[span->size_index];
+}
+
 static size_t gc_ptr_to_page_index(GC* gc, void* ptr) {
   assert((uintptr_t)ptr >= (uintptr_t)gc->pages &&
          (uintptr_t)ptr < (uintptr_t)gc->pages + PAGE_SIZE * gc->page_count &&
@@ -98,6 +110,20 @@ static size_t gc_ptr_to_page_index(GC* gc, void* ptr) {
   uintptr_t page_ptr = (uintptr_t)ptr& (ZU(-1) << LG_PAGE_SIZE);
   size_t page_index = (page_ptr - (uintptr_t)gc->pages) >> LG_PAGE_SIZE;
   return page_index;
+}
+
+static Span* gc_page_index_to_span(GC* gc, size_t page_index) {
+  Span* span = gc->span_map[page_index];
+  Span* orig = span;
+  while (span == NULL && page_index > 0) {
+    span = gc->span_map[--page_index];
+  }
+  assert((span != NULL || page_index > 0) &&
+         "Span mapping doesn't have a proper lower bound");
+  (void)orig;
+  assert((orig != NULL || gc_span_to_bin(gc, orig)->is_slab) &&
+         "Page indexes that point to the middle of spans should belong to a slab");
+  return span;
 }
 
 static void gc_mark_span_map(GC*gc, Span* span) {
@@ -128,10 +154,12 @@ static void gc_free_span(GC* gc, Span* span) {
 }
 
 bool gc_init(GC* gc, size_t heap_size) {
+  if (heap_size < 2 * PAGE_SIZE) {
+    return false;
+  }
+
   size_t page_count = (heap_size - gc_page_all_metadata_size(heap_size / PAGE_SIZE)) / PAGE_SIZE;
   size_t metadata_size = gc_page_all_metadata_size(page_count);
-
-  // TODO: Minimum heap size
 
   gc->mem = mmap(NULL, heap_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
   if (gc->mem == NULL) {
@@ -304,20 +332,25 @@ static void gc_dalloc_span(GC* gc, Span* span, size_t page_index) {
   }
 }
 
+void gc_mark(GC* gc, void* ptr) {
+  size_t page_index = gc_ptr_to_page_index(gc, ptr);
+  Span* span = gc_page_index_to_span(gc, page_index);
+  Bin* bin = gc_span_to_bin(gc, span);
+  if (bin->is_slab) {
+    size_t bit_index = gc_ptr_to_bit_index(span, bin, ptr);
+    bitmap_set(span->small_marked, bit_index);
+  } else {
+    span->large_marked = true;
+  }
+}
+
 void gc_dalloc(GC* gc, void* ptr) {
   size_t page_index = gc_ptr_to_page_index(gc, ptr);
-  Span* span = gc->span_map[page_index];
-  while (span == NULL && page_index > 0) {
-    span = gc->span_map[--page_index];
-  }
-  assert((span != NULL || page_index > 0) &&
-         "Span mapping doesn't have a proper lower bound");
-  Bin* bin = &gc->bins[span->size_index];
+  Span* span = gc_page_index_to_span(gc, page_index);
+  Bin* bin = gc_span_to_bin(gc, span);
 
   if (bin->is_slab) {
-    size_t bit_index = ((uintptr_t)ptr - (uintptr_t)span->ptr) / bin->size;
-    assert(span->slab_entry_count > 0 && "Object not allocated in the span");
-    assert(bit_index < bin->num_slab_entries && "Invalid slab entry");
+    size_t bit_index = gc_ptr_to_bit_index(span, bin, ptr);
     bool was_full = span->slab_entry_count == bin->num_slab_entries;
     bitmap_unset(span->small_alloced, bit_index);
     if (--span->slab_entry_count == 0) {
