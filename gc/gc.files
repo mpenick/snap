@@ -8,3 +8,5 @@ gc.c
 mstructs.h
 test_alloc.c
 test_bitmap.c
+test_header.c
+test_tagged.c

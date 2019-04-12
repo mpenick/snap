@@ -7,11 +7,11 @@
 size_t count_spans(GC* gc) {
   size_t count = 1;
 
-  Span* curr = gc->span_map[0];
+  GCSpan* curr = gc->span_map[0];
   TEST_ASSERT_NOT_NULL(curr);
 
   for (size_t i = 1; i < gc->page_count; ++i) {
-    Span* span = gc->span_map[i];
+    GCSpan* span = gc->span_map[i];
     if (span && curr != span) {
       curr = span;
       count++;
@@ -94,8 +94,14 @@ void test_alloc_multiples_of_page_size() {
   }
 }
 
+void test_alloc_min_heap() {
+  GC gc;
+  gc_init(&gc, 2 * PAGE_SIZE);
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_alloc_min_heap);
   RUN_TEST(test_alloc_full_pages);
   RUN_TEST(test_alloc_slab_pages);
   RUN_TEST(test_alloc_multiple_page_slab);

@@ -1,6 +1,7 @@
 #ifndef SNAP_GC_H_H
 #define SNAP_GC_H_H
 
+#include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -36,7 +37,135 @@ typedef unsigned long Bitmap;
 
 #define SLAB_BITMAP_NUM_WORDS (MAX_SLAB_ENTRIES >> LG_BITMAP_WORD_NUM_BITS)
 
-typedef struct Span_ {
+struct GCObject_;
+typedef struct GCObject_ GCObject;
+
+// GC Header:
+// TTTT TTTT TTTT TTTT NNNN NNNN NNNN NNNN NNNN NNNN NNNN NNNN NNNN NNNN NNNN NNCG
+// G = is gray?
+// C = is container?
+// N = num entries
+// T = type
+typedef uint64_t GCHeader;
+
+#define GC_HEADER_BITS 64
+#define GC_HEADER_IS_GRAY_BITS 1
+#define GC_HEADER_IS_CONTAINER_BITS 1
+#define GC_HEADER_TYPE_BITS 16
+#define GC_HEADER_NUM_ENTRIES_BITS (64 - GC_HEADER_IS_GRAY_BITS - GC_HEADER_IS_CONTAINER_BITS - GC_HEADER_TYPE_BITS)
+
+#define GC_HEADER_MASK(size) (((GCHeader)1 << size) - 1)
+#define GC_HEADER_IS_GRAY_MASK GC_HEADER_MASK(GC_HEADER_IS_GRAY_BITS)
+#define GC_HEADER_IS_CONTAINER_MASK GC_HEADER_MASK(GC_HEADER_IS_CONTAINER_BITS)
+#define GC_HEADER_TYPE_MASK GC_HEADER_MASK(GC_HEADER_TYPE_BITS)
+#define GC_HEADER_NUM_ENTRIES_MASK GC_HEADER_MASK(GC_HEADER_NUM_ENTRIES_BITS)
+
+#define GC_HEADER_NUM_ENTRIES_SHIFT (GC_HEADER_IS_GRAY_BITS + GC_HEADER_IS_CONTAINER_BITS)
+#define GC_HEADER_TYPE_SHIFT (GC_HEADER_NUM_ENTRIES_SHIFT + GC_HEADER_NUM_ENTRIES_BITS)
+
+static inline bool gc_header_is_gray(GCHeader header) {
+  return header & (GCHeader)1;
+}
+
+static inline GCHeader gc_header_set_is_gray(GCHeader header, bool is_gray) {
+  if (is_gray) {
+    header |= (GCHeader)1;
+  } else {
+    header &= ~GC_HEADER_IS_GRAY_MASK;
+  }
+  return header;
+}
+
+static inline bool gc_header_is_container(GCHeader header) {
+  return (header >> GC_HEADER_IS_GRAY_BITS) & (GCHeader)1;
+}
+
+static inline GCHeader gc_header_set_is_container(GCHeader header, bool is_container) {
+  if (is_container) {
+    header |= (((GCHeader)(is_container ? 1 : 0)) << GC_HEADER_IS_GRAY_BITS);
+  } else {
+    GCHeader mask = ~(GC_HEADER_IS_CONTAINER_MASK << GC_HEADER_IS_GRAY_BITS);
+    header &= mask;
+  }
+  return header;
+}
+
+static inline uint64_t gc_header_num_entries(GCHeader header) {
+  return (header >> GC_HEADER_NUM_ENTRIES_SHIFT) & GC_HEADER_NUM_ENTRIES_MASK;
+}
+
+static inline GCHeader gc_header_set_num_entries(GCHeader header, uint64_t num_entries) {
+  GCHeader mask = ~(GC_HEADER_NUM_ENTRIES_MASK << GC_HEADER_NUM_ENTRIES_SHIFT);
+  header &= mask;
+  header |= ((((GCHeader)num_entries) & GC_HEADER_NUM_ENTRIES_MASK) << GC_HEADER_NUM_ENTRIES_SHIFT);
+  return header;
+}
+
+static inline uint16_t gc_header_type(GCHeader header) {
+  return (header >> GC_HEADER_TYPE_SHIFT) & GC_HEADER_TYPE_MASK;
+}
+
+static inline GCHeader gc_header_set_type(GCHeader header, uint16_t type) {
+  GCHeader mask = ~(GC_HEADER_TYPE_MASK << GC_HEADER_TYPE_SHIFT);
+  header &= mask;
+  header |= ((((GCHeader)type) & GC_HEADER_TYPE_MASK) << GC_HEADER_TYPE_SHIFT);
+  return header;
+}
+
+typedef uintptr_t GCTagged;
+
+static inline bool gc_tagged_is_object(GCTagged tagged) {
+  return tagged & (GCTagged)1;
+}
+
+static inline bool gc_tagged_is_integer(GCTagged tagged) {
+  return !gc_tagged_is_object(tagged);
+}
+
+static inline GCTagged gc_tagged_from_integer(int64_t value) {
+  union {
+    GCTagged t;
+    int64_t i;
+  } u = { .i = value };
+  u.t <<= 1;
+  return u.t;
+}
+
+static inline int64_t gc_tagged_to_integer(GCTagged tagged) {
+  assert(gc_tagged_is_integer(tagged));
+  union {
+    GCTagged t;
+    int64_t i;
+  } u = { .t = tagged };
+  u.t >>= 1;
+  return (int64_t)(u.i >> 1);
+}
+
+static inline GCTagged gc_tagged_add(GCTagged a, GCTagged b) {
+  return a + b;
+}
+
+static inline GCTagged gc_tagged_sub(GCTagged a, GCTagged b) {
+  return a - b;
+}
+
+static inline GCObject* gc_tagged_to_object(GCTagged tagged) {
+  assert(gc_tagged_is_object(tagged));
+  return (GCObject*)(tagged & ~(GCTagged)1);
+}
+
+struct GCObject_ {
+  GCHeader header;
+};
+
+typedef struct {
+  GCObject base;
+  GCTagged entries[1];
+} GCContainer;
+
+typedef GCContainer GCVector;
+
+typedef struct {
   MList list;
   void* ptr;
   union {
@@ -52,7 +181,7 @@ typedef struct Span_ {
   uint8_t size_index;
   uint16_t slab_entry_count;
   bool is_free;
-} Span;
+} GCSpan;
 
 typedef struct {
   MList free;
@@ -61,14 +190,14 @@ typedef struct {
   size_t size;
   uint16_t num_slab_entries;
   bool is_slab;
-} Bin;
+} GCBin;
 
 typedef struct {
-  Bin bins[NUM_SIZE_CLASSES];
-  Span* huge;
+  GCBin bins[NUM_SIZE_CLASSES];
+  GCSpan* huge;
   MList free_spans;
-  Span** span_map;
-  Span* spans;
+  GCSpan** span_map;
+  GCSpan* spans;
   void* pages;
   size_t page_count;
   void* mem;
@@ -125,8 +254,47 @@ bool gc_init(GC* gc, size_t heap_size);
 
 void* gc_alloc(GC* gc, size_t size);
 
-void gc_mark(GC* gc, void* ptr);
-
 void gc_dalloc(GC* gc, void* ptr);
+
+void gc_collect(GC* gc);
+
+GCObject* gc_object_new(GC* gc, size_t size);
+
+GCContainer* gc_container_new(GC* gc, size_t num_entries);
+
+/*
+GCVector* gc_vector_new(GC* gc, size_t capacity) {
+  GCVector* vec = gc_container_new(gc, 2);
+  vec->entries[0] = gc_container_new(gc, capacity);
+  vec->entries[1] =
+}
+
+void gc_vector_check_size(GC* gc, GCVector* vec) {
+  size_t capacity = gc_header_num_entries(vec->items->base.header);
+  if (vec->size >= capacity) {
+    // TODO: Anchor vec
+    GCContainer* items = gc_container_new(gc, (capacity < 4096) ? 4 : 2);
+    memcpy(items->entries, vec->items->entries, capacity * sizeof(GCTagged));
+  }
+}
+
+void gc_vector_push(GC* gc, GCVector* vec, GCTagged tagged) {
+  gc_vector_check_size(gc, vec);
+  vec->items->entries[vec->size++] = tagged;
+}
+
+GCTagged gc_vector_back(GCVector* vec) {
+  return vec->items->entries[vec->size - 1];
+}
+
+void gc_vector_pop(GCVector* vec) {
+  if (vec->size > 0) {
+    vec->size--;
+  }
+}
+
+#define gvec_foreach(v, item)                                                  \
+  for (item = (v)->vitems; item < (v)->vitems + (v)->vsize; ++item)
+*/
 
 #endif // SNAP_GC_H_H
