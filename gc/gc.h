@@ -90,11 +90,11 @@ static inline GCHeader gc_header_set_is_container(GCHeader header, bool is_conta
   return header;
 }
 
-static inline uint64_t gc_header_num_entries(GCHeader header) {
+static inline int64_t gc_header_num_entries(GCHeader header) {
   return (header >> GC_HEADER_NUM_ENTRIES_SHIFT) & GC_HEADER_NUM_ENTRIES_MASK;
 }
 
-static inline GCHeader gc_header_set_num_entries(GCHeader header, uint64_t num_entries) {
+static inline GCHeader gc_header_set_num_entries(GCHeader header, int64_t num_entries) {
   GCHeader mask = ~(GC_HEADER_NUM_ENTRIES_MASK << GC_HEADER_NUM_ENTRIES_SHIFT);
   header &= mask;
   header |= ((((GCHeader)num_entries) & GC_HEADER_NUM_ENTRIES_MASK) << GC_HEADER_NUM_ENTRIES_SHIFT);
@@ -122,36 +122,30 @@ static inline bool gc_tagged_is_integer(GCTagged tagged) {
   return !gc_tagged_is_object(tagged);
 }
 
+static inline GCTagged gc_tagged_from_object(void* obj) {
+  return ((GCTagged)obj << 1) | 1;
+}
+
 static inline GCTagged gc_tagged_from_integer(int64_t value) {
-  union {
-    GCTagged t;
-    int64_t i;
-  } u = { .i = value };
-  u.t <<= 1;
-  return u.t;
+  return ((GCTagged)value << 1) | 0;
 }
 
 static inline int64_t gc_tagged_to_integer(GCTagged tagged) {
   assert(gc_tagged_is_integer(tagged));
-  union {
-    GCTagged t;
-    int64_t i;
-  } u = { .t = tagged };
-  u.t >>= 1;
-  return (int64_t)(u.i >> 1);
+  return ((int64_t)((intptr_t)(tagged))) >> 1;
 }
 
 static inline GCTagged gc_tagged_add(GCTagged a, GCTagged b) {
-  return a + b;
+  return gc_tagged_from_integer(gc_tagged_to_integer(a) + gc_tagged_to_integer(b));
 }
 
 static inline GCTagged gc_tagged_sub(GCTagged a, GCTagged b) {
-  return a - b;
+  return gc_tagged_from_integer(gc_tagged_to_integer(a) - gc_tagged_to_integer(b));
 }
 
-static inline GCObject* gc_tagged_to_object(GCTagged tagged) {
+static inline void* gc_tagged_to_object(GCTagged tagged) {
   assert(gc_tagged_is_object(tagged));
-  return (GCObject*)(tagged & ~(GCTagged)1);
+  return (void*)(tagged >> 1);
 }
 
 struct GCObject_ {
@@ -265,36 +259,50 @@ GCContainer* gc_container_new(GC* gc, size_t num_entries);
 /*
 GCVector* gc_vector_new(GC* gc, size_t capacity) {
   GCVector* vec = gc_container_new(gc, 2);
-  vec->entries[0] = gc_container_new(gc, capacity);
-  vec->entries[1] =
+  vec->entries[0] = gc_tagged_from_object(gc_container_new(gc, capacity));
+  vec->entries[1] = gc_tagged_from_integer(0);
+  return vec;
 }
 
 void gc_vector_check_size(GC* gc, GCVector* vec) {
-  size_t capacity = gc_header_num_entries(vec->items->base.header);
-  if (vec->size >= capacity) {
+  GCContainer* items = (GCContainer*)gc_tagged_to_object(vec->entries[0]);
+  size_t capacity = gc_header_num_entries(items->base.header);
+  size_t size = gc_tagged_to_integer(vec->entries[1]);
+  if (size >= capacity) {
     // TODO: Anchor vec
-    GCContainer* items = gc_container_new(gc, (capacity < 4096) ? 4 : 2);
-    memcpy(items->entries, vec->items->entries, capacity * sizeof(GCTagged));
+    GCContainer* new_items = gc_container_new(gc, (capacity < 4096) ? 4 : 2);
+    memcpy(new_items->entries, items, capacity * sizeof(GCTagged));
+    vec->entries[0] = gc_tagged_from_object(new_items);
   }
 }
 
 void gc_vector_push(GC* gc, GCVector* vec, GCTagged tagged) {
-  gc_vector_check_size(gc, vec);
-  vec->items->entries[vec->size++] = tagged;
+  GCContainer* items = (GCContainer*)gc_tagged_to_object(vec->entries[0]);
+  size_t capacity = gc_header_num_entries(items->base.header);
+  size_t size = gc_tagged_to_integer(vec->entries[1]);
+  if (size >= capacity) {
+    // TODO: Anchor vec
+    GCContainer* new_items = gc_container_new(gc, (capacity < 4096) ? 4 : 2);
+    memcpy(new_items->entries, items, capacity * sizeof(GCTagged));
+    vec->entries[0] = gc_tagged_from_object(new_items);
+  }
+  size++;
+  items->entries[size] = tagged;
+  vec->entries[1] = gc_tagged_from_integer(size);
 }
 
 GCTagged gc_vector_back(GCVector* vec) {
-  return vec->items->entries[vec->size - 1];
+  GCContainer* items = (GCContainer*)gc_tagged_to_object(vec->entries[0]);
+  size_t size = gc_tagged_to_integer(vec->entries[1]);
+  return items->entries[size - 1];
 }
 
 void gc_vector_pop(GCVector* vec) {
-  if (vec->size > 0) {
-    vec->size--;
+  size_t size = gc_tagged_to_integer(vec->entries[1]);
+  if (size > 0) {
+    vec->entries[1] = gc_tagged_from_integer(size - 1);
   }
 }
-
-#define gvec_foreach(v, item)                                                  \
-  for (item = (v)->vitems; item < (v)->vitems + (v)->vsize; ++item)
 */
 
 #endif // SNAP_GC_H_H

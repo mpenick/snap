@@ -1,5 +1,5 @@
 UNITY_CLAGS=
-CFLAGS=-g -O0 -Wno-unused-function -Wall -Werror -std=gnu11
+CFLAGS=-g -O0 -Wall -Werror -Wno-unused-function -std=gnu11
 
 all: test_bitmap test_alloc test_header test_tagged
 
