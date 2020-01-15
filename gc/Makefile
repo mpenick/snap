@@ -1,7 +1,7 @@
 UNITY_CLAGS=
 CFLAGS=-g -O0 -Wall -Werror -Wno-unused-function -std=gnu11
 
-all: test_bitmap test_alloc test_header test_tagged
+all: test_bitmap test_alloc test_header test_tagged test_s2i
 
 test_bitmap: CFLAGS+=-Ivendor/Unity/src
 test_bitmap: gc.h test_bitmap.o gc.o vendor/Unity/src/unity.o
@@ -18,6 +18,10 @@ test_header: gc.h test_header.o gc.o vendor/Unity/src/unity.o
 test_tagged: CFLAGS+=-Ivendor/Unity/src
 test_tagged: gc.h test_tagged.o gc.o vendor/Unity/src/unity.o
 	gcc -o test_tagged test_tagged.o gc.o vendor/Unity/src/unity.o
+
+test_s2i: CFLAGS+=-Ivendor/Unity/src
+test_s2i: gc.h test_s2i.o gc.o vendor/Unity/src/unity.o
+	gcc -o test_s2i test_s2i.o gc.o vendor/Unity/src/unity.o
 
 gc.o: gc.h mstructs.h
 

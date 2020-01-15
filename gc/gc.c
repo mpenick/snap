@@ -366,6 +366,9 @@ void gc_dalloc(GC* gc, void* ptr) {
   }
 }
 
+void gc_collect(GC* gc) {
+}
+
 static void gc_mark_ptr(GC* gc, void* ptr) {
   size_t page_index = gc_ptr_to_page_index(gc, ptr);
   GCSpan* span = gc_page_index_to_span(gc, page_index);

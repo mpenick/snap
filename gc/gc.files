@@ -4,6 +4,7 @@ mstructs.h
 test_alloc.c
 test_bitmap.c
 test_bitmap.c
+test_s2i.c
 test_tagged.c
 vendor/Unity/test/tests/testunity.c
 vendor/Unity/test/tests/testparameterized.c

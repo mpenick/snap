@@ -114,20 +114,16 @@ static inline GCHeader gc_header_set_type(GCHeader header, uint16_t type) {
 
 typedef uintptr_t GCTagged;
 
-static inline bool gc_tagged_is_object(GCTagged tagged) {
+static inline bool gc_tagged_is_integer(GCTagged tagged) {
   return tagged & (GCTagged)1;
 }
 
-static inline bool gc_tagged_is_integer(GCTagged tagged) {
-  return !gc_tagged_is_object(tagged);
-}
-
-static inline GCTagged gc_tagged_from_object(void* obj) {
-  return ((GCTagged)obj << 1) | 1;
+static inline bool gc_tagged_is_object(GCTagged tagged) {
+  return !gc_tagged_is_integer(tagged);
 }
 
 static inline GCTagged gc_tagged_from_integer(int64_t value) {
-  return ((GCTagged)value << 1) | 0;
+  return ((GCTagged)value << 1) | 1;
 }
 
 static inline int64_t gc_tagged_to_integer(GCTagged tagged) {
@@ -145,7 +141,7 @@ static inline GCTagged gc_tagged_sub(GCTagged a, GCTagged b) {
 
 static inline void* gc_tagged_to_object(GCTagged tagged) {
   assert(gc_tagged_is_object(tagged));
-  return (void*)(tagged >> 1);
+  return (void*)tagged;
 }
 
 struct GCObject_ {
@@ -157,7 +153,6 @@ typedef struct {
   GCTagged entries[1];
 } GCContainer;
 
-typedef GCContainer GCVector;
 
 typedef struct {
   MList list;
@@ -187,6 +182,11 @@ typedef struct {
 } GCBin;
 
 typedef struct {
+  GCObject* objects;
+  size_t size;
+} GCRoot;
+
+typedef struct {
   GCBin bins[NUM_SIZE_CLASSES];
   GCSpan* huge;
   MList free_spans;
@@ -195,6 +195,9 @@ typedef struct {
   void* pages;
   size_t page_count;
   void* mem;
+  GCObject* gray_stack;
+  size_t gray_capacity;
+  size_t gray_size;
 } GC;
 
 static inline char* to_binary(size_t value, char* buf) {
@@ -257,6 +260,8 @@ GCObject* gc_object_new(GC* gc, size_t size);
 GCContainer* gc_container_new(GC* gc, size_t num_entries);
 
 /*
+typedef GCContainer GCVector;
+
 GCVector* gc_vector_new(GC* gc, size_t capacity) {
   GCVector* vec = gc_container_new(gc, 2);
   vec->entries[0] = gc_tagged_from_object(gc_container_new(gc, capacity));
