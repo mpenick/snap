@@ -1,0 +1,33 @@
+; recur stores each new value into its variable as soon as it's computed,
+; unless a later argument reads that variable (then it's stored at the end),
+; and arithmetic results are stored straight into locals. These check that
+; nothing is overwritten too early: swaps and rotations, values that read
+; their own variable, set!, closures created in a loop body (which turn early
+; stores off) and nested loops.
+(def swap (fn [a b n] (if (= n 0) (- (* a 10) b) (recur b a (- n 1)))))
+(println "swap:" (swap 1 2 3) (swap 1 2 4))
+(def rot (fn [a b c n] (if (= n 0) (+ (* a 100) (* b 10) c) (recur b c a (- n 1)))))
+(println "rot:" (rot 1 2 3 1))
+(def fib (fn [a b n] (if (= n 0) a (recur b (+ a b) (- n 1)))))
+(println "fib:" (fib 0 1 50))
+(def selfset (fn [x] (set! x (and true x)) x))
+(println "set and:" (selfset 5))
+(def selfset2 (fn [x] (set! x (if (< x 3) (+ x 10) x)) x))
+(println "set if:" (selfset2 1) (selfset2 7))
+(println "and/or:" (and 1 2) (and false 2) (or false 3) (or nil false) (and) (or))
+(println "chain:" (< 1 2 3) (< 1 3 2) (<= 1 1 2) (= 2 2 2))
+(def mk (fn [n] (loop [[i 0] [acc '()]] (if (< i n) (recur (+ i 1) (fn [] (+ i (if (= acc '()) 0 (acc))))) acc))))
+(println "closures:" ((mk 4)))
+(def nested (fn [x] (let [[y (+ x 1)]] (let [[z (* y 2)]] (+ x y z)))))
+(println "let:" (nested 3))
+(def args3 (fn [a b c] (- a b c)))
+(println "call:" (args3 10 (args3 5 1 1) 2) (args3 (args3 9 1 1) (args3 3 1 1) 0))
+(def inner (fn [] (def q 5) (def r (+ q 1)) (* q r)))
+(println "def:" (inner))
+(println "not:" (not false) (not nil) (not 0))
+(def cnt (fn [] (let [[n 0]] (fn [] (set! n (+ n 1)) n))))
+(def c (cnt))
+(c) (c)
+(println "counter:" (c))
+(println "mixed:" (+ 1 2.5) (- 10 0.5 1) (* 2 3 4) (% 17 5))
+(println "outer recur:" (loop [[s 0] [i 0]] (if (< i 3) (recur (loop [[j 0] [t s]] (if (< j 3) (recur (+ j 1) (+ t i)) t)) (+ i 1)) s)))

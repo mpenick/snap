@@ -75,13 +75,20 @@ enum {
 #define INST_ARG(inst) ((int32_t)(inst) >> 8)
 
 // Binary ops (ADD..EQUALS) can take their operands directly from a local or a
-// constant. The arg holds two signed 12-bit operands, left in the high half:
-// 0 is the stack, n > 0 is local n - 1 and n < 0 is constant -n - 1.
+// constant, and arithmetic ops can store their result in a local. The arg
+// holds an unsigned 8-bit destination then two signed 8-bit operands:
+//   | dest:8 | left:8 | right:8 | op:8 |
+// An operand of 0 is the stack, n > 0 is local n - 1 and n < 0 is constant
+// -n - 1. A destination of 0 pushes and n > 0 stores in local n - 1.
 #define is_binary_op(op) ((op) >= ADD && (op) <= EQUALS)
-#define OPERAND_LEFT(arg) ((arg) >> 12)
-#define OPERAND_RIGHT(arg) ((int32_t)((uint32_t)(arg) << 20) >> 20)
-#define OPERANDS(left, right) ((int)(((uint32_t)(left) << 12) | ((uint32_t)(right) & 0xFFF)))
-#define MAX_OPERAND 2047
+#define is_arith_op(op) ((op) >= ADD && (op) <= MOD)
+#define OPERAND_DEST(inst) ((inst) >> 24)
+#define OPERAND_LEFT(inst) ((int8_t)((inst) >> 16))
+#define OPERAND_RIGHT(inst) ((int8_t)((inst) >> 8))
+#define OPERANDS(dest, left, right) \
+  ((int)(((uint32_t)(dest) << 16) | (((uint32_t)(left) & 0xFF) << 8) | ((uint32_t)(right) & 0xFF)))
+#define MAX_OPERAND 127
+#define MAX_DEST 255
 
 static const char* opcode_name(int op) {
   switch (op) {
@@ -661,27 +668,37 @@ static void close_upvals(Snap* snap, SValue* level) {
 
 // Right operand first: when both come from the stack it's on top
 #define binary_operands() \
-  b = OPERAND_RIGHT(arg) ? operand(OPERAND_RIGHT(arg)) : --stack; \
-  a = OPERAND_LEFT(arg) ? operand(OPERAND_LEFT(arg)) : --stack;
+  b = OPERAND_RIGHT(inst) ? operand(OPERAND_RIGHT(inst)) : --stack; \
+  a = OPERAND_LEFT(inst) ? operand(OPERAND_LEFT(inst)) : --stack;
 
-// Floats are allocated, so a float result is pushed by saving the frame,
+// Floats are allocated, so a float result is stored by saving the frame,
 // calling this and reloading the frame. Keeping the VM's registers live across
 // the call instead would spill them in every handler.
-static void push_float(Snap* snap, SnapFloat f) {
+static void store_float(Snap* snap, SnapFloat f, int dest) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
   SValue val = create_float(snap, f);
-  *mvec_back(&snap->frames).stack_top++ = val;
+  if (dest) {
+    frame->stack_base[dest - 1] = val;
+  } else {
+    *frame->stack_top++ = val;
+  }
 }
 
-// Pushes (a op b). Int ops work on the tagged words directly. Mixed int/float
-// operands promote to float.
+// Pushes (a op b), or stores it in a local. Int ops work on the tagged words
+// directly. Mixed int/float operands promote to float.
 #define arith_op(iop, fop) \
   if (is_int_p(a) && is_int_p(b)) { \
-    (stack++)->bits = iop(a->bits, b->bits); \
+    uint64_t result = iop(a->bits, b->bits); \
+    if (OPERAND_DEST(inst)) { \
+      locals[OPERAND_DEST(inst) - 1].bits = result; \
+    } else { \
+      (stack++)->bits = result; \
+    } \
   } else if (is_num_p(a) && is_num_p(b)) { \
     SnapFloat f = fop(num_p(a), num_p(b)); \
     frame->pc = pc; \
     frame->stack_top = stack; \
-    push_float(snap, f); \
+    store_float(snap, f, OPERAND_DEST(inst)); \
     goto new_frame; \
   } else { \
     RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
@@ -1261,12 +1278,16 @@ static int take_operand(SnapFnState* fs) {
   return operand;
 }
 
+static int emit_binary_operands(SnapFnState* fs, int op, int left, int right) {
+  adjust_stack(fs, 1 - (left == 0) - (right == 0)); // Pops stack operands, pushes the result
+  *mvec_push(&fs->insts, SnapInst) = INST(op, OPERANDS(0, left, right));
+  return pc(fs) - 1;
+}
+
 static int emit_binary(SnapFnState* fs, int op) {
   int right = take_operand(fs);
   int left = right ? take_operand(fs) : 0; // Only adjacent if right was a load too
-  adjust_stack(fs, 1 - (left == 0) - (right == 0)); // Pops stack operands, pushes the result
-  *mvec_push(&fs->insts, SnapInst) = INST(op, OPERANDS(left, right));
-  return pc(fs) - 1;
+  return emit_binary_operands(fs, op, left, right);
 }
 
 static int emit(SnapFnState* fs, int op, int arg) {
@@ -1285,6 +1306,15 @@ static int emit(SnapFnState* fs, int op, int arg) {
     }
     if (op == RETURN && last == CLOSE_UPVALS) {
       fs->insts.vsize--; // RETURN closes all of the frame's upvalues anyway
+    }
+    // Arithmetic stores its result in the local itself
+    if (op == STORE_LOCAL && is_arith_op(last) && arg + 1 <= MAX_DEST) {
+      SnapInst* inst = &fs->insts.vitems[pc(fs) - 1];
+      if (OPERAND_DEST(*inst) == 0) {
+        *inst |= (uint32_t)(arg + 1) << 24;
+        adjust_stack(fs, -1);
+        return pc(fs) - 1;
+      }
     }
   }
 
@@ -1459,6 +1489,24 @@ static bool contains_fn(SValue expr) {
   return false;
 }
 
+// Conservative check for a use of a variable (shadowing gives false positives)
+static bool references(SValue expr, SSym* name) {
+  int i;
+  if (is_sym(expr)) {
+    return as_sym(expr) == name;
+  } else if (is_cons(expr)) {
+    SCons* curr;
+    for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) {
+      if (references(curr->first, name)) return true;
+    }
+  } else if (is_arr(expr)) {
+    for (i = 0; i < as_arr(expr)->len; ++i) {
+      if (references(as_arr(expr)->data[i], name)) return true;
+    }
+  }
+  return false;
+}
+
 static int list_length(SCons* list) {
   int count = 0;
   for (; list; list = as_cons(list->rest)) count++;
@@ -1472,6 +1520,36 @@ static SValue nth(SCons* list, int n) {
 }
 
 static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail);
+
+// A local or literal as a binary op operand, emitting nothing; 0 otherwise
+static int direct_operand(Snap* snap, SnapFnState* fs, SValue expr) {
+  int index;
+  switch (snap_type(expr)) {
+    case STYPE_SYM:
+      index = resolve_local(fs, as_sym(expr));
+      return index >= 0 && index + 1 <= MAX_OPERAND ? index + 1 : 0;
+    case STYPE_INT: case STYPE_FLOAT: case STYPE_STR:
+    case STYPE_BOOL: case STYPE_KEY: case STYPE_NIL:
+      index = add_constant(snap, fs, expr);
+      return index + 1 <= MAX_OPERAND + 1 ? -(index + 1) : 0;
+    default:
+      return 0;
+  }
+}
+
+// Compiles (op a b). When b needs code of its own, a local or literal a is
+// read by the op itself rather than pushed before b is evaluated.
+static void compile_binary(Snap* snap, SnapFnState* fs, int op, SValue a, SValue b) {
+  int left = direct_operand(snap, fs, a);
+  if (left && !direct_operand(snap, fs, b)) {
+    compile(snap, fs, b, false);
+    emit_binary_operands(fs, op, left, take_operand(fs));
+  } else {
+    compile(snap, fs, a, false);
+    compile(snap, fs, b, false);
+    emit(fs, op, 0);
+  }
+}
 
 static void compile_body(Snap* snap, SnapFnState* fs, SCons* body, bool tail) {
   SCons* curr;
@@ -1624,6 +1702,7 @@ static bool is_same_local(SnapFnState* fs, SValue arg, int slot) {
 
 static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
   int i;
+  bool stored[MAX_LOCALS];
   SCons* curr;
   SnapLoop* target = fs->loop;
 
@@ -1637,21 +1716,29 @@ static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
     raise(snap, "snap_compile_error", "Invalid number of arguments");
   }
 
+  // Each value is stored as soon as it's computed unless a later argument
+  // reads the variable, otherwise it's left on the stack and stored after.
+  // Captured variables must be closed before they are overwritten, so
+  // everything is stored after then.
   for (i = 0, curr = args; curr != NULL; ++i, curr = as_cons(curr->rest)) {
-    if (!is_same_local(fs, curr->first, target->base + i)) {
-      compile(snap, fs, curr->first, false);
+    int slot = target->base + i;
+    SCons* later;
+    stored[i] = is_same_local(fs, curr->first, slot);
+    if (stored[i]) continue;
+    compile(snap, fs, curr->first, false);
+    stored[i] = !target->closes;
+    for (later = as_cons(curr->rest); stored[i] && later; later = as_cons(later->rest)) {
+      stored[i] = !references(later->first, fs->locals[slot].name);
     }
+    if (stored[i]) emit(fs, STORE_LOCAL, slot);
   }
 
-  // Captured variables must be closed before their slots are overwritten
   if (target->closes) {
     emit(fs, CLOSE_UPVALS, target->base);
   }
 
   for (i = target->count - 1; i >= 0; --i) {
-    if (!is_same_local(fs, nth(args, i), target->base + i)) {
-      emit(fs, STORE_LOCAL, target->base + i);
-    }
+    if (!stored[i]) emit(fs, STORE_LOCAL, target->base + i);
   }
 
   emit_jump_back(snap, fs, target->top);
@@ -1671,9 +1758,9 @@ static void compile_arith(Snap* snap, SnapFnState* fs, int opcode, SCons* args) 
   if (list_length(args) < 2) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
-  compile(snap, fs, args->first, false);
+  compile_binary(snap, fs, opcode, args->first, nth(args, 1));
   // Left fold: (- a b c) is ((a - b) - c)
-  for (curr = as_cons(args->rest); curr != NULL; curr = as_cons(curr->rest)) {
+  for (curr = as_cons(as_cons(args->rest)->rest); curr != NULL; curr = as_cons(curr->rest)) {
     compile(snap, fs, curr->first, false);
     emit(fs, opcode, 0);
   }
@@ -1697,11 +1784,10 @@ static void compile_compare(Snap* snap, SnapFnState* fs, int opcode, SCons* args
   if (count < 2) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
-  compile(snap, fs, args->first, false);
   if (count == 2) {
-    compile(snap, fs, nth(args, 1), false);
-    emit(fs, opcode, 0);
+    compile_binary(snap, fs, opcode, args->first, nth(args, 1));
   } else {
+    compile(snap, fs, args->first, false);
     // (< a b c) is (and (< a b) (< b c)) evaluating each operand once
     compile_compare_rest(snap, fs, opcode, as_cons(args->rest)); // [x result]
     emit(fs, ROT2, 0);
@@ -2018,13 +2104,14 @@ static void print_code(SCode* code, int indent) {
     int arg = INST_ARG(code->insts[i]);
     iprintf(indent, "%6d %-18s", i, opcode_name(op));
     if (is_binary_op(op)) {
-      int operands[2] = { OPERAND_LEFT(arg), OPERAND_RIGHT(arg) };
+      int operands[2] = { OPERAND_LEFT(code->insts[i]), OPERAND_RIGHT(code->insts[i]) };
       int j;
       for (j = 0; j < 2; ++j) {
         if (operands[j] > 0) printf(" L%d", operands[j] - 1);
         else if (operands[j] < 0) printf(" K%d", -operands[j] - 1);
         else printf(" S");
       }
+      if (OPERAND_DEST(code->insts[i])) printf(" -> L%d", OPERAND_DEST(code->insts[i]) - 1);
     }
     switch (op) {
       case LOAD_GLOBAL: case STORE_GLOBAL: case LOAD_CONSTANT:
