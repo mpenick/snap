@@ -90,6 +90,9 @@ Maps are mutable hash maps that keep insertion order.
 Any value can be a key. Vectors and maps are compared by contents, so don't
 change one after using it as a key.
 
+Vectors and maps inside a quoted value, like `'[1 2]`, are read-only. A quoted
+value is a single constant shared by every evaluation, so changing one panics.
+
 ## Errors
 
 There are no exceptions. An error is an ordinary value that's returned and

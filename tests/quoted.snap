@@ -1,0 +1,20 @@
+; vi: filetype=scheme
+
+; A quoted value is one constant shared by every evaluation, so the vectors
+; and maps in it are read-only (see tests/errors/quoted_*.snap). Reading
+; them works as usual.
+
+(def q (fn [] '[1 [2 3] {:a [4]}]))
+(println (q) (count (q)) (nth (nth (q) 1) 0) (get (nth (q) 2) :a))
+(println (= (q) [1 [2 3] {:a [4]}]))
+
+; keys and vals make new vectors, which can be changed
+(def ks (keys '{:a 1 :b 2}))
+(println (push! ks :c))
+
+; Unquoted literals make new values that can be changed
+(def u (fn [] [1 2]))
+(println (push! (u) 3) (u))
+
+; A read-only vector can still be put into a new one
+(println (push! [] '[1 2]))

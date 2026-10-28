@@ -1,0 +1,5 @@
+; vi: filetype=scheme
+
+; Vectors and maps nested in a quoted value are read-only too
+(def v '[a {:k 1}])
+(del! (nth v 1) :k)

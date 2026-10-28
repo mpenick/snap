@@ -98,6 +98,7 @@ typedef struct {
 #define SOBJECT_FIELDS          \
   uint8_t type;                 \
   uint8_t mark;                 \
+  uint8_t read_only; /* Vectors and maps from quote */ \
   struct SObject_* gc_next;
 
 struct SObject_ {

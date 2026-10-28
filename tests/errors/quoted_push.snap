@@ -1,0 +1,4 @@
+; vi: filetype=scheme
+
+(def v '[1 2])
+(push! v 3)

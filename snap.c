@@ -494,6 +494,7 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   obj = (SObject*)malloc(size);
   obj->type = type;
   obj->mark = UNMARKED;
+  obj->read_only = false;
   obj->gc_next = snap->all;
   snap->all = obj;
   snap->num_bytes_alloced += size;
@@ -1664,6 +1665,22 @@ static bool references(SValue expr, SSym* name) {
   return false;
 }
 
+// A quoted value is a single constant shared by every evaluation, so the
+// vectors and maps in it can't be changed
+static void make_read_only(SValue expr) {
+  int i;
+  if (is_cons(expr)) {
+    SCons* curr;
+    for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) make_read_only(curr->first);
+  } else if (is_vec(expr)) {
+    as_obj(expr)->read_only = true;
+    for (i = 0; i < as_vec(expr)->len; ++i) make_read_only(as_vec(expr)->data[i]);
+  } else if (is_map(expr)) {
+    as_obj(expr)->read_only = true;
+    for (i = 0; i < 2 * as_map(expr)->used; ++i) make_read_only(as_map(expr)->entries[i]);
+  }
+}
+
 static int list_length(SCons* list) {
   int count = 0;
   for (; list; list = as_cons(list->rest)) count++;
@@ -2039,6 +2056,7 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
           if (list_length(args) != 1) {
             raise(snap, "snap_compile_error", "Expected a single expression");
           }
+          make_read_only(args->first);
           load_constant(snap, fs, args->first);
           break;
         case TK_RECUR:
@@ -2358,6 +2376,10 @@ static bool arity_error(Snap* snap, SValue* result) {
   return fail(snap, result, "snap_arity_error", "Invalid number of arguments");
 }
 
+static bool read_only_error(Snap* snap, SValue* result) {
+  return fail(snap, result, "snap_type_error", "Can't change a quoted literal");
+}
+
 bool builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
   int i;
   for (i = 0; i < num_args; ++i) {
@@ -2468,11 +2490,13 @@ bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
 // (put! <vec> <index> <val>) or (put! <map> <key> <val>) returns the vector or map
 bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args == 3 && is_map(args[0])) {
+    if (as_obj(args[0])->read_only) return read_only_error(snap, result);
     snap_map_put(snap, as_map(args[0]), args[1], args[2]);
     *result = args[0];
     return true;
   }
   if (!vec_args(snap, args, num_args, 3, result)) return false;
+  if (as_obj(args[0])->read_only) return read_only_error(snap, result);
   as_vec(args[0])->data[as_int(args[1])] = args[2];
   *result = args[0];
   return true;
@@ -2483,6 +2507,7 @@ bool builtin_push(Snap* snap, const SValue* args, int num_args, SValue* result) 
   int i;
   if (num_args < 2) return arity_error(snap, result);
   if (!is_vec(args[0])) return fail(snap, result, "snap_type_error", "Expected a vector");
+  if (as_obj(args[0])->read_only) return read_only_error(snap, result);
   for (i = 1; i < num_args; ++i) {
     snap_vec_push(snap, as_vec(args[0]), args[i]);
   }
@@ -2495,6 +2520,7 @@ bool builtin_pop(Snap* snap, const SValue* args, int num_args, SValue* result) {
   SVec* vec;
   if (!vec_args(snap, args, num_args, 1, result)) return false;
   vec = as_vec(args[0]);
+  if (vec->read_only) return read_only_error(snap, result);
   if (vec->len == 0) return fail(snap, result, "snap_index_error", "Vector is empty");
   *result = vec->data[--vec->len];
   return true;
@@ -2514,6 +2540,7 @@ bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result) {
 bool builtin_del(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 2) return arity_error(snap, result);
   if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map");
+  if (as_obj(args[0])->read_only) return read_only_error(snap, result);
   snap_map_del(as_map(args[0]), args[1]);
   *result = args[0];
   return true;
