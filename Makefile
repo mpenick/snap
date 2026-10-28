@@ -29,7 +29,7 @@ test: $(TARGET)
 
 # Collect every few bytes under ASan/UBSan to shake out missing GC roots
 stress: snap_lex.h
-	$(CC) -g -O0 -fsanitize=address,undefined -DGC_EVERY_NUM_BYTES=256 -o snap_stress $(SOURCES) $(LDFLAGS)
+	$(CC) -g -O0 -fsanitize=address,undefined -DGC_HEAP_GROWTH=1 -DGC_MIN_STEP=256 -o snap_stress $(SOURCES) $(LDFLAGS)
 	@for f in test.snap closure.snap loop.snap new.snap; do \
 		echo "== $$f"; ./snap_stress $$f > /dev/null || exit 1; \
 	done

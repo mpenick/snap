@@ -10,8 +10,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef GC_EVERY_NUM_BYTES
-#define GC_EVERY_NUM_BYTES 64 * 1024 * 1024
+// After a collection the next one happens once the heap has grown by
+// GC_HEAP_GROWTH times the live size, and by at least GC_MIN_STEP bytes
+#ifndef GC_HEAP_GROWTH
+#define GC_HEAP_GROWTH 2
+#endif
+
+#ifndef GC_MIN_STEP
+#define GC_MIN_STEP (1024 * 1024)
 #endif
 
 #define MAX_ARG ((1 << 23) - 1)
@@ -19,9 +25,8 @@
 #define MAX_UPVALS 256
 
 enum {
-  WHITE,
-  GRAY,
-  BLACK
+  UNMARKED,
+  MARKED
 };
 
 #define OPCODE_MAP(XX) \
@@ -354,12 +359,12 @@ static void gc_free(Snap* snap, SObject* obj) {
 }
 
 static void gc_mark(Snap* snap, SObject* obj) {
-  if (!obj) return;
+  if (!obj || obj->mark == MARKED) return;
+  obj->mark = MARKED;
   switch (obj->type) {
     case STYPE_STR:
     case STYPE_KEY:
-      obj->mark = BLACK;
-      break;
+      break; // No children
     case STYPE_SYM:
     case STYPE_ERR:
     case STYPE_CONS:
@@ -367,11 +372,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_CODE:
     case STYPE_CLOSURE:
     case STYPE_UPVAL:
-      if (obj->mark == WHITE) {
-        obj->mark = GRAY;
-        obj->gc_gray_next = snap->gray;
-        snap->gray = obj;
-      }
+      *mvec_push(&snap->gray, SObject*) = obj;
       break;
     default:
       assert(0 && "Not a GC object");
@@ -466,41 +467,41 @@ static void gc_collect(Snap* snap) {
 
   gc_mark_fn_states(snap);
 
-  while (snap->gray) {
-    SObject* temp = snap->gray;
-    snap->gray = snap->gray->gc_gray_next;
-    gc_mark_children(snap, temp);
+  while (snap->gray.vsize > 0) {
+    gc_mark_children(snap, snap->gray.vitems[--snap->gray.vsize]);
   }
 
   obj = &snap->all;
 
   while (*obj) {
-    if ((*obj)->mark == WHITE) {
+    if ((*obj)->mark == UNMARKED) {
       SObject* temp = *obj;
       *obj = (*obj)->gc_next;
       gc_free(snap, temp);
     } else {
-      (*obj)->mark = WHITE;
+      (*obj)->mark = UNMARKED;
       obj = &(*obj)->gc_next;
     }
+  }
+
+  snap->next_gc = snap->num_bytes_alloced * GC_HEAP_GROWTH;
+  if (snap->next_gc < snap->num_bytes_alloced + GC_MIN_STEP) {
+    snap->next_gc = snap->num_bytes_alloced + GC_MIN_STEP;
   }
 }
 
 static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   SObject* obj;
   assert(size > sizeof(SObject));
-  if (snap->num_bytes_alloced_last_gc > GC_EVERY_NUM_BYTES) {
+  if (snap->num_bytes_alloced + size > snap->next_gc) {
     gc_collect(snap);
-    snap->num_bytes_alloced_last_gc = 0;
   }
   obj = (SObject*)malloc(size);
   obj->type = type;
-  obj->mark = WHITE;
-  obj->gc_gray_next = NULL;
+  obj->mark = UNMARKED;
   obj->gc_next = snap->all;
   snap->all = obj;
   snap->num_bytes_alloced += size;
-  snap->num_bytes_alloced_last_gc += size;
   return obj;
 }
 
@@ -2062,9 +2063,9 @@ void snap_init(Snap* snap) {
   mvec_init(&snap->frames, SnapFrame, 32);
   mvec_init(&snap->anchors, SObject*, 32);
   snap->num_bytes_alloced = 0;
-  snap->num_bytes_alloced_last_gc = 0;
+  snap->next_gc = GC_MIN_STEP;
   snap->all = NULL;
-  snap->gray = NULL;
+  mvec_init(&snap->gray, SObject*, 64);
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
   snap->cause = NULL;
@@ -2086,6 +2087,7 @@ void snap_destroy(Snap* snap) {
   free((void*)snap->stack);
   mvec_destroy(&snap->frames);
   mvec_destroy(&snap->anchors);
+  mvec_destroy(&snap->gray);
   snap_hash_destroy(&snap->symbols);
   snap_hash_destroy(&snap->keywords);
   assert(snap->num_bytes_alloced == 0);

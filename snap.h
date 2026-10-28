@@ -112,8 +112,7 @@ typedef struct {
 #define SOBJECT_FIELDS          \
   uint8_t type;                 \
   uint8_t mark;                 \
-  struct SObject_* gc_next;     \
-  struct SObject_* gc_gray_next;
+  struct SObject_* gc_next;
 
 struct SObject_ {
   SOBJECT_FIELDS
@@ -208,9 +207,9 @@ struct Snap_ {
   struct { MVEC_FIELDS(SnapFrame); } frames;
   struct { MVEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
-  size_t num_bytes_alloced_last_gc;
+  size_t next_gc; // Collect when num_bytes_alloced reaches this
   SObject* all;
-  SObject* gray;
+  struct { MVEC_FIELDS(SObject*); } gray; // Marked objects whose children still need marking
   SUpval* open_upvals;
   struct SnapFnState_* fn_state; // Innermost function being compiled
   SErr* cause;
