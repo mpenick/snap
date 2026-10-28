@@ -73,6 +73,15 @@ enum {
 #define INST_OP(inst) ((inst) & 0xFF)
 #define INST_ARG(inst) ((int32_t)(inst) >> 8)
 
+// Binary ops (ADD..EQUALS) can take their operands directly from a local or a
+// constant. The arg holds two signed 12-bit operands, left in the high half:
+// 0 is the stack, n > 0 is local n - 1 and n < 0 is constant -n - 1.
+#define is_binary_op(op) ((op) >= ADD && (op) <= EQUALS)
+#define OPERAND_LEFT(arg) ((arg) >> 12)
+#define OPERAND_RIGHT(arg) ((int32_t)((uint32_t)(arg) << 20) >> 20)
+#define OPERANDS(left, right) ((int)(((uint32_t)(left) << 12) | ((uint32_t)(right) & 0xFFF)))
+#define MAX_OPERAND 2047
+
 static const char* opcode_name(int op) {
   switch (op) {
 #define XX(opcode) \
@@ -721,27 +730,41 @@ static void close_upvals(Snap* snap, SValue* level) {
 #define is_num_p(v) (is_int_p(v) || is_float_p(v))
 #define num_p(v) (is_int_p(v) ? (SnapFloat)(v)->i : (v)->f)
 
-// Pops b, replaces a with (a op b). Mixed int/float operands promote to float.
+#define operand(n) ((n) > 0 ? &locals[(n) - 1] : &constants[-(n) - 1])
+
+// Right operand first: when both come from the stack it's on top
+#define binary_operands() \
+  b = OPERAND_RIGHT(arg) ? operand(OPERAND_RIGHT(arg)) : --stack; \
+  a = OPERAND_LEFT(arg) ? operand(OPERAND_LEFT(arg)) : --stack;
+
+// Pushes (a op b). Mixed int/float operands promote to float. Results are
+// written straight to the stack: building them in a temporary first stalls
+// the next 16-byte load of the slot (failed store-to-load forwarding).
 #define arith_op(iop, fop) \
-  b = --stack; \
-  a = stack - 1; \
   if (is_int_p(a) && is_int_p(b)) { \
-    *a = create_int(iop(a->i, b->i)); \
+    *stack++ = create_int(iop(a->i, b->i)); \
   } else if (is_num_p(a) && is_num_p(b)) { \
-    *a = create_float(fop(num_p(a), num_p(b))); \
+    *stack++ = create_float(fop(num_p(a), num_p(b))); \
   } else { \
     RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
   }
 
+// A compare followed by JUMP_FALSE (as in every `(if (< ...) ...)`) takes the
+// branch itself rather than pushing a bool for the next instruction
 #define compare_op(op) \
-  b = --stack; \
-  a = stack - 1; \
+  binary_operands() \
   if (is_int_p(a) && is_int_p(b)) { \
-    *a = create_bool(a->i op b->i); \
+    cond = a->i op b->i; \
   } else if (is_num_p(a) && is_num_p(b)) { \
-    *a = create_bool(num_p(a) op num_p(b)); \
+    cond = num_p(a) op num_p(b); \
   } else { \
-    *a = create_bool(snap_compare(a, b) op 0); \
+    cond = snap_compare(a, b) op 0; \
+  } \
+  if (INST_OP(*pc) == JUMP_FALSE) { \
+    arg = INST_ARG(*pc++); \
+    if (!cond) pc += arg; \
+  } else { \
+    *stack++ = create_bool(cond); \
   }
 
 // Integer ops wrap on overflow (done unsigned to avoid undefined behavior)
@@ -758,9 +781,10 @@ static void close_upvals(Snap* snap, SValue* level) {
 #define div_fop(x, y) ((x) / (y))
 #define mod_fop(x, y) fmod(x, y)
 
-#define int_zero_divisor() (is_int_p(stack - 1) && (stack - 1)->i == 0 && \
-                            is_int_p(stack - 2))
+#define int_zero_divisor() (is_int_p(b) && b->i == 0 && is_int_p(a))
 
+// Build with -fno-crossjumping (see Makefile): each handler must keep its own
+// indirect jump so the branch predictor can learn opcode sequences
 #define INDIRECT_DISPATCH 1
 
 #ifdef INDIRECT_DISPATCH
@@ -785,6 +809,7 @@ static SValue exec(Snap* snap) {
   SValue* stack;
   SValue* a, * b;
   SValue temp;
+  bool cond;
   int arg;
 
 #ifdef INDIRECT_DISPATCH
@@ -972,10 +997,11 @@ new_frame:
         *a = create_bool(is_bool_p(a) && !a->b);
         DISPATCH();
       }
-      OP(ADD) { arith_op(add_iop, add_fop) DISPATCH(); }
-      OP(SUB) { arith_op(sub_iop, sub_fop) DISPATCH(); }
-      OP(MUL) { arith_op(mul_iop, mul_fop) DISPATCH(); }
+      OP(ADD) { binary_operands() arith_op(add_iop, add_fop) DISPATCH(); }
+      OP(SUB) { binary_operands() arith_op(sub_iop, sub_fop) DISPATCH(); }
+      OP(MUL) { binary_operands() arith_op(mul_iop, mul_fop) DISPATCH(); }
       OP(DIV) {
+        binary_operands()
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
         }
@@ -983,6 +1009,7 @@ new_frame:
         DISPATCH();
       }
       OP(MOD) {
+        binary_operands()
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
         }
@@ -1263,7 +1290,42 @@ static int last_op(SnapFnState* fs) {
   return pc(fs) > 0 ? (int)INST_OP(fs->insts.vitems[pc(fs) - 1]) : -1;
 }
 
+// If the last instruction loads a local or constant, remove it and return it
+// as a binary op operand, otherwise 0 (the stack)
+static int take_operand(SnapFnState* fs) {
+  int arg, operand;
+  if (fs->last_target == pc(fs) || pc(fs) == 0) return 0;
+  arg = INST_ARG(fs->insts.vitems[pc(fs) - 1]);
+  switch (last_op(fs)) {
+    case LOAD_LOCAL:
+      if (arg + 1 > MAX_OPERAND) return 0;
+      operand = arg + 1;
+      break;
+    case LOAD_CONSTANT:
+      if (arg > MAX_OPERAND) return 0;
+      operand = -(arg + 1);
+      break;
+    default:
+      return 0;
+  }
+  fs->insts.vsize--;
+  adjust_stack(fs, -1);
+  return operand;
+}
+
+static int emit_binary(SnapFnState* fs, int op) {
+  int right = take_operand(fs);
+  int left = right ? take_operand(fs) : 0; // Only adjacent if right was a load too
+  adjust_stack(fs, 1 - (left == 0) - (right == 0)); // Pops stack operands, pushes the result
+  *mvec_push(&fs->insts, SnapInst) = INST(op, OPERANDS(left, right));
+  return pc(fs) - 1;
+}
+
 static int emit(SnapFnState* fs, int op, int arg) {
+  if (is_binary_op(op)) {
+    return emit_binary(fs, op);
+  }
+
   // Peepholes, unless a jump lands between the instructions
   if (fs->last_target != pc(fs)) {
     int last = last_op(fs);
@@ -1286,9 +1348,6 @@ static int emit(SnapFnState* fs, int op, int arg) {
     case STORE_GLOBAL: case STORE_LOCAL: case STORE_CLOSED:
     case POP: case RETURN: case RAISE:
     case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
-    case ADD: case SUB: case MUL: case DIV: case MOD:
-    case LESS_THAN: case LESS_EQUALS: case GREATER_THAN:
-    case GREATER_EQUALS: case EQUALS:
       adjust_stack(fs, -1);
       break;
     case CALL:
@@ -2010,6 +2069,15 @@ static void print_code(SCode* code, int indent) {
     int op = INST_OP(code->insts[i]);
     int arg = INST_ARG(code->insts[i]);
     iprintf(indent, "%6d %-18s", i, opcode_name(op));
+    if (is_binary_op(op)) {
+      int operands[2] = { OPERAND_LEFT(arg), OPERAND_RIGHT(arg) };
+      int j;
+      for (j = 0; j < 2; ++j) {
+        if (operands[j] > 0) printf(" L%d", operands[j] - 1);
+        else if (operands[j] < 0) printf(" K%d", -operands[j] - 1);
+        else printf(" S");
+      }
+    }
     switch (op) {
       case LOAD_GLOBAL: case STORE_GLOBAL: case LOAD_CONSTANT:
         printf(" %-6d ", arg);

@@ -1,5 +1,7 @@
-CFLAGS=-g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
-#CFLAGS=-O3
+#CFLAGS=-g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
+# -fno-crossjumping keeps a separate dispatch jump per opcode in exec() (GCC
+# otherwise merges them, which hurts branch prediction)
+CFLAGS=-O3 -fno-crossjumping
 LDFLAGS=-lm
 
 TARGET=snap
