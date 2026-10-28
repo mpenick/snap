@@ -163,6 +163,27 @@ int snap_hash(const SValue* val) {
       return hash_chars(((SKeyword*)obj)->data, ((SKeyword*)obj)->len);
     case STYPE_TEMPSTR:
       return hash_chars(((STempStr*)obj)->data, ((STempStr*)obj)->len);
+    // The rest match snap_compare(): errors by kind, vectors and maps by contents
+    case STYPE_ERR:
+      return snap_hash(&((SErr*)obj)->err);
+    case STYPE_VEC: {
+      SVec* v = (SVec*)obj;
+      unsigned h = 1;
+      int i;
+      for (i = 0; i < v->len; ++i) h = h * 31 + snap_hash(&v->data[i]);
+      return (int)h;
+    }
+    case STYPE_MAP: {
+      SMap* m = (SMap*)obj;
+      unsigned h = 0;
+      int i;
+      for (i = 0; i < m->used; ++i) {
+        SValue* e = &m->entries[2 * i];
+        // Added, so the order doesn't matter
+        if (e->bits != SV_DELETED) h += (unsigned)snap_hash(e) * 31 ^ snap_hash(e + 1);
+      }
+      return (int)h;
+    }
     default:
       return hash_pointer(obj);
   }
@@ -196,6 +217,22 @@ int snap_compare(const SValue* val1, const SValue* val2) {
         if ((c = snap_compare(&v1->data[i], &v2->data[i])) != 0) return c;
       }
       return compare(v1->len, v2->len);
+    }
+    case STYPE_MAP: {
+      // Equal when they have the same entries, otherwise ordered arbitrarily
+      SMap* m1 = as_map(*val1), * m2 = as_map(*val2);
+      int i;
+      if (m1->len != m2->len) return compare(m1->len, m2->len);
+      for (i = 0; i < m1->used; ++i) {
+        SValue* e = &m1->entries[2 * i];
+        SValue* v2;
+        if (e->bits == SV_DELETED) continue;
+        v2 = snap_map_get(m2, *e);
+        if (!v2 || snap_compare(e + 1, v2) != 0) {
+          return compare((uintptr_t)m1, (uintptr_t)m2);
+        }
+      }
+      return 0;
     }
     default:
       // Everything else, including interned symbols and keywords, by identity
@@ -261,6 +298,8 @@ static size_t code_extra_bytes(SCode* code) {
          code->num_upvals * sizeof(uint32_t);
 }
 
+#define map_bytes(cap) ((size_t)(cap) * 2 * (sizeof(SValue) + sizeof(int32_t)))
+
 static void gc_free(Snap* snap, SObject* obj) {
   switch (obj->type) {
     case STYPE_FLOAT:
@@ -284,6 +323,11 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_VEC:
       snap->num_bytes_alloced -= (sizeof(SVec) + ((SVec*)obj)->cap * sizeof(SValue));
       free(((SVec*)obj)->data);
+      break;
+    case STYPE_MAP:
+      snap->num_bytes_alloced -= sizeof(SMap) + map_bytes(((SMap*)obj)->cap);
+      free(((SMap*)obj)->entries);
+      free(((SMap*)obj)->index);
       break;
     case STYPE_CODE:
       snap->num_bytes_alloced -= sizeof(SCode) + code_extra_bytes((SCode*)obj);
@@ -316,6 +360,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_ERR:
     case STYPE_CONS:
     case STYPE_VEC:
+    case STYPE_MAP:
     case STYPE_CODE:
     case STYPE_CLOSURE:
     case STYPE_UPVAL:
@@ -365,6 +410,9 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       break;
     case STYPE_VEC:
       gc_mark_vals(snap, ((SVec*)obj)->data, ((SVec*)obj)->len);
+      break;
+    case STYPE_MAP:
+      gc_mark_vals(snap, ((SMap*)obj)->entries, 2 * ((SMap*)obj)->used); // Deleted keys aren't objects
       break;
     case STYPE_CODE:
       gc_mark_vals(snap, ((SCode*)obj)->constants, ((SCode*)obj)->num_constants);
@@ -564,6 +612,84 @@ void snap_vec_push(Snap* snap, SVec* vec, SValue val) {
     vec->cap = cap;
   }
   vec->data[vec->len++] = val;
+}
+
+SMap* snap_map_new(Snap* snap) {
+  SMap* m = (SMap*)gc_new(snap, STYPE_MAP, sizeof(SMap));
+  m->len = m->used = m->cap = 0;
+  m->entries = NULL;
+  m->index = NULL;
+  return m;
+}
+
+// Returns the key's entry, or -1. Linear probing; deleted entries keep their
+// index slots so that probing continues past them.
+static int map_find(SMap* map, SValue key) {
+  int i, mask = 2 * map->cap - 1;
+  if (map->cap == 0) return -1;
+  for (i = snap_hash(&key) & mask; map->index[i] >= 0; i = (i + 1) & mask) {
+    SValue* k = &map->entries[2 * map->index[i]];
+    if (k->bits == key.bits || snap_compare(k, &key) == 0) return map->index[i];
+  }
+  return -1;
+}
+
+static void map_index(SMap* map, int entry) {
+  int i, mask = 2 * map->cap - 1;
+  for (i = snap_hash(&map->entries[2 * entry]) & mask; map->index[i] >= 0; i = (i + 1) & mask) {}
+  map->index[i] = entry;
+}
+
+// Drops deleted entries and sizes the map to twice its live entries.
+// Doesn't allocate GC objects, so it never collects.
+static void map_rebuild(Snap* snap, SMap* map) {
+  int i, len = 0, cap = 4;
+  SValue* entries;
+  while (cap < 2 * map->len) cap *= 2;
+  entries = (SValue*)malloc(2 * cap * sizeof(SValue));
+  for (i = 0; i < map->used; ++i) {
+    if (map->entries[2 * i].bits != SV_DELETED) {
+      entries[2 * len] = map->entries[2 * i];
+      entries[2 * len + 1] = map->entries[2 * i + 1];
+      len++;
+    }
+  }
+  free(map->entries);
+  free(map->index);
+  snap->num_bytes_alloced = snap->num_bytes_alloced - map_bytes(map->cap) + map_bytes(cap);
+  map->entries = entries;
+  map->index = (int32_t*)malloc(2 * cap * sizeof(int32_t));
+  memset(map->index, -1, 2 * cap * sizeof(int32_t));
+  map->cap = cap;
+  map->used = len;
+  for (i = 0; i < len; ++i) map_index(map, i);
+}
+
+SValue* snap_map_get(SMap* map, SValue key) {
+  int e = map_find(map, key);
+  return e < 0 ? NULL : &map->entries[2 * e + 1];
+}
+
+// Doesn't allocate GC objects, so it never collects
+void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val) {
+  int e = map_find(map, key);
+  if (e < 0) {
+    if (map->used == map->cap) map_rebuild(snap, map);
+    e = map->used++;
+    map->entries[2 * e] = key;
+    map_index(map, e);
+    map->len++;
+  }
+  map->entries[2 * e + 1] = val;
+}
+
+bool snap_map_del(SMap* map, SValue key) {
+  int e = map_find(map, key);
+  if (e < 0) return false;
+  map->entries[2 * e] = snap_val(SV_DELETED);
+  map->entries[2 * e + 1] = create_nil();
+  map->len--;
+  return true;
 }
 
 SClosure* snap_closure_new(Snap* snap, SCode* code) {
@@ -1077,6 +1203,24 @@ static SValue parse_vec(Snap* snap, SnapLex* lex) {
   return create_obj(vec);
 }
 
+static SValue parse_map(Snap* snap, SnapLex* lex) {
+  int token;
+  SMap* map = (SMap*)snap_anchor(snap, (SObject*)snap_map_new(snap));
+  // parse_expr() raises on EOF, so this always ends at '}'
+  while ((token = snap_lex_next_token(lex)) != '}') {
+    SValue key = parse_expr(snap, lex, token), val;
+    if (is_obj(key)) snap_anchor(snap, as_obj(key));
+    if ((token = snap_lex_next_token(lex)) == '}') {
+      raise(snap, "snap_parse_error", "Map literal needs a value for every key on line %d", lex->line);
+    }
+    val = parse_expr(snap, lex, token);
+    snap_map_put(snap, map, key, val);
+    if (is_obj(key)) snap_release(snap);
+  }
+  snap_release(snap);
+  return create_obj(map);
+}
+
 static SValue parse_quote(Snap* snap, SnapLex* lex) {
   SCons* sexpr = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
   sexpr->first = create_form(TK_QUOTE);
@@ -1103,6 +1247,8 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
       return parse_sexpr(snap, lex);
     case '[':
       return parse_vec(snap, lex);
+    case '{':
+      return parse_map(snap, lex);
     case '\'':
       return parse_quote(snap, lex);
     case TK_INT:
@@ -1488,6 +1634,10 @@ static bool contains_fn(SValue expr) {
     for (i = 0; i < as_vec(expr)->len; ++i) {
       if (contains_fn(as_vec(expr)->data[i])) return true;
     }
+  } else if (is_map(expr)) {
+    for (i = 0; i < 2 * as_map(expr)->used; ++i) {
+      if (contains_fn(as_map(expr)->entries[i])) return true;
+    }
   }
   return false;
 }
@@ -1505,6 +1655,10 @@ static bool references(SValue expr, SSym* name) {
   } else if (is_vec(expr)) {
     for (i = 0; i < as_vec(expr)->len; ++i) {
       if (references(as_vec(expr)->data[i], name)) return true;
+    }
+  } else if (is_map(expr)) {
+    for (i = 0; i < 2 * as_map(expr)->used; ++i) {
+      if (references(as_map(expr)->entries[i], name)) return true;
     }
   }
   return false;
@@ -1757,6 +1911,7 @@ static void compile_panic(Snap* snap, SnapFnState* fs, SCons* args) {
 }
 
 bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_map(Snap* snap, const SValue* args, int num_args, SValue* result);
 
 // Vectors are mutable, so a literal makes a new one each time it's evaluated
 static void compile_vec(Snap* snap, SnapFnState* fs, SVec* vec) {
@@ -1766,6 +1921,18 @@ static void compile_vec(Snap* snap, SnapFnState* fs, SVec* vec) {
   }
   load_constant(snap, fs, create_cfunc(builtin_vector));
   emit(fs, CALL, vec->len);
+}
+
+// Like vectors, a literal makes a new map each time
+static void compile_map(Snap* snap, SnapFnState* fs, SMap* map) {
+  int i;
+  for (i = 0; i < map->used; ++i) {
+    if (map->entries[2 * i].bits == SV_DELETED) continue;
+    compile(snap, fs, map->entries[2 * i], false);
+    compile(snap, fs, map->entries[2 * i + 1], false);
+  }
+  load_constant(snap, fs, create_cfunc(builtin_map));
+  emit(fs, CALL, 2 * map->len);
 }
 
 static void compile_try(Snap* snap, SnapFnState* fs, SCons* args) {
@@ -1939,6 +2106,9 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
     case STYPE_VEC:
       compile_vec(snap, fs, as_vec(expr));
       break;
+    case STYPE_MAP:
+      compile_map(snap, fs, as_map(expr));
+      break;
     case STYPE_CONS:
       if (is_empty(expr)) {
         load_constant(snap, fs, expr);
@@ -2092,6 +2262,21 @@ static void print_val(SValue val) {
       }
       printf("]");
       break;
+    case STYPE_MAP: {
+      SMap* m = as_map(val);
+      bool first = true;
+      printf("{");
+      for (i = 0; i < m->used; ++i) {
+        if (m->entries[2 * i].bits == SV_DELETED) continue;
+        if (!first) printf(" ");
+        first = false;
+        print_val(m->entries[2 * i]);
+        printf(" ");
+        print_val(m->entries[2 * i + 1]);
+      }
+      printf("}");
+      break;
+    }
     case STYPE_CONS:
       printf("(");
       for (cons = as_cons(val); cons != NULL; ) {
@@ -2250,9 +2435,26 @@ static bool vec_args(Snap* snap, const SValue* args, int num_args, int expected,
   return true;
 }
 
+// Builds map literals (see compile_map()) from key/value pairs
+bool builtin_map(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i;
+  SMap* map = snap_map_new(snap);
+  for (i = 0; i < num_args; i += 2) {
+    snap_map_put(snap, map, args[i], args[i + 1]);
+  }
+  *result = create_obj(map);
+  return true;
+}
+
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  if (!vec_args(snap, args, num_args, 1, result)) return false;
-  *result = create_int(as_vec(args[0])->len);
+  if (num_args != 1) return arity_error(snap, result);
+  if (is_vec(args[0])) {
+    *result = create_int(as_vec(args[0])->len);
+  } else if (is_map(args[0])) {
+    *result = create_int(as_map(args[0])->len);
+  } else {
+    return fail(snap, result, "snap_type_error", "Expected a vector or map");
+  }
   return true;
 }
 
@@ -2263,8 +2465,13 @@ bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return true;
 }
 
-// (put! <vec> <index> <val>) returns the vector
+// (put! <vec> <index> <val>) or (put! <map> <key> <val>) returns the vector or map
 bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args == 3 && is_map(args[0])) {
+    snap_map_put(snap, as_map(args[0]), args[1], args[2]);
+    *result = args[0];
+    return true;
+  }
   if (!vec_args(snap, args, num_args, 3, result)) return false;
   as_vec(args[0])->data[as_int(args[1])] = args[2];
   *result = args[0];
@@ -2291,6 +2498,49 @@ bool builtin_pop(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (vec->len == 0) return fail(snap, result, "snap_index_error", "Vector is empty");
   *result = vec->data[--vec->len];
   return true;
+}
+
+// (get <map> <key>) or (get <map> <key> <default>). The default is nil.
+bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SValue* val;
+  if (num_args != 2 && num_args != 3) return arity_error(snap, result);
+  if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map");
+  val = snap_map_get(as_map(args[0]), args[1]);
+  *result = val ? *val : (num_args == 3 ? args[2] : create_nil());
+  return true;
+}
+
+// (del! <map> <key>) returns the map, whether or not the key was there
+bool builtin_del(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 2) return arity_error(snap, result);
+  if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map");
+  snap_map_del(as_map(args[0]), args[1]);
+  *result = args[0];
+  return true;
+}
+
+// The keys (offset 0) or values (offset 1) as a vector, in insertion order
+static bool map_entries(Snap* snap, const SValue* args, int num_args, int offset, SValue* result) {
+  SMap* map;
+  SVec* vec;
+  int i;
+  if (num_args != 1) return arity_error(snap, result);
+  if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map");
+  map = as_map(args[0]);
+  vec = snap_vec_new(snap, map->len);
+  for (i = 0; i < map->used; ++i) {
+    if (map->entries[2 * i].bits != SV_DELETED) vec->data[vec->len++] = map->entries[2 * i + offset];
+  }
+  *result = create_obj(vec);
+  return true;
+}
+
+bool builtin_keys(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return map_entries(snap, args, num_args, 0, result);
+}
+
+bool builtin_vals(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return map_entries(snap, args, num_args, 1, result);
 }
 
 void snap_init(Snap* snap) {
@@ -2322,6 +2572,10 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "put!", builtin_put);
   snap_def_cfunc(snap, "push!", builtin_push);
   snap_def_cfunc(snap, "pop!", builtin_pop);
+  snap_def_cfunc(snap, "get", builtin_get);
+  snap_def_cfunc(snap, "del!", builtin_del);
+  snap_def_cfunc(snap, "keys", builtin_keys);
+  snap_def_cfunc(snap, "vals", builtin_vals);
 }
 
 void snap_destroy(Snap* snap) {

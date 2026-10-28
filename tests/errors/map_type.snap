@@ -1,0 +1,3 @@
+; vi: filetype=scheme
+
+(get [1 2] 0)

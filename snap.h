@@ -26,10 +26,11 @@
   XX(STYPE_ERR, 11, "err") \
   XX(STYPE_CONS, 12, "cons") \
   XX(STYPE_VEC, 13, "vector") \
-  XX(STYPE_CODE, 14, "code") \
-  XX(STYPE_CLOSURE, 15, "closure") \
-  XX(STYPE_UPVAL, 16, "upval") \
-  XX(STYPE_TEMPSTR, 17, "tempstr")
+  XX(STYPE_MAP, 14, "map") \
+  XX(STYPE_CODE, 15, "code") \
+  XX(STYPE_CLOSURE, 16, "closure") \
+  XX(STYPE_UPVAL, 17, "upval") \
+  XX(STYPE_TEMPSTR, 18, "tempstr")
 
 enum {
 #define XX(type, id, name) type,
@@ -155,6 +156,19 @@ typedef struct SVec_ {
   SValue* data;
 } SVec;
 
+// Mutable hash map that keeps insertion order. Entries are key/value pairs in
+// the order they were added; a deleted entry's key is SV_DELETED until the
+// next rebuild. The index maps hash slots to entries (-1 when empty) and is
+// kept at most half full, deleted entries included.
+typedef struct SMap_ {
+  SOBJECT_FIELDS
+  int len;  // Live entries
+  int used; // Entries, including deleted ones
+  int cap;  // Entry capacity, index_cap / 2
+  SValue* entries;
+  int32_t* index;
+} SMap;
+
 typedef struct SUpval_ {
   SOBJECT_FIELDS
   SValue* value; // Points into the stack while open, at `closed` once closed
@@ -227,6 +241,7 @@ struct Snap_ {
 #define is_key(v) is_obj_type(v, STYPE_KEY)
 #define is_err(v) is_obj_type(v, STYPE_ERR)
 #define is_vec(v) is_obj_type(v, STYPE_VEC)
+#define is_map(v) is_obj_type(v, STYPE_MAP)
 #define is_code(v) is_obj_type(v, STYPE_CODE)
 #define is_closure(v) is_obj_type(v, STYPE_CLOSURE)
 #define is_cons(v) (is_empty(v) || is_obj_type(v, STYPE_CONS))
@@ -241,6 +256,7 @@ struct Snap_ {
 #define as_key(v) check(is_key(v), (SKeyword*)as_obj(v))
 #define as_err(v) check(is_err(v), (SErr*)as_obj(v))
 #define as_vec(v) check(is_vec(v), (SVec*)as_obj(v))
+#define as_map(v) check(is_map(v), (SMap*)as_obj(v))
 #define as_code(v) check(is_code(v), (SCode*)as_obj(v))
 #define as_closure(v) check(is_closure(v), (SClosure*)as_obj(v))
 #define as_cons(v) check(is_cons(v), is_empty(v) ? NULL : (SCons*)as_obj(v)) // NULL for ()
@@ -281,6 +297,10 @@ SErr* snap_err_new(Snap* snap, SValue err, SValue msg);
 SCons* snap_cons_new(Snap* snap);
 SVec* snap_vec_new(Snap* snap, int cap);
 void snap_vec_push(Snap* snap, SVec* vec, SValue val);
+SMap* snap_map_new(Snap* snap);
+SValue* snap_map_get(SMap* map, SValue key);
+void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val);
+bool snap_map_del(SMap* map, SValue key);
 
 SObject* snap_anchor(Snap* snap, SObject* obj);
 void snap_release(Snap* snap);

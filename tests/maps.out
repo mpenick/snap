@@ -1,0 +1,17 @@
+{} {:a 1} {:a 1 :b 2 "s" [3] 4 {:n nil}}
+0 2
+1 nil nil 0 nil
+{:a 1 :b nil :c 3}
+{:a 10 :b nil :c 3} 3
+{:a 10 :c 3} {:a 10 :c 3} 2
+[:a :c] [10 3] []
+:int :float :str :sym :nil :false :vec :map nil
+{:n 1} {:n 0}
+334 998001 nil 0 999
+1000 500 0 999
+{} 0
+{:again 1}
+10 20 197
+true false true true
+{a (b c)} :true
+{:i 2 :prev {:i 1 :prev {:i 0 :prev {}}}}

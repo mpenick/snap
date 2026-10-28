@@ -1,0 +1,67 @@
+; vi: filetype=scheme
+
+; Maps are mutable hash maps that keep insertion order. Literals evaluate
+; their keys and values and make a new map each time.
+
+(def x :b)
+(println {} {:a 1} {:a 1 x (+ 1 1) "s" [3] 4 {:n nil}})
+(println (count {}) (count {:a 1 :b 2}))
+
+; get, with an optional default for missing keys
+(def m {:a 1 :b nil})
+(println (get m :a) (get m :b) (get m :z) (get m :z 0) (get m :b 0))
+
+; put! adds or replaces and returns the map, keeping the first position
+(println (put! m :c 3))
+(println (put! m :a 10) (count m))
+
+; del! removes and returns the map, missing keys are ignored
+(println (del! m :b) (del! m :zz) (count m))
+
+; keys and vals are vectors in insertion order
+(println (keys m) (vals m) (keys {}))
+
+; Any value works as a key: numbers, strings, keywords, symbols, nil, booleans,
+; vectors and maps (compared by contents)
+(def k {})
+(put! k 1 :int) (put! k 1.5 :float) (put! k "s" :str) (put! k (quote sym) :sym)
+(put! k nil :nil) (put! k false :false) (put! k [1 2] :vec) (put! k {:a 1} :map)
+(println (get k 1) (get k 1.5) (get k "s") (get k (quote sym)) (get k nil)
+         (get k false) (get k [1 2]) (get k {:a 1}) (get k 1.0))
+
+; Each evaluation of a literal is a new map
+(def make (fn [] {:n 0}))
+(def a (make))
+(put! a :n 1)
+(println a (make))
+
+; Many puts and deletes: rebuilds, deleted entries skipped, order kept
+(def big {})
+(loop [[i 0]] (if (< i 1000) (begin (put! big i (* i i)) (recur (+ i 1))) nil))
+(loop [[i 0]] (if (< i 1000) (begin (if (= (% i 3) 0) nil (del! big i)) (recur (+ i 1))) nil))
+(println (count big) (get big 999) (get big 998) (nth (keys big) 0) (nth (keys big) 333))
+(loop [[i 0]] (if (< i 1000) (begin (del! big i) (put! big i i) (recur (+ i 1))) nil))
+(println (count big) (get big 500) (nth (keys big) 0) (nth (keys big) 999))
+(loop [[i 0]] (if (< i 1000) (begin (del! big i) (recur (+ i 1))) nil))
+(println big (count big))
+(println (put! big :again 1))
+
+; Maps of vectors kept alive while lots of garbage is made
+(def index {})
+(loop [[i 0]]
+  (if (< i 200)
+    (begin
+      (put! index (% i 10) (push! (get index (% i 10) []) i))
+      {:garbage [i i i]}
+      (recur (+ i 1)))
+    nil))
+(println (count index) (count (get index 0)) (nth (get index 7) 19))
+
+; Equality is by contents, ignoring order
+(println (= {:a 1 :b 2} {:b 2 :a 1}) (= {:a 1} {:a 2}) (= {} {}) (= {:a [1]} {:a [1]}))
+
+; Quoted maps aren't evaluated, and an empty map is true
+(println (quote {a (b c)}) (if {} :true :false))
+
+; Maps in loop bodies, read by recur
+(println (loop [[i 0] [m {}]] (if (< i 3) (recur (+ i 1) {:i i :prev m}) m)))

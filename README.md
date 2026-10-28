@@ -46,12 +46,13 @@ Special forms: `def`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
 `< <= > >= =`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
-vectors, lists (only from `quote`), `nil`, `true`, `false`, functions and
+vectors, maps, lists (only from `quote`), `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
 arithmetic wraps on overflow, and mixing integers with floats gives a float.
 
 Built-in functions: `print`, `println`, `nil?`, `err`, `err?`, `err-kind`,
-`err-msg`, `count`, `nth`, `push!`, `pop!` and `put!`.
+`err-msg`, `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`, `keys` and
+`vals`.
 
 ## Vectors
 
@@ -68,6 +69,26 @@ Vectors are mutable and grow as needed. Functions that change one end in `!`.
 ```
 
 An index that's out of range, or popping an empty vector, panics.
+
+## Maps
+
+Maps are mutable hash maps that keep insertion order.
+
+```clojure
+(def m {:a 1 :b 2}) ; A literal makes a new map each time it's evaluated
+(get m :a)          ; => 1
+(get m :z)          ; => nil
+(get m :z 0)        ; => 0, the default for a missing key
+(put! m :c 3)       ; => {:a 1 :b 2 :c 3}, adds or replaces and returns m
+(del! m :a)         ; => {:b 2 :c 3}, removes and returns m
+(keys m)            ; => [:b :c]
+(vals m)            ; => [2 3]
+(count m)           ; => 2
+(= {:a 1 :b 2} {:b 2 :a 1}) ; => true, compared by contents
+```
+
+Any value can be a key. Vectors and maps are compared by contents, so don't
+change one after using it as a key.
 
 ## Errors
 
