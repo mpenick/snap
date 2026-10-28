@@ -927,11 +927,11 @@ new_frame:
         DISPATCH();
       }
       OP(JUMP_FALSE) {
-        if (is_false(*--stack)) pc += arg;
+        if (is_falsy(*--stack)) pc += arg;
         DISPATCH();
       }
       OP(JUMP_FALSE_OR_POP) {
-        if (is_false(*(stack - 1))) {
+        if (is_falsy(*(stack - 1))) {
           pc += arg;
         } else {
           --stack;
@@ -939,7 +939,7 @@ new_frame:
         DISPATCH();
       }
       OP(JUMP_TRUE_OR_POP) {
-        if (!is_false(*(stack - 1))) {
+        if (!is_falsy(*(stack - 1))) {
           pc += arg;
         } else {
           --stack;
@@ -955,7 +955,7 @@ new_frame:
         goto panic;
       }
       OP(NOT) {
-        *(stack - 1) = create_bool(is_false(*(stack - 1)));
+        *(stack - 1) = create_bool(is_falsy(*(stack - 1)));
         DISPATCH();
       }
       OP(ADD) { binary_operands() arith_op(add_iop, add_fop) DISPATCH(); }

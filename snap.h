@@ -72,6 +72,7 @@ struct SValue_ {
 #define SV_NIL SV_SPECIAL(2)
 #define SV_FALSE SV_SPECIAL(3)
 #define SV_TRUE SV_SPECIAL(4)
+static_assert((SV_NIL | 8) == SV_FALSE, "is_falsy() needs nil and false to differ only in bit 3");
 #define SV_EMPTY SV_SPECIAL(5)
 
 #define SNAP_INT_MAX ((SnapInt)(((uint64_t)1 << 62) - 1))
@@ -211,6 +212,8 @@ struct Snap_ {
 #define is_undef(v) ((v).bits == SV_UNDEF)
 #define is_nil(v) ((v).bits == SV_NIL)
 #define is_false(v) ((v).bits == SV_FALSE)
+// nil and false are false in conditions. They differ only in bit 3.
+#define is_falsy(v) (((v).bits & ~(uint64_t)8) == SV_NIL)
 #define is_bool(v) (is_false(v) || (v).bits == SV_TRUE)
 #define is_empty(v) ((v).bits == SV_EMPTY)
 #define is_form(v) (((v).bits & TAG_MASK) == TAG_FORM)
