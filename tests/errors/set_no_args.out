@@ -1,1 +1,1 @@
-<err :snap_compile_error "Expected id for first argument of set!">
+<err :snap_compile_error "Expected (set! <id> <expr>)">

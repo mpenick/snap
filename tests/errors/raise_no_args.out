@@ -1,1 +1,1 @@
-<err :snap_compile_error "Expected error and message">
+<err :snap_compile_error "Expected (raise <err> <msg>)">

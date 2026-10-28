@@ -14,7 +14,9 @@
 #define GC_EVERY_NUM_BYTES 64 * 1024 * 1024
 #endif
 
-#define MAX_OP_ARG 33554431
+#define MAX_ARG ((1 << 23) - 1)
+#define MAX_LOCALS 256
+#define MAX_UPVALS 256
 
 enum {
   WHITE,
@@ -23,69 +25,58 @@ enum {
 };
 
 #define OPCODE_MAP(XX) \
-  XX(LOAD_GLOBAL, "LOAD_GLOBAL", true) \
-  XX(STORE_GLOBAL, "STORE_GLOBAL", true) \
-  XX(LOAD_LOCAL, "LOAD_LOCAL", true) \
-  XX(STORE_LOCAL, "STORE_LOCAL", true) \
-  XX(LOAD_CLOSED, "LOAD_CLOSED", true) \
-  XX(STORE_CLOSED, "STORE_CLOSED", true) \
-  XX(LOAD_CONSTANT, "LOAD_CONSTANT", true) \
-  XX(LOAD_NIL, "LOAD_NIL", false) \
-  XX(POP, "POP", false) \
-  XX(DUP, "DUP", false) \
-  XX(ROT2, "ROT2", false) \
-  XX(ROT3, "ROT3", false) \
-  XX(CALL, "CALL", true) \
-  XX(CLOSURE, "CLOSURE", false) \
-  XX(CLOSE_UPVALS, "CLOSE_UPVALS", true) \
-  XX(RETURN, "RETURN", false) \
-  XX(JUMP, "JUMP", true) \
-  XX(JUMP_FALSE, "JUMP_FALSE", true) \
-  XX(JUMP_FALSE_OR_POP, "JUMP_FALSE_OR_POP", true) \
-  XX(JUMP_TRUE, "JUMP_TRUE", true) \
-  XX(JUMP_TRUE_OR_POP, "JUMP_TRUE_OR_POP", true) \
-  XX(BLOCK, "BLOCK", true) \
-  XX(END_BLOCK, "END_BLOCK", false) \
-  XX(RAISE, "RAISE", false) \
-  XX(ADD, "ADD", false) \
-  XX(SUB, "SUB", false) \
-  XX(MUL, "MUL", false) \
-  XX(DIV, "DIV", false) \
-  XX(MOD, "MOD", false) \
-  XX(LESS_THAN, "LESS_THAN", false) \
-  XX(LESS_EQUALS, "LESS_EQUALS", false) \
-  XX(GREATER_THAN, "GREATER_THAN", false) \
-  XX(GREATER_EQUALS, "GREATER_EQUALS", false) \
-  XX(EQUALS, "EQUALS", false) \
-  XX(NOT, "NOT", false)
+  XX(LOAD_GLOBAL) \
+  XX(STORE_GLOBAL) \
+  XX(LOAD_LOCAL) \
+  XX(STORE_LOCAL) \
+  XX(LOAD_CLOSED) \
+  XX(STORE_CLOSED) \
+  XX(LOAD_CONSTANT) \
+  XX(LOAD_NIL) \
+  XX(POP) \
+  XX(DUP) \
+  XX(ROT2) \
+  XX(ROT3) \
+  XX(CALL) \
+  XX(CLOSURE) \
+  XX(CLOSE_UPVALS) \
+  XX(RETURN) \
+  XX(JUMP) \
+  XX(JUMP_FALSE) \
+  XX(JUMP_FALSE_OR_POP) \
+  XX(JUMP_TRUE_OR_POP) \
+  XX(RAISE) \
+  XX(ADD) \
+  XX(SUB) \
+  XX(MUL) \
+  XX(DIV) \
+  XX(MOD) \
+  XX(LESS_THAN) \
+  XX(LESS_EQUALS) \
+  XX(GREATER_THAN) \
+  XX(GREATER_EQUALS) \
+  XX(EQUALS) \
+  XX(NOT)
 
 enum {
-#define XX(opcode, name, has_arg) opcode,
+#define XX(opcode) opcode,
   OPCODE_MAP(XX)
 #undef XX
 };
 
+#define INST(op, arg) (((uint32_t)(arg) << 8) | (uint32_t)(op))
+#define INST_OP(inst) ((inst) & 0xFF)
+#define INST_ARG(inst) ((int32_t)(inst) >> 8)
+
 static const char* opcode_name(int op) {
   switch (op) {
-#define XX(opcode, name, has_arg) \
+#define XX(opcode) \
     case opcode: \
-      return name;
+      return #opcode;
     OPCODE_MAP(XX)
 #undef XX
     default:
       return "INVALID";
-  }
-}
-
-static const char* stype_name(int  type) {
-  switch (type) {
-#define XX(type, id, name) \
-    case type: \
-      return name;
-    STYPE_MAPPING(XX)
-#undef XX
-    default:
-      return "invalid";
   }
 }
 
@@ -103,42 +94,25 @@ static int hash_float(double n) {
   return (int)(u <= (unsigned int)INT_MAX ? u : ~u);
 }
 
-static int hash_string(SSymStr* s) {
-  return (int)mhash_fnv1a((const void*)s->data, s->len);
+static int hash_chars(const char* data, size_t len) {
+  return (int)mhash_fnv1a((const void*)data, len);
 }
 
-static int hash_keyword(SKeyword* k) {
-  return (int)mhash_fnv1a((const void*)k->data, k->len);
-}
-
-static int hash_tempstr(STempStr* ts) {
-  return (int)mhash_fnv1a((const void*)ts->data, ts->len);
-}
-
-static int compare_string(SSymStr* s1, SSymStr* s2) {
-  if (s1->len != s2->len) {
-    return s1->len < s2->len ? -1 : 1;
+static int compare_chars(const char* data1, size_t len1, const char* data2, size_t len2) {
+  if (len1 != len2) {
+    return len1 < len2 ? -1 : 1;
   }
-  return strncmp(s1->data, s2->data, s1->len);
+  return strncmp(data1, data2, len1);
 }
 
 static int compare_tempstring(const STempStr* ts, const SValue* val) {
-  SSymStr* s;
-  SKeyword* k;
   switch (val->type) {
   case STYPE_SYM:
+    return compare_chars(ts->data, ts->len, ((SSym*)val->o)->data, ((SSym*)val->o)->len);
   case STYPE_STR:
-    s = (SSymStr*)val->o;
-    if (ts->len != s->len) {
-      return ts->len < s->len ? -1 : 1;
-    }
-    return strncmp(ts->data, s->data, ts->len);
+    return compare_chars(ts->data, ts->len, ((SStr*)val->o)->data, ((SStr*)val->o)->len);
   case STYPE_KEY:
-    k = (SKeyword*)val->o;
-    if (ts->len != k->len) {
-      return ts->len < k->len ? -1 : 1;
-    }
-    return strncmp(ts->data, k->data, ts->len);
+    return compare_chars(ts->data, ts->len, ((SKeyword*)val->o)->data, ((SKeyword*)val->o)->len);
   default:
     return STYPE_TEMPSTR < val->type ? -1 : 1;
   }
@@ -163,13 +137,15 @@ int snap_hash(const SValue* val) {
       return val->i;
     case STYPE_CFUNC:
       return hash_pointer((void*)val->c);
+    // Hashed by contents so interning can look them up with a STempStr
     case STYPE_SYM:
+      return hash_chars(((SSym*)val->o)->data, ((SSym*)val->o)->len);
     case STYPE_STR:
-      return hash_string((SSymStr*)val->o);
+      return hash_chars(((SStr*)val->o)->data, ((SStr*)val->o)->len);
     case STYPE_KEY:
-      return hash_keyword((SKeyword*)val->o);
+      return hash_chars(((SKeyword*)val->o)->data, ((SKeyword*)val->o)->len);
     case STYPE_TEMPSTR:
-      return hash_tempstr((STempStr*)val->o);
+      return hash_chars(((STempStr*)val->o)->data, ((STempStr*)val->o)->len);
     default:
       return hash_pointer((void*)val->o);
   }
@@ -197,46 +173,21 @@ int snap_compare(const SValue* val1, const SValue* val2) {
       return compare(val1->i, val2->i);
     case STYPE_CFUNC:
       return compare((void*)val1->c, (void*)val2->c);
-    case STYPE_SYM:
     case STYPE_STR:
-      return compare_string((SSymStr*)val1->o, (SSymStr*)val2->o);
-    case STYPE_KEY:
-      return compare(((SKeyword*)val1->o)->id, ((SKeyword*)val2->o)->id);
+      return compare_chars(((SStr*)val1->o)->data, ((SStr*)val1->o)->len,
+                           ((SStr*)val2->o)->data, ((SStr*)val2->o)->len);
     case STYPE_ERR:
       return snap_compare(&((SErr*)val1->o)->err, &((SErr*)val2->o)->err);
     default:
+      // Everything else, including interned symbols and keywords, by identity
       return compare((void*)val1->o, (void*)val2->o);
   }
 }
 
-#define anchor(type, obj) (type*)snap_anchor(snap, (SObject*)obj)
-#define anchor_arr(arr) anchor(SArr, arr)
-#define anchor_sym(sym) anchor(SSymStr, sym)
-#define anchor_str(str) anchor(SSymStr, str)
-#define anchor_key(key) anchor(SKeyword, key)
-#define anchor_cons(cons) anchor(SCons, cons)
-#define anchor_code(code) anchor(SCode, code)
-#define anchor_code_gen(code_gen) anchor(SCodeGen, code_gen)
-
 static SValue exec(Snap* snap);
-static void compile(Snap* snap, SCodeGen* code_gen, SValue value);
-static bool parse(Snap* snap, SnapLex* lex, SValue *result);
 
-static SInst* insts_append(Snap* snap, SCodeGen* code_gen, int opcode);
-static int insts_calculate_jump(SInst* inst);
-static void insts_remove_dead_code(MList* insts);
-static void insts_dump(MList* insts, int indent);
-
-static void print_val(SValue val, int indent);
+static void print_val(SValue val);
 static void print_code(SCode* code, int indent);
-static void print_closure(SClosure* closure, int indent);
-static void print_cons(SCons* cons, int indent);
-static void print_arr(SArr* arr, int indent);
-
-static void jump_arg_init(SnapJumpArg* jump_arg, int dir, MList* dest) {
-  jump_arg->dir = dir;
-  jump_arg->dest = dest;
-}
 
 SValue create_undef() {
   SValue val;
@@ -354,12 +305,22 @@ void snap_hash_destroy(SnapHash* hash) {
   mhash_destroy(hash);
 }
 
+/* GC */
+
+// Bytes owned by a code object outside of its own allocation
+static size_t code_extra_bytes(SCode* code) {
+  return code->insts_count * sizeof(SnapInst) +
+         code->num_constants * sizeof(SValue) +
+         code->num_upvals * sizeof(uint32_t);
+}
+
 static void gc_free(Snap* snap, SObject* obj) {
-  //printf("free %p\n", obj);
   switch (obj->type) {
     case STYPE_SYM:
+      snap->num_bytes_alloced -= (sizeof(SSym) + ((SSym*)obj)->len + 1);
+      break;
     case STYPE_STR:
-      snap->num_bytes_alloced -= (sizeof(SSymStr) + ((SSymStr*)obj)->len + 1);
+      snap->num_bytes_alloced -= (sizeof(SStr) + ((SStr*)obj)->len + 1);
       break;
     case STYPE_KEY:
       snap->num_bytes_alloced -= (sizeof(SKeyword) + ((SKeyword*)obj)->len + 1);
@@ -373,35 +334,17 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_ARR:
       snap->num_bytes_alloced -= (sizeof(SArr) + ((SArr*)obj)->len * sizeof(SValue));
       break;
-    case STYPE_INST:
-      snap->num_bytes_alloced -= sizeof(SInst);
-      break;
-    case STYPE_SCOPE:
-      snap->num_bytes_alloced -= sizeof(SScope);
-      snap_hash_destroy(&((SScope*)obj)->local_names);
-      mvec_destroy(&((SScope*)obj)->param_names);
-      mvec_destroy(&((SScope*)obj)->recurs);
-      break;
-    case STYPE_CODE_GEN:
-      snap->num_bytes_alloced -= sizeof(SCodeGen);
-      snap_hash_destroy(&((SCodeGen*)obj)->global_names);
-      snap_hash_destroy(&((SCodeGen*)obj)->closed_names);
-      mvec_destroy(&((SCodeGen*)obj)->closed_descs);
-      snap_hash_destroy(&((SCodeGen*)obj)->constants);
-      mvec_destroy(&((SCodeGen*)obj)->param_names);
-      break;
     case STYPE_CODE:
-      snap->num_bytes_alloced -= sizeof(SCode);
+      snap->num_bytes_alloced -= sizeof(SCode) + code_extra_bytes((SCode*)obj);
       free(((SCode*)obj)->insts);
+      free(((SCode*)obj)->constants);
+      free(((SCode*)obj)->upvals);
       break;
     case STYPE_CLOSURE:
       snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->num_upvals * sizeof(SUpval*));
       break;
     case STYPE_UPVAL:
       snap->num_bytes_alloced -= sizeof(SUpval);
-      break;
-    case STYPE_CLOSED_DESC:
-      snap->num_bytes_alloced -= sizeof(SClosedDesc);
       break;
     default:
       assert(0 && "Not a GC object");
@@ -413,20 +356,16 @@ static void gc_free(Snap* snap, SObject* obj) {
 static void gc_mark(Snap* snap, SObject* obj) {
   if (!obj) return;
   switch (obj->type) {
-    case STYPE_SYM:
     case STYPE_STR:
     case STYPE_KEY:
       obj->mark = BLACK;
       break;
+    case STYPE_SYM:
     case STYPE_ERR:
     case STYPE_CONS:
     case STYPE_ARR:
-    case STYPE_SCOPE:
-    case STYPE_INST:
-    case STYPE_CODE_GEN:
     case STYPE_CODE:
     case STYPE_CLOSURE:
-    case STYPE_CLOSED_DESC:
     case STYPE_UPVAL:
       if (obj->mark == WHITE) {
         obj->mark = GRAY;
@@ -444,6 +383,13 @@ static void gc_mark_val(Snap* snap, SValue val) {
   if (is_obj(val)) gc_mark(snap, val.o);
 }
 
+static void gc_mark_vals(Snap* snap, SValue* vals, int count) {
+  int i;
+  for (i = 0; i < count; ++i) {
+    gc_mark_val(snap, vals[i]);
+  }
+}
+
 static void gc_mark_hash(Snap* snap, SnapHash* hash) {
   int i;
   for (i = 0; i < hash->hcapacity; ++i) {
@@ -455,25 +401,12 @@ static void gc_mark_hash(Snap* snap, SnapHash* hash) {
   }
 }
 
-static void gc_mark_vec(Snap* snap, SnapVec* vec) {
-  SValue* item;
-  mvec_foreach(vec, item) {
-    if (!is_undef_p(item)) {
-      gc_mark_val(snap, *item);
-    }
-  }
-}
-
-static void gc_mark_insts(Snap* snap, MList* insts) {
-  MList* pos;
-  mlist_foreach(insts) {
-    gc_mark(snap, (SObject*)mlist_entry(SInst, pos, list));
-  }
-}
-
 static void gc_mark_children(Snap* snap, SObject* obj) {
   int i;
   switch (obj->type) {
+    case STYPE_SYM:
+      gc_mark_val(snap, ((SSym*)obj)->value);
+      break;
     case STYPE_ERR:
       gc_mark_val(snap, ((SErr*)obj)->err);
       gc_mark_val(snap, ((SErr*)obj)->msg);
@@ -483,34 +416,10 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark_val(snap, ((SCons*)obj)->rest);
       break;
     case STYPE_ARR:
-      for (i = 0; i < ((SArr*)obj)->len; ++i) {
-        gc_mark_val(snap, ((SArr*)obj)->data[i]);
-      }
-      break;
-    case STYPE_SCOPE:
-      gc_mark_hash(snap, &((SScope*)obj)->local_names);
-      gc_mark_vec(snap, &((SScope*)obj)->param_names);
-      gc_mark_vec(snap, &((SScope*)obj)->recurs);
-      gc_mark(snap, (SObject*)((SScope*)obj)->up);
-      break;
-    case STYPE_INST:
-      gc_mark_val(snap, ((SInst*)obj)->arg_data);
-      break;
-    case STYPE_CODE_GEN:
-      gc_mark_insts(snap, &((SCodeGen*)obj)->insts);
-      gc_mark(snap, (SObject*)((SCodeGen*)obj)->scope);
-      gc_mark(snap, (SObject*)((SCodeGen*)obj)->up);
-      gc_mark_hash(snap, &((SCodeGen*)obj)->constants);
-      gc_mark_hash(snap, &((SCodeGen*)obj)->global_names);
-      gc_mark_hash(snap, &((SCodeGen*)obj)->closed_names);
-      gc_mark_vec(snap, &((SCodeGen*)obj)->closed_descs);
-      gc_mark_vec(snap, &((SCodeGen*)obj)->param_names);
+      gc_mark_vals(snap, ((SArr*)obj)->data, ((SArr*)obj)->len);
       break;
     case STYPE_CODE:
-      gc_mark(snap, (SObject*)((SCode*)obj)->constants);
-      gc_mark(snap, (SObject*)((SCode*)obj)->global_names);
-      gc_mark(snap, (SObject*)((SCode*)obj)->closed_descs);
-      gc_mark_insts(snap, &((SCode*)obj)->insts_debug);
+      gc_mark_vals(snap, ((SCode*)obj)->constants, ((SCode*)obj)->num_constants);
       break;
     case STYPE_CLOSURE:
       gc_mark(snap, (SObject*)((SClosure*)obj)->code);
@@ -521,14 +430,13 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
     case STYPE_UPVAL:
       gc_mark_val(snap, *((SUpval*)obj)->value);
       break;
-    case STYPE_CLOSED_DESC:
-      gc_mark(snap, (SObject*)((SClosedDesc*)obj)->name);
-      break;
     default:
       assert(0 && "Not a valid gray object");
       break;
   }
 }
+
+static void gc_mark_fn_states(Snap* snap);
 
 static void gc_collect(Snap* snap) {
   SObject** obj;
@@ -539,24 +447,24 @@ static void gc_collect(Snap* snap) {
     gc_mark(snap, *obj);
   }
 
+  // Interned symbols (and so all globals) and keywords live forever
+  gc_mark_hash(snap, &snap->symbols);
+  gc_mark_hash(snap, &snap->keywords);
+  gc_mark(snap, (SObject*)snap->cause);
+
   // Each frame's [stack_base, stack_top) region is live (args, locals and
   // temporaries); the top frame's stack_top is synced before any allocation.
   mvec_foreach(&snap->frames, frame) {
-    SValue* val;
     gc_mark(snap, (SObject*)frame->code);
     gc_mark(snap, (SObject*)frame->closure);
-    for (val = frame->stack_base; val < frame->stack_top; ++val) {
-      gc_mark_val(snap, *val);
-    }
+    gc_mark_vals(snap, frame->stack_base, frame->stack_top - frame->stack_base);
   }
 
   for (upval = snap->open_upvals; upval; upval = upval->next) {
     gc_mark(snap, (SObject*)upval);
   }
 
-  gc_mark_hash(snap, &snap->globals);
-  gc_mark_hash(snap, &snap->keywords);
-  gc_mark(snap, (SObject*)snap->cause);
+  gc_mark_fn_states(snap);
 
   while (snap->gray) {
     SObject* temp = snap->gray;
@@ -579,13 +487,13 @@ static void gc_collect(Snap* snap) {
 }
 
 static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
+  SObject* obj;
   assert(size > sizeof(SObject));
   if (snap->num_bytes_alloced_last_gc > GC_EVERY_NUM_BYTES) {
     gc_collect(snap);
     snap->num_bytes_alloced_last_gc = 0;
   }
-  SObject* obj = (SObject*)malloc(size);
-  //printf("new %p (type: %d)\n", obj, type);
+  obj = (SObject*)malloc(size);
   obj->type = type;
   obj->mark = WHITE;
   obj->gc_gray_next = NULL;
@@ -596,27 +504,29 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   return obj;
 }
 
-SSymStr* snap_str_new(Snap* snap, const char* str) {
-  size_t len = strlen(str);
-  SSymStr* s = (SSymStr*)gc_new(snap, STYPE_STR, sizeof(SSymStr) + len + 1);
+/* Objects */
+
+static SStr* str_new(Snap* snap, const char* data, size_t len) {
+  SStr* s = (SStr*)gc_new(snap, STYPE_STR, sizeof(SStr) + len + 1);
   s->len = len;
-  strcpy(s->data, str);
+  memcpy(s->data, data, len);
+  s->data[len] = '\0';
   return s;
 }
 
-SSymStr* snap_str_new_vformat(Snap* snap, const char* format, va_list args) {
-  SSymStr* s;
+SStr* snap_str_new(Snap* snap, const char* str) {
+  return str_new(snap, str, strlen(str));
+}
+
+SStr* snap_str_new_vformat(Snap* snap, const char* format, va_list args) {
   char buf[256]; /* TODO: Dynamic buffer size */
   int len = vsnprintf(buf, sizeof(buf), format, args);
   if (len >= (int)sizeof(buf)) len = sizeof(buf) - 1;
-  s = (SSymStr*)gc_new(snap, STYPE_STR, sizeof(SSymStr) + len + 1);
-  s->len = len;
-  memcpy(s->data, buf, len + 1);
-  return s;
+  return str_new(snap, buf, len);
 }
 
-SSymStr* snap_str_new_format(Snap* snap, const char* format, ...) {
-  SSymStr* s;
+SStr* snap_str_new_format(Snap* snap, const char* format, ...) {
+  SStr* s;
   va_list args;
   va_start(args, format);
   s = snap_str_new_vformat(snap, format, args);
@@ -624,27 +534,34 @@ SSymStr* snap_str_new_format(Snap* snap, const char* format, ...) {
   return s;
 }
 
-SSymStr* snap_sym_new(Snap* snap, const char* sym) {
-  size_t len = strlen(sym);
-  SSymStr* s = (SSymStr*)gc_new(snap, STYPE_SYM, sizeof(SSymStr) + len + 1);
+SSym* snap_sym_new(Snap* snap, const char* name) {
+  size_t len = strlen(name);
+  SValue* existing = snap_hash_get_str(&snap->symbols, name, len);
+  SSym* s;
+  if (existing) {
+    return (SSym*)existing->o;
+  }
+  s = (SSym*)gc_new(snap, STYPE_SYM, sizeof(SSym) + len + 1);
+  s->value = create_undef();
   s->len = len;
-  strcpy(s->data, sym);
+  memcpy(s->data, name, len + 1);
+  snap_hash_put(&snap->symbols, create_obj(s), create_obj(s));
   return s;
 }
 
 SKeyword* snap_key_new(Snap* snap, const char* name) {
   size_t len = strlen(name);
   SValue* existing = snap_hash_get_str(&snap->keywords, name, len);
+  SKeyword* k;
   if (existing) {
     return (SKeyword*)existing->o;
-  } else  {
-    SKeyword* k = (SKeyword*)gc_new(snap, STYPE_KEY, sizeof(SKeyword) + len + 1);
-    k->len = len;
-    strcpy(k->data, name);
-    k->id = snap->keywords.hcount;
-    snap_hash_put(&snap->keywords, create_obj(k), create_obj(k));
-    return k;
   }
+  k = (SKeyword*)gc_new(snap, STYPE_KEY, sizeof(SKeyword) + len + 1);
+  k->len = len;
+  memcpy(k->data, name, len + 1);
+  k->id = snap->keywords.hcount;
+  snap_hash_put(&snap->keywords, create_obj(k), create_obj(k));
+  return k;
 }
 
 SErr* snap_err_new(Snap* snap, SValue err, SValue msg) {
@@ -655,25 +572,24 @@ SErr* snap_err_new(Snap* snap, SValue err, SValue msg) {
 }
 
 SErr* snap_err_new_format(Snap* snap, const char* err, const char* format, ...) {
-  SSymStr* s;
+  SStr* s;
   SKeyword* k;
   SErr* e;
   va_list args;
   va_start(args, format);
-  s = anchor_str(snap_str_new_vformat(snap, format, args));
+  s = (SStr*)snap_anchor(snap, (SObject*)snap_str_new_vformat(snap, format, args));
   va_end(args);
-  k = anchor_key(snap_key_new(snap, err));
+  k = snap_key_new(snap, err); // Interned, so already rooted
   e = snap_err_new(snap, create_obj(k), create_obj(s));
-  snap_release(snap);
   snap_release(snap);
   return e;
 }
 
 SCons* snap_cons_new(Snap* snap) {
- SCons* c = (SCons*)gc_new(snap,  STYPE_CONS, sizeof(SCons));
- c->first = create_undef();
- c->rest = create_empty();
- return c;
+  SCons* c = (SCons*)gc_new(snap,  STYPE_CONS, sizeof(SCons));
+  c->first = create_undef();
+  c->rest = create_empty();
+  return c;
 }
 
 SArr* snap_arr_new(Snap* snap, int len) {
@@ -686,169 +602,39 @@ SArr* snap_arr_new(Snap* snap, int len) {
   return a;
 }
 
-SArr* snap_arr_hash_new(Snap* snap, SnapHash* hash) {
-  int i;
-  SArr* a = snap_arr_new(snap, hash->hcount);
-  for (i = 0; i < hash->hcapacity; ++i) {
-    SnapHashEntry* entry = &hash->hentries[i];
-    if (!is_undef(entry->hkey)) {
-      a->data[entry->val.i] = entry->hkey;
-    }
-  }
-  return a;
-}
-
-SArr* snap_arr_vec_new(Snap* snap, SnapVec* vec) {
-  int i;
-  SArr* a = snap_arr_new(snap, vec->vsize);
-  for (i = 0; i < vec->vsize; ++i) {
-    a->data[i] = vec->vitems[i];
-  }
-  return a;
-}
-
-SClosedDesc* snap_closed_desc_new(Snap* snap, bool islocal,
-                                  int index, SSymStr* name) {
-  SClosedDesc* d = (SClosedDesc*)gc_new(snap, STYPE_CLOSED_DESC, sizeof(SClosedDesc));
-  d->islocal = islocal;
-  d->index = index;
-  d->name = name;
-  return d;
-}
-
 SClosure* snap_closure_new(Snap* snap, SCode* code) {
   int i;
-  int num_upvals = code->closed_descs->len;
   SClosure* cl = (SClosure*)gc_new(snap,
                                    STYPE_CLOSURE,
                                    sizeof(SClosure) +
                                    sizeof(SUpval*) *
-                                   num_upvals);
+                                   code->num_upvals);
   cl->code = code;
-  cl->num_upvals = num_upvals;
-  for (i = 0; i < num_upvals; ++i) {
+  cl->num_upvals = code->num_upvals;
+  for (i = 0; i < cl->num_upvals; ++i) {
     cl->upvals[i] = NULL;
   }
   return cl;
 }
 
-SCode* snap_code_new(Snap* snap, SCodeGen* code_gen) {
-  SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
-  c->insts = NULL;
-  c->global_names = c->constants = c->closed_descs = NULL;
-  mlist_init(&c->insts_debug);
-  snap_anchor(snap, (SObject*)c);
-
-  //insts_dump(&code_gen->insts, 0);
-  //printf("\n");
-  insts_remove_dead_code(&code_gen->insts);
-  //insts_dump(&code_gen->insts, 0);
-  //printf("\n");
-
-  c->insts = (int*)malloc(sizeof(int) * code_gen->insts_count);
-  {
-    int count = 0;
-    int stack_size = 0;
-    int max_stack_size = 0;
-    MList* pos;
-    mlist_foreach(&code_gen->insts) {
-      SInst* inst = mlist_entry(SInst, pos, list);
-      // Linear scan over both arms of each branch, so this over-estimates
-      switch(inst->opcode) {
-        case LOAD_GLOBAL: case LOAD_LOCAL: case LOAD_CLOSED:
-        case LOAD_CONSTANT: case LOAD_NIL:
-        case DUP:
-          stack_size++;
-          break;
-        case STORE_GLOBAL: case STORE_LOCAL: case STORE_CLOSED:
-        case POP:
-        case JUMP_FALSE: case JUMP_FALSE_OR_POP:
-        case JUMP_TRUE: case JUMP_TRUE_OR_POP:
-        case RAISE:
-        case ADD: case SUB: case MUL: case DIV: case MOD:
-        case LESS_THAN: case LESS_EQUALS: case GREATER_THAN:
-        case GREATER_EQUALS: case EQUALS:
-          stack_size--;
-          break;
-        case CALL:
-          stack_size -= inst->arg; // subtract arg + 1, add 1
-          break;
-      }
-      if (stack_size > max_stack_size) {
-        max_stack_size = stack_size;
-      }
-      if (inst->opcode == JUMP ||
-          inst->opcode == JUMP_FALSE ||
-          inst->opcode == JUMP_FALSE_OR_POP ||
-          inst->opcode == JUMP_TRUE ||
-          inst->opcode == JUMP_TRUE_OR_POP ||
-          inst->opcode == BLOCK) {
-        int jump = insts_calculate_jump(inst) + MAX_OP_ARG;
-        c->insts[count++] = ((unsigned)(inst->opcode & 0x3F) << 26) | (jump & 0x3FFFFFF);
-      } else {
-        c->insts[count++] = ((unsigned)(inst->opcode & 0x3F) << 26) | (inst->arg & 0x3FFFFFF);
-      }
-    }
-    c->num_locals = code_gen->num_locals;
-    c->num_args = code_gen->param_names.vsize;
-    c->max_stack_size = max_stack_size + 2; /* Add enough room for raising errors */
-    c->insts_count = count;
-  }
-  c->constants = snap_arr_hash_new(snap, &code_gen->constants);
-  c->global_names = snap_arr_hash_new(snap, &code_gen->global_names);
-  c->closed_descs = snap_arr_vec_new(snap, &code_gen->closed_descs);
-  mlist_copy(&code_gen->insts, &c->insts_debug);
-  mlist_init(&code_gen->insts); // The insts now belong to the code object
-  snap_release(snap);
-  return c;
+SObject* snap_anchor(Snap* snap, SObject* obj) {
+  *mvec_push(&snap->anchors, SObject*) = obj;
+  return obj;
 }
 
-SInst* snap_inst_new(Snap* snap, int opcode) {
- SInst* i = (SInst*)gc_new(snap,  STYPE_INST, sizeof(SInst));
- i->opcode = opcode;
- i->arg = 0;
- i->arg_data = create_nil();
- jump_arg_init(&i->jump_arg, 0, NULL);
- i->list.next = i->list.prev = NULL;
- return i;
-}
-
-SScope* snap_scope_new(Snap* snap, SScope* up) {
-  SScope* s = (SScope*)gc_new(snap,  STYPE_SCOPE, sizeof(SScope));
-  s->top = NULL;
-  s->up = up;
-  s->base = up ? up->base + up->local_names.hcount : 0;
-  s->captured = false;
-  snap_hash_init(&s->local_names);
-  mvec_init(&s->param_names, SValue, 2);
-  mvec_init(&s->recurs, SValue, 2);
-  return s;
-}
-
-SCodeGen* snap_code_gen_new(Snap* snap, SCodeGen* up) {
-  SCodeGen* c = (SCodeGen*)gc_new(snap,  STYPE_CODE_GEN, sizeof(SCodeGen));
-  mlist_init(&c->insts);
-  c->insts_count = 0;
-  c->scope = NULL;
-  snap_hash_init(&c->constants);
-  snap_hash_init(&c->global_names);
-  snap_hash_init(&c->closed_names);
-  mvec_init(&c->closed_descs, SValue, 2);
-  mvec_init(&c->param_names, SValue, 2);
-  c->num_locals = 0;
-  c->is_tail = false;
-  c->up = up;
-  return c;
+void snap_release(Snap* snap) {
+  mvec_pop(&snap->anchors);
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
-  SValue key = create_obj(snap_sym_new(snap, name));
-  snap_hash_put(&snap->globals, key, val);
+  snap_sym_new(snap, name)->value = val;
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
   snap_def(snap, name, create_cfunc(cfunc));
 }
+
+/* VM */
 
 // Stack layout
 // [args][locals][stack...]
@@ -893,7 +679,6 @@ static void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* cl
   frame->code = code;
   frame->closure = closure;
   frame->pc = code->insts;
-  frame->blocks_top = 0;
   frame->stack_base = stack_base;
   frame->stack_top = stack_base + code->num_locals;
 
@@ -975,18 +760,14 @@ static void close_upvals(Snap* snap, SValue* level) {
 #define int_zero_divisor() (is_int_p(stack - 1) && (stack - 1)->i == 0 && \
                             is_int_p(stack - 2))
 
-#define GETOP() (((*pc) >> 26) & 0x3F)
-#define GETARG() ((*pc) & 0x3FFFFFF)
-#define GETJARG() (((*pc) & 0x3FFFFFF) - MAX_OP_ARG)
-
-#define NEXT(n) pc += n
-
 #define INDIRECT_DISPATCH 1
 
 #ifdef INDIRECT_DISPATCH
-#define OP(name) _##name:
-#define OPT(name) [name] = &&_##name
-#define DISPATCH() goto *optable[GETOP()]
+#define OP(name) op_##name:
+#define DISPATCH() \
+  inst = *pc++; \
+  arg = INST_ARG(inst); \
+  goto *optable[INST_OP(inst)]
 #else
 #define OP(name) case name:
 #define DISPATCH() continue
@@ -994,12 +775,11 @@ static void close_upvals(Snap* snap, SValue* level) {
 
 static SValue exec(Snap* snap) {
   SnapFrame* frame;
-  SnapBlock* block;
   SCode* code;
   SClosure* closure;
-  int* pc;
+  SnapInst* pc;
+  SnapInst inst;
   SValue* constants;
-  SValue* global_names;
   SValue* locals;
   SValue* stack;
   SValue* a, * b;
@@ -1007,7 +787,7 @@ static SValue exec(Snap* snap) {
   int arg;
 
 #ifdef INDIRECT_DISPATCH
-#define XX(opcode, name, has_arg) OPT(opcode),
+#define XX(opcode) [opcode] = &&op_##opcode,
   static void *optable[] = {
     OPCODE_MAP(XX)
   };
@@ -1015,21 +795,16 @@ static SValue exec(Snap* snap) {
 #endif
 
 new_frame:
-    frame = &mvec_back(&snap->frames);
-    code = frame->code;
-    closure = frame->closure;
-    pc = frame->pc;
-    constants = code->constants->data;
-    global_names = code->global_names->data;
-    locals = frame->stack_base;
-    stack = frame->stack_top;
-
-#ifdef INDIRECT_DISPATCH
-    DISPATCH();
-#endif
+  frame = &mvec_back(&snap->frames);
+  code = frame->code;
+  closure = frame->closure;
+  pc = frame->pc;
+  constants = code->constants;
+  locals = frame->stack_base;
+  stack = frame->stack_top;
 
 // Anything that can allocate must sync frame->stack_top first so the GC sees
-// the whole stack
+// the whole stack. Always use inside braces.
 #define RUNTIME_ERROR(err,  ...)                           \
   frame->stack_top = stack;                                \
   *stack++ = create_obj(snap_str_new_format(snap, __VA_ARGS__)); \
@@ -1037,81 +812,66 @@ new_frame:
   *stack++ = create_obj(snap_key_new(snap, err));          \
   goto raise;
 
-#ifndef INDIRECT_DISPATCH
-  for (;;) { switch (GETOP()) {
+#ifdef INDIRECT_DISPATCH
+  DISPATCH();
+#else
+  for (;;) {
+    inst = *pc++;
+    arg = INST_ARG(inst);
+    switch (INST_OP(inst)) {
 #endif
       OP(LOAD_GLOBAL) {
-        arg = GETARG();
-        NEXT(1);
-        a = snap_hash_get(&snap->globals, global_names[arg]);
-        if (!a) {
-          RUNTIME_ERROR("snap_name_error", "'%s' is not defined", as_sym(global_names[arg])->data);
+        SSym* sym = (SSym*)constants[arg].o;
+        if (is_undef(sym->value)) {
+          RUNTIME_ERROR("snap_name_error", "'%s' is not defined", sym->data);
         }
-        *stack++ = *a;
+        *stack++ = sym->value;
         DISPATCH();
       }
       OP(STORE_GLOBAL) {
-        arg = GETARG();
-        NEXT(1);
-        snap_hash_put(&snap->globals, global_names[arg], *--stack);
+        ((SSym*)constants[arg].o)->value = *--stack;
         DISPATCH();
       }
       OP(LOAD_LOCAL) {
-        arg = GETARG();
-        NEXT(1);
         *stack++ = locals[arg];
         DISPATCH();
       }
       OP(STORE_LOCAL) {
-        arg = GETARG();
-        NEXT(1);
         locals[arg] = *--stack;
         DISPATCH();
       }
       OP(LOAD_CLOSED) {
-        arg = GETARG();
-        NEXT(1);
         *stack++ = *closure->upvals[arg]->value;
         DISPATCH();
       }
       OP(STORE_CLOSED) {
-        arg = GETARG();
-        NEXT(1);
         *closure->upvals[arg]->value = *--stack;
         DISPATCH();
       }
       OP(LOAD_CONSTANT) {
-        arg = GETARG();
-        NEXT(1);
         *stack++ = constants[arg];
         DISPATCH();
       }
       OP(LOAD_NIL) {
-        arg = GETARG();
-        NEXT(1);
         *stack++ = create_nil();
         DISPATCH();
       }
       OP(POP) {
-        NEXT(1);
         --stack;
         DISPATCH();
       }
       OP(DUP) {
-        NEXT(1);
         *stack = *(stack - 1);
         stack++;
         DISPATCH();
       }
       OP(ROT2) {
-        NEXT(1);
         temp = *(stack - 1);
         *(stack - 1) = *(stack - 2);
         *(stack - 2) = temp;
         DISPATCH();
       }
       OP(ROT3) {
-        NEXT(1);
         temp = *(stack - 3);
         *(stack - 3) = *(stack - 1);
         *(stack - 1) = *(stack - 2);
@@ -1119,8 +879,6 @@ new_frame:
         DISPATCH();
       }
       OP(CALL) {
-        arg = GETARG();
-        NEXT(1);
         a = --stack; // Pop callable
         if (is_cfunc_p(a)) {
           temp = create_nil();
@@ -1133,23 +891,15 @@ new_frame:
             goto raise;
           }
           *stack++ = temp;
-        } else if (is_code_p(a)){
-          code = (SCode*)a->o;
-          if (arg != code->num_args) {
+        } else if (is_code_p(a) || is_closure_p(a)) {
+          SClosure* cl = is_closure_p(a) ? (SClosure*)a->o : NULL;
+          SCode* c = cl ? cl->code : (SCode*)a->o;
+          if (arg != c->num_args) {
             RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
           }
           frame->pc = pc;
           frame->stack_top = stack - arg; // Pop arguments
-          push_frame(snap, code, frame->stack_top, NULL);
-          goto new_frame;
-        } else if (is_closure_p(a)){
-          closure = (SClosure*)a->o;
-          if (arg != closure->code->num_args) {
-            RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
-          }
-          frame->pc = pc;
-          frame->stack_top = stack - arg; // Pop arguments
-          push_frame(snap, closure->code, frame->stack_top, closure);
+          push_frame(snap, c, frame->stack_top, cl);
           goto new_frame;
         } else {
           RUNTIME_ERROR("snap_type_error", "Value is not callable");
@@ -1157,26 +907,21 @@ new_frame:
         DISPATCH();
       }
       OP(CLOSURE) {
-        NEXT(1);
-        a = stack - 1;
-        if (is_code_p(a)) {
-          int i;
-          SClosure* cl;
-          SArr* descs = as_code_p(a)->closed_descs;
-          frame->stack_top = stack;
-          cl = snap_closure_new(snap, as_code_p(a));
-          *a = create_obj(cl); // Replace the code, keeping the closure rooted
-          for (i = 0; i < descs->len; ++i) {
-            SClosedDesc* desc = as_closed_desc(descs->data[i]);
-            if (desc->islocal) {
-              cl->upvals[i] = upval_find(snap, &locals[desc->index]);
-            } else {
-              cl->upvals[i] = closure->upvals[desc->index];
-            }
-          }
-        } else {
-          RUNTIME_ERROR("snap_type_error", "Value is not callable");
+        int i;
+        SCode* c = as_code_p(stack - 1);
+        SClosure* cl;
+        frame->stack_top = stack;
+        cl = snap_closure_new(snap, c);
+        *(stack - 1) = create_obj(cl); // Replace the code, keeping the closure rooted
+        for (i = 0; i < c->num_upvals; ++i) {
+          uint32_t desc = c->upvals[i];
+          cl->upvals[i] = (desc & 1) ? upval_find(snap, &locals[desc >> 1])
+                                     : closure->upvals[desc >> 1];
         }
+        DISPATCH();
+      }
+      OP(CLOSE_UPVALS) {
+        close_upvals(snap, locals + arg);
         DISPATCH();
       }
       OP(RETURN) {
@@ -1191,89 +936,45 @@ new_frame:
         mvec_pop(&snap->frames);
         return temp;
       }
-      OP(CLOSE_UPVALS) {
-        arg = GETARG();
-        NEXT(1);
-        close_upvals(snap, locals + arg);
-        DISPATCH();
-      }
       OP(JUMP) {
-        arg = GETJARG();
-        NEXT(arg);
+        pc += arg;
         DISPATCH();
       }
       OP(JUMP_FALSE) {
         a = --stack;
-        if (is_bool_p(a) && !a->b) {
-          arg = GETJARG();
-          NEXT(arg);
-        } else {
-          NEXT(1);
-        }
+        if (is_bool_p(a) && !a->b) pc += arg;
         DISPATCH();
       }
       OP(JUMP_FALSE_OR_POP) {
         a = stack - 1;
         if (is_bool_p(a) && !a->b) {
-          arg = GETJARG();
-          NEXT(arg);
+          pc += arg;
         } else {
           --stack;
-          NEXT(1);
-        }
-        DISPATCH();
-      }
-      OP(JUMP_TRUE) {
-        a = --stack;
-        if (!is_bool_p(a) || a->b) {
-          arg = GETJARG();
-          NEXT(arg);
-        } else {
-          NEXT(1);
         }
         DISPATCH();
       }
       OP(JUMP_TRUE_OR_POP) {
         a = stack - 1;
         if (!is_bool_p(a) || a->b) {
-          arg = GETJARG();
-          NEXT(arg);
+          pc += arg;
         } else {
           --stack;
-          NEXT(1);
         }
-        DISPATCH();
-      }
-      OP(BLOCK) {
-        if (frame->blocks_top >= SNAP_MAX_BLOCKS) {
-          RUNTIME_ERROR("snap_overflow_error", "Too many nested handlers");
-        }
-        arg = GETJARG();
-        block = &frame->blocks[frame->blocks_top++];
-        block->insts_offset = (pc - code->insts) + arg;
-        block->stack_offset = stack - snap->stack;
-        NEXT(1);
-        DISPATCH();
-      }
-      OP(END_BLOCK) {
-        NEXT(1);
-        --frame->blocks_top;
         DISPATCH();
       }
       OP(RAISE) {
         goto raise;
       }
       OP(NOT) {
-        NEXT(1);
-        a = --stack;
-        *stack++ = create_bool(is_bool_p(a) && !a->b);
+        a = stack - 1;
+        *a = create_bool(is_bool_p(a) && !a->b);
         DISPATCH();
       }
-      OP(ADD) { NEXT(1); arith_op(add_iop, add_fop) DISPATCH(); }
-      OP(SUB) { NEXT(1); arith_op(sub_iop, sub_fop) DISPATCH(); }
-      OP(MUL) { NEXT(1); arith_op(mul_iop, mul_fop) DISPATCH(); }
+      OP(ADD) { arith_op(add_iop, add_fop) DISPATCH(); }
+      OP(SUB) { arith_op(sub_iop, sub_fop) DISPATCH(); }
+      OP(MUL) { arith_op(mul_iop, mul_fop) DISPATCH(); }
       OP(DIV) {
-        NEXT(1);
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
         }
@@ -1281,114 +982,34 @@ new_frame:
         DISPATCH();
       }
       OP(MOD) {
-        NEXT(1);
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
         }
         arith_op(mod_iop, mod_fop)
         DISPATCH();
       }
-      OP(LESS_THAN)      { NEXT(1); compare_op(<) DISPATCH();  }
-      OP(GREATER_THAN)   { NEXT(1); compare_op(>) DISPATCH();  }
-      OP(LESS_EQUALS)    { NEXT(1); compare_op(<=) DISPATCH(); }
-      OP(GREATER_EQUALS) { NEXT(1); compare_op(>=) DISPATCH(); }
-      OP(EQUALS)         { NEXT(1); compare_op(==) DISPATCH(); }
+      OP(LESS_THAN)      { compare_op(<) DISPATCH();  }
+      OP(GREATER_THAN)   { compare_op(>) DISPATCH();  }
+      OP(LESS_EQUALS)    { compare_op(<=) DISPATCH(); }
+      OP(GREATER_EQUALS) { compare_op(>=) DISPATCH(); }
+      OP(EQUALS)         { compare_op(==) DISPATCH(); }
 #ifndef INDIRECT_DISPATCH
-    } }
+    }
+  }
 #endif
 
 #undef RUNTIME_ERROR
 
-  return create_nil();
-
 raise:
-  // Stack: [... msg err]
+  // Stack: [... msg err]. Allocate the error while the stack is still rooted.
   frame->stack_top = stack;
-  {
-    int i;
-    SValue err = *(stack - 1);
-    SValue msg = *(stack - 2);
-
-    for (i = snap->frames.vsize - 1; i >= 0; --i) {
-      if (snap->frames.vitems[i].blocks_top > 0) break;
-    }
-
-    if (i < 0) {
-      // Uncaught: allocate the error while the stack is still rooted
-      temp = create_obj(snap_err_new(snap, err, msg));
-      close_upvals(snap, snap->stack);
-      snap->frames.vsize = 0;
-      return temp;
-    }
-
-    snap->frames.vsize = i + 1;
-    frame = &mvec_back(&snap->frames);
-    block = &frame->blocks[--frame->blocks_top];
-    frame->pc = frame->code->insts + block->insts_offset;
-    frame->stack_top = snap->stack + block->stack_offset;
-    close_upvals(snap, frame->stack_top);
-    *frame->stack_top++ = msg;
-    *frame->stack_top++ = err;
-    goto new_frame;
-  }
+  temp = create_obj(snap_err_new(snap, *(stack - 1), *(stack - 2)));
+  close_upvals(snap, snap->stack);
+  snap->frames.vsize = 0;
+  return temp;
 }
 
-SValue snap_exec(Snap* snap, const char* str) {
-  SnapLex lex;
-  SValue expr, result;
-  SCodeGen* code_gen;
-  SCode* code;
-  bool first = true;
-  int num_anchors = snap->anchors.vsize;
-
-  lex.buf = str;
-  lex.buf_size = strlen(lex.buf);
-  lex.p = lex.buf;
-  lex.line = 1;
-
-  code_gen = anchor_code_gen(snap_code_gen_new(snap, NULL));
-  if (setjmp(snap->jmp) > 0) {
-    result = create_obj(snap->cause);
-    goto err;
-  } else {
-    while (parse(snap, &lex, &expr)) {
-      if (is_obj(expr)) snap_anchor(snap, expr.o);
-#ifdef SNAP_DEBUG
-      snap_print(expr);
-      printf("\n");
-#endif
-      if (!first)  insts_append(snap, code_gen, POP);
-      first = false;
-      compile(snap, code_gen, expr);
-      if (is_obj(expr)) snap_release(snap);
-    }
-  }
-  insts_append(snap, code_gen, RETURN);
-
-  code = anchor_code(snap_code_new(snap, code_gen));
-#ifdef SNAP_DEBUG
-  print_code(code, 0);
-#endif
-  push_frame(snap, code, snap->stack, NULL);
-  result = exec(snap);
-
-err:
-  snap->anchors.vsize = num_anchors; // Also unwinds anchors left by a longjmp
-  return result;
-}
-
-SObject* snap_anchor(Snap* snap, SObject* obj) {
-  *mvec_push(&snap->anchors, SObject*) = obj;
-  return obj;
-}
-
-void snap_release(Snap* snap) {
-  mvec_pop(&snap->anchors);
-}
-
-static int compile_expr_list(Snap* snap, SCodeGen* code_gen, bool pop, bool tail, SCons* sexpr);
-static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr);
-static void compile_tail(Snap* snap, SCodeGen* code_gen, SValue expr, bool tail);
+/* Parser */
 
 static void raise(Snap* snap, const char* err, const char* format, ...) {
   char msg[256];
@@ -1409,7 +1030,7 @@ static SValue parse_sexpr(Snap* snap, SnapLex* lex) {
   if (token == ')') {
     return create_empty();
   }
-  sexpr = anchor_cons(snap_cons_new(snap));
+  sexpr = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
   sexpr->first = parse_expr(snap, lex, token);
   curr = (SCons**)&sexpr->rest.o;
   // parse_expr() raises on EOF, so this always ends at ')'
@@ -1439,6 +1060,7 @@ static SValue parse_arr(Snap* snap, SnapLex* lex) {
   int token, len = 0, count = 0;
   SArr* arr;
 
+  // Count the elements first, then rewind and parse them
   const char* p = lex->p;
   int line = lex->line;
   while ((token = snap_lex_next_token(lex)) != ']' &&
@@ -1463,21 +1085,16 @@ static SValue parse_arr(Snap* snap, SnapLex* lex) {
   lex->p = p;
   lex->line = line;
 
-  arr = anchor_arr(snap_arr_new(snap, len));
+  arr = (SArr*)snap_anchor(snap, (SObject*)snap_arr_new(snap, len));
   while ((token = snap_lex_next_token(lex)) != ']') {
     arr->data[count++] = parse_expr(snap, lex, token);
   }
-
-  if (token != ']') {
-    raise(snap, "snap_parse_error", "Expected ']' to terminate array at %d", lex->line);
-  }
-
   snap_release(snap);
   return create_obj(arr);
 }
 
 static SValue parse_quote(Snap* snap, SnapLex* lex) {
-  SCons* sexpr = anchor_cons(snap_cons_new(snap));
+  SCons* sexpr = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
   sexpr->first = create_form(TK_QUOTE);
   sexpr->rest = create_obj(snap_cons_new(snap));
   as_cons(sexpr->rest)->first = parse_expr(snap, lex, snap_lex_next_token(lex));
@@ -1544,636 +1161,635 @@ static bool parse(Snap* snap, SnapLex* lex, SValue* result) {
   return true;
 }
 
-static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant);
-static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym);
+/* Compiler */
 
-static void compile(Snap* snap, SCodeGen* code_gen, SValue expr) {
-  switch (expr.type) {
-    case STYPE_INT:
-    case STYPE_FLOAT:
-    case STYPE_STR:
-    case STYPE_BOOL:
-    case STYPE_KEY:
-      load_constant(snap, code_gen, expr);
-      break;
-    case STYPE_NIL:
-      insts_append(snap, code_gen, LOAD_NIL);
-      break;
-    case STYPE_SYM:
-      load_variable(snap, code_gen, as_sym(expr));
-      break;
-    case STYPE_CONS:
-      if (is_empty(expr)) {
-        load_constant(snap, code_gen, expr);
-      } else {
-        compile_sexpr(snap, code_gen, as_cons(expr));
-      }
-      break;
-    default:
-      // error
-      raise(snap, "snap_compile_error", "Unexpected type");
-      break;
+// Compile-time state is plain malloc'd memory, not GC objects. The only GC
+// values it holds are constants, which are rooted through snap->fn_state.
+// Symbols are interned and live forever, so raw SSym* are safe to keep.
+
+typedef struct SnapLocal_ {
+  SSym* name;
+  int depth;
+  bool captured; // Closed over by an inner fn
+} SnapLocal;
+
+// The target of a recur: a loop, or the whole fn
+typedef struct SnapLoop_ {
+  int top;     // Instruction to jump back to
+  int base;    // Slot of the first variable
+  int count;   // Number of variables
+  bool closes; // The body has a fn, so recur must close upvalues first
+  struct SnapLoop_* up;
+} SnapLoop;
+
+typedef struct SnapFnState_ {
+  struct SnapFnState_* up;
+  struct { MVEC_FIELDS(SnapInst); } insts;
+  SnapVec constants;
+  SnapLocal locals[MAX_LOCALS];
+  int num_locals;
+  int max_locals;
+  uint32_t upvals[MAX_UPVALS]; // (index << 1) | islocal
+  int num_upvals;
+  int num_args;
+  int depth;       // Scope depth; 0 is top-level, where def makes globals
+  int stack;       // Operand stack depth at this point in the code
+  int max_stack;
+  int last_target; // Instruction most recently targeted by a jump
+  SnapLoop* loop;  // Innermost recur target, NULL at the top-level
+  SnapLoop fn_loop;
+} SnapFnState;
+
+static void gc_mark_fn_states(Snap* snap) {
+  SnapFnState* fs;
+  for (fs = snap->fn_state; fs; fs = fs->up) {
+    gc_mark_vals(snap, fs->constants.vitems, fs->constants.vsize);
   }
 }
 
-static int get_or_add_index(SnapHash* hash, SValue key) {
-  int index;
-  SValue* val = snap_hash_get(hash, key);
-  if (val) {
-    index = val->i;
-  } else {
-    index = hash->hcount;
-    snap_hash_put(hash, key, create_int(index));
-  }
-  return index;
+static SnapFnState* fn_state_new(Snap* snap) {
+  SnapFnState* fs = (SnapFnState*)calloc(1, sizeof(SnapFnState));
+  mvec_init(&fs->insts, SnapInst, 16);
+  mvec_init(&fs->constants, SValue, 8);
+  fs->last_target = -1;
+  fs->up = snap->fn_state;
+  snap->fn_state = fs;
+  return fs;
 }
 
-static SScope* find_local_scope(SCodeGen* code_gen, SSymStr* sym, int* index) {
-  SScope* scope = code_gen->scope;
-  SValue key = create_obj(sym);
-  while (scope) {
-    SValue* val = snap_hash_get(&scope->local_names, key);
-    if (val) {
-      *index = val->i;
-      return scope;
+static void fn_state_free(Snap* snap) {
+  SnapFnState* fs = snap->fn_state;
+  snap->fn_state = fs->up;
+  mvec_destroy(&fs->insts);
+  mvec_destroy(&fs->constants);
+  free(fs);
+}
+
+static SCode* code_new(Snap* snap, SnapFnState* fs) {
+  SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
+  c->insts = fs->insts.vitems;
+  c->insts_count = fs->insts.vsize;
+  c->constants = fs->constants.vitems;
+  c->num_constants = fs->constants.vsize;
+  c->upvals = (uint32_t*)malloc(fs->num_upvals * sizeof(uint32_t));
+  memcpy(c->upvals, fs->upvals, fs->num_upvals * sizeof(uint32_t));
+  c->num_upvals = fs->num_upvals;
+  c->num_args = fs->num_args;
+  c->num_locals = fs->max_locals;
+  c->max_stack_size = fs->max_stack + 2; /* Add enough room for raising errors */
+  snap->num_bytes_alloced += code_extra_bytes(c);
+
+  // The code object owns the buffers now
+  fs->insts.vitems = NULL;
+  fs->insts.vsize = 0;
+  fs->constants.vitems = NULL;
+  fs->constants.vsize = 0;
+  return c;
+}
+
+static void adjust_stack(SnapFnState* fs, int n) {
+  fs->stack += n;
+  if (fs->stack > fs->max_stack) {
+    fs->max_stack = fs->stack;
+  }
+}
+
+static int pc(SnapFnState* fs) {
+  return fs->insts.vsize;
+}
+
+static int last_op(SnapFnState* fs) {
+  return pc(fs) > 0 ? (int)INST_OP(fs->insts.vitems[pc(fs) - 1]) : -1;
+}
+
+static int emit(SnapFnState* fs, int op, int arg) {
+  // Peepholes, unless a jump lands between the instructions
+  if (fs->last_target != pc(fs)) {
+    int last = last_op(fs);
+    if (op == POP && (last == LOAD_LOCAL || last == LOAD_CLOSED ||
+                      last == LOAD_CONSTANT || last == LOAD_NIL)) {
+      fs->insts.vsize--;
+      adjust_stack(fs, -1);
+      return pc(fs) - 1;
     }
-    scope = scope->up;
-  }
-  return NULL;
-}
-
-static int find_local(SCodeGen* code_gen, SSymStr* sym) {
-  int index = -1;
-  find_local_scope(code_gen, sym, &index);
-  return index;
-}
-
-int add_local(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
-  SScope* scope = code_gen->scope;
-  SScope* curr = scope;
-  SValue key = create_obj(sym);
-  int index = 0;
-  if (snap_hash_get(&code_gen->scope->local_names, key)) {
-    raise(snap, "snap_compile_error", "Variable '%s' already defined in current scope", sym->data);
-  }
-  while (curr) {
-    index += curr->local_names.hcount;
-    curr = curr->up;
-  }
-  if (index + 1 > code_gen->num_locals) {
-    code_gen->num_locals = index + 1;
-  }
-  snap_hash_put(&scope->local_names, key, create_int(index));
-  return index;
-}
-
-int add_global(SCodeGen* code_gen, SSymStr* sym) {
-  SValue key = create_obj(sym);
-  SValue* val = snap_hash_get(&code_gen->global_names, key);
-  if (val)  return val->i;
-  int index = code_gen->global_names.hcount;
-  snap_hash_put(&code_gen->global_names, key, create_int(index));
-  return index;
-}
-
-static void load_constant(Snap* snap, SCodeGen* code_gen, SValue constant) {
-  int index = get_or_add_index(&code_gen->constants, constant);
-  SInst* inst = insts_append(snap, code_gen, LOAD_CONSTANT);
-  inst->arg = index;
-  inst->arg_data = constant;
-}
-
-static int add_closed(Snap* snap, SCodeGen* code_gen, SValue key,
-                      bool islocal, int index, SSymStr* sym) {
-  // Allocate before pushing so the GC never sees an uninitialized slot
-  SValue desc = create_obj(snap_closed_desc_new(snap, islocal, index, sym));
-  snap_hash_put(&code_gen->closed_names, key, create_int(code_gen->closed_descs.vsize));
-  *mvec_push(&code_gen->closed_descs, SValue) = desc;
-  return code_gen->closed_descs.vsize - 1;
-}
-
-static int find_or_add_closed(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
-  int index;
-  SScope* scope;
-  SValue key = create_obj(sym);
-  SCodeGen* curr = code_gen->up;
-  SValue* val = snap_hash_get(&code_gen->closed_names, key);
-  if (val) {
-    return val->i;
-  }
-  if (curr) {
-    scope = find_local_scope(curr, sym, &index);
-    if (scope) {
-      // Leaving this scope (or any enclosing one) must close its upvalues
-      for (; scope; scope = scope->up) {
-        scope->captured = true;
-      }
-      return add_closed(snap, code_gen, key, true, index, sym);
+    if (op == RETURN && last == CLOSE_UPVALS) {
+      fs->insts.vsize--; // RETURN closes all of the frame's upvalues anyway
     }
+  }
 
-    index = find_or_add_closed(snap, curr, sym);
-    if (index >= 0) {
-      return add_closed(snap, code_gen, key, false, index, sym);
+  switch (op) {
+    case LOAD_GLOBAL: case LOAD_LOCAL: case LOAD_CLOSED:
+    case LOAD_CONSTANT: case LOAD_NIL: case DUP:
+      adjust_stack(fs, 1);
+      break;
+    case STORE_GLOBAL: case STORE_LOCAL: case STORE_CLOSED:
+    case POP: case RETURN: case RAISE:
+    case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
+    case ADD: case SUB: case MUL: case DIV: case MOD:
+    case LESS_THAN: case LESS_EQUALS: case GREATER_THAN:
+    case GREATER_EQUALS: case EQUALS:
+      adjust_stack(fs, -1);
+      break;
+    case CALL:
+      adjust_stack(fs, -arg); // subtract arg + 1, add 1
+      break;
+  }
+
+  *mvec_push(&fs->insts, SnapInst) = INST(op, arg);
+  return pc(fs) - 1;
+}
+
+static int emit_jump(SnapFnState* fs, int op) {
+  return emit(fs, op, 0);
+}
+
+// Jump offsets are relative to the instruction after the jump
+static void patch_jump(Snap* snap, SnapFnState* fs, int at) {
+  int offset = pc(fs) - (at + 1);
+  if (offset > MAX_ARG) {
+    raise(snap, "snap_compile_error", "Jump is too far");
+  }
+  fs->insts.vitems[at] = INST(INST_OP(fs->insts.vitems[at]), offset);
+  fs->last_target = pc(fs);
+}
+
+static void emit_jump_back(Snap* snap, SnapFnState* fs, int target) {
+  int offset = target - (pc(fs) + 1);
+  if (offset < -MAX_ARG) {
+    raise(snap, "snap_compile_error", "Jump is too far");
+  }
+  emit(fs, JUMP, offset);
+}
+
+static int add_constant(Snap* snap, SnapFnState* fs, SValue val) {
+  int i;
+  for (i = 0; i < fs->constants.vsize; ++i) {
+    if (snap_compare(&fs->constants.vitems[i], &val) == 0) return i;
+  }
+  if (i > MAX_ARG) {
+    raise(snap, "snap_compile_error", "Too many constants");
+  }
+  *mvec_push(&fs->constants, SValue) = val;
+  return i;
+}
+
+static void load_constant(Snap* snap, SnapFnState* fs, SValue val) {
+  emit(fs, LOAD_CONSTANT, add_constant(snap, fs, val));
+}
+
+static void begin_scope(SnapFnState* fs) {
+  fs->depth++;
+}
+
+static void end_scope(SnapFnState* fs) {
+  bool captured = false;
+  fs->depth--;
+  while (fs->num_locals > 0 && fs->locals[fs->num_locals - 1].depth > fs->depth) {
+    captured |= fs->locals[--fs->num_locals].captured;
+  }
+  // Leaving the scope frees its slots for reuse, so close captured ones
+  if (captured) {
+    emit(fs, CLOSE_UPVALS, fs->num_locals);
+  }
+}
+
+static int add_local(Snap* snap, SnapFnState* fs, SSym* name) {
+  int i;
+  SnapLocal* local;
+  for (i = fs->num_locals - 1; i >= 0 && fs->locals[i].depth == fs->depth; --i) {
+    if (fs->locals[i].name == name) {
+      raise(snap, "snap_compile_error", "Variable '%s' already defined in current scope", name->data);
     }
+  }
+  if (fs->num_locals >= MAX_LOCALS) {
+    raise(snap, "snap_compile_error", "Too many local variables");
+  }
+  local = &fs->locals[fs->num_locals++];
+  local->name = name;
+  local->depth = fs->depth;
+  local->captured = false;
+  if (fs->num_locals > fs->max_locals) {
+    fs->max_locals = fs->num_locals;
+  }
+  return fs->num_locals - 1;
+}
+
+static int resolve_local(SnapFnState* fs, SSym* name) {
+  int i;
+  for (i = fs->num_locals - 1; i >= 0; --i) {
+    if (fs->locals[i].name == name) return i;
   }
   return -1;
 }
 
-// Close captured locals before each `recur` jumps back and reuses their slots
-static void insts_close_recurs(Snap* snap, SCodeGen* code_gen, SScope* scope) {
-  SValue* item;
-  if (!scope->captured) return;
-  mvec_foreach(&scope->recurs, item) {
-    SInst* before = (SInst*)item->o;
-    SInst* inst = snap_inst_new(snap, CLOSE_UPVALS);
-    inst->arg = scope->base;
-    mlist_add(before->list.prev, &before->list, &inst->list);
-    code_gen->insts_count++;
-  }
-}
-
-static void load_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
-  int index = find_local(code_gen, sym);
-  if (index >= 0) {
-    SInst* inst = insts_append(snap, code_gen, LOAD_LOCAL);
-    inst->arg = index;
-    inst->arg_data = create_obj(sym);
-    return;
-  }
-  index = find_or_add_closed(snap, code_gen, sym);
-  if (index >= 0) {
-    SInst* inst = insts_append(snap, code_gen, LOAD_CLOSED);
-    inst->arg = index;
-    inst->arg_data = create_obj(sym);
-    return;
-  }
-  {
-    int index = get_or_add_index(&code_gen->global_names, create_obj(sym));
-    SInst* inst = insts_append(snap, code_gen, LOAD_GLOBAL);
-    inst->arg = index;
-    inst->arg_data = create_obj(sym);
-  }
-}
-
-static void store_variable(Snap* snap, SCodeGen* code_gen, SSymStr* sym) {
-  int index = find_local(code_gen, sym);
-  if (index >= 0) {
-    SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
-    inst->arg = index;
-    inst->arg_data = create_obj(sym);
-    return;
-  }
-  index = find_or_add_closed(snap, code_gen, sym);
-  if (index >= 0) {
-    SInst* inst = insts_append(snap, code_gen, STORE_CLOSED);
-    inst->arg = index;
-    inst->arg_data = create_obj(sym);
-    return;
-  }
-  {
-    int index = get_or_add_index(&code_gen->global_names, create_obj(sym));
-    SInst* inst = insts_append(snap, code_gen, STORE_GLOBAL);
-    inst->arg = index;
-    inst->arg_data = create_obj(sym);
-  }
-}
-
-static void compile_def(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  SSymStr* sym;
-  if (!sexpr || !is_sym(sexpr->first)) {
-    raise(snap, "snap_compile_error", "Expected id for first argument of define");
-  }
-  if (!as_cons(sexpr->rest)) {
-    raise(snap, "snap_compile_error", "Expected expression");
-  }
-  if (!is_empty(as_cons(sexpr->rest)->rest)) {
-    raise(snap, "snap_compile_error", "No more expressions expected");
-  }
-  sym = as_sym(sexpr->first);
-  compile(snap, code_gen, as_cons(sexpr->rest)->first);
-  if (code_gen->scope) {
-    SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
-    inst->arg = add_local(snap, code_gen, sym);
-    inst->arg_data = create_obj(sym);
-  } else {
-    SInst* inst = insts_append(snap, code_gen, STORE_GLOBAL);
-    inst->arg = add_global(code_gen, sym);
-    inst->arg_data = create_obj(sym);
-  }
-  insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
-}
-
-static void compile_if(Snap* snap, SCodeGen* code_gen, bool tail, SCons* sexpr) {
-  SInst* cond_jump, * jump;
-
-  if (!sexpr || !as_cons(sexpr->rest) || !as_cons(as_cons(sexpr->rest)->rest)) {
-    raise(snap, "snap_compile_error", "Expected expressions");
-  }
-
-  if (!is_empty(as_cons(as_cons(sexpr->rest)->rest)->rest)) {
-    raise(snap, "snap_compile_error", "No more expressions expected");
-  }
-
-  compile(snap, code_gen, sexpr->first);
-  cond_jump = insts_append(snap, code_gen, JUMP_FALSE);
-
-  /* True */
-  compile_tail(snap, code_gen, as_cons(sexpr->rest)->first, tail);
-  jump = insts_append(snap, code_gen, JUMP);
-  jump_arg_init(&cond_jump->jump_arg, 1, code_gen->insts.prev);
-
-  /* False */
-  compile_tail(snap, code_gen, as_cons(as_cons(sexpr->rest)->rest)->first, tail);
-  jump_arg_init(&jump->jump_arg, 1, code_gen->insts.prev);
-}
-
-static void compile_fn(Snap* snap, SCodeGen* up, SCons* sexpr) {
+static int add_upval(Snap* snap, SnapFnState* fs, int index, bool islocal) {
   int i;
-  SArr* args;
-  SCodeGen* code_gen;
+  uint32_t desc = ((uint32_t)index << 1) | islocal;
+  for (i = 0; i < fs->num_upvals; ++i) {
+    if (fs->upvals[i] == desc) return i;
+  }
+  if (fs->num_upvals >= MAX_UPVALS) {
+    raise(snap, "snap_compile_error", "Too many closed over variables");
+  }
+  fs->upvals[fs->num_upvals] = desc;
+  return fs->num_upvals++;
+}
 
-  if (!sexpr || !is_arr(sexpr->first)) {
+static int resolve_upval(Snap* snap, SnapFnState* fs, SSym* name) {
+  int index;
+  if (!fs->up) return -1;
+  index = resolve_local(fs->up, name);
+  if (index >= 0) {
+    fs->up->locals[index].captured = true;
+    return add_upval(snap, fs, index, true);
+  }
+  index = resolve_upval(snap, fs->up, name);
+  if (index >= 0) {
+    return add_upval(snap, fs, index, false);
+  }
+  return -1;
+}
+
+static void load_variable(Snap* snap, SnapFnState* fs, SSym* name) {
+  int index;
+  if ((index = resolve_local(fs, name)) >= 0) {
+    emit(fs, LOAD_LOCAL, index);
+  } else if ((index = resolve_upval(snap, fs, name)) >= 0) {
+    emit(fs, LOAD_CLOSED, index);
+  } else {
+    emit(fs, LOAD_GLOBAL, add_constant(snap, fs, create_obj(name)));
+  }
+}
+
+static void store_variable(Snap* snap, SnapFnState* fs, SSym* name) {
+  int index;
+  if ((index = resolve_local(fs, name)) >= 0) {
+    emit(fs, STORE_LOCAL, index);
+  } else if ((index = resolve_upval(snap, fs, name)) >= 0) {
+    emit(fs, STORE_CLOSED, index);
+  } else {
+    emit(fs, STORE_GLOBAL, add_constant(snap, fs, create_obj(name)));
+  }
+}
+
+// Conservative check for an inner fn (quoted data can give false positives)
+static bool contains_fn(SValue expr) {
+  int i;
+  if (is_cons(expr)) {
+    SCons* curr;
+    for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) {
+      if ((is_form(curr->first) && curr->first.i == TK_FN) ||
+          contains_fn(curr->first)) {
+        return true;
+      }
+    }
+  } else if (is_arr(expr)) {
+    for (i = 0; i < as_arr(expr)->len; ++i) {
+      if (contains_fn(as_arr(expr)->data[i])) return true;
+    }
+  }
+  return false;
+}
+
+static int list_length(SCons* list) {
+  int count = 0;
+  for (; list; list = as_cons(list->rest)) count++;
+  return count;
+}
+
+// The nth element; the list must have more than n elements
+static SValue nth(SCons* list, int n) {
+  while (n-- > 0) list = as_cons(list->rest);
+  return list->first;
+}
+
+static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail);
+
+static void compile_body(Snap* snap, SnapFnState* fs, SCons* body, bool tail) {
+  SCons* curr;
+  for (curr = body; curr != NULL; curr = as_cons(curr->rest)) {
+    if (curr != body) emit(fs, POP, 0);
+    compile(snap, fs, curr->first, tail && is_empty(curr->rest));
+  }
+}
+
+static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
+  SSym* name;
+  if (list_length(args) != 2 || !is_sym(args->first)) {
+    raise(snap, "snap_compile_error", "Expected (def <id> <expr>)");
+  }
+  name = as_sym(args->first);
+  compile(snap, fs, nth(args, 1), false);
+  if (fs->depth > 0) {
+    emit(fs, STORE_LOCAL, add_local(snap, fs, name));
+  } else {
+    emit(fs, STORE_GLOBAL, add_constant(snap, fs, create_obj(name)));
+  }
+  emit(fs, LOAD_NIL, 0); /* TODO: Hack */
+}
+
+static void compile_set(Snap* snap, SnapFnState* fs, SCons* args) {
+  if (list_length(args) != 2 || !is_sym(args->first)) {
+    raise(snap, "snap_compile_error", "Expected (set! <id> <expr>)");
+  }
+  compile(snap, fs, nth(args, 1), false);
+  store_variable(snap, fs, as_sym(args->first));
+  emit(fs, LOAD_NIL, 0); /* TODO: Hack */
+}
+
+static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
+  int cond_jump, jump, stack;
+  if (list_length(args) != 3) {
+    raise(snap, "snap_compile_error", "Expected (if <cond> <then> <else>)");
+  }
+  compile(snap, fs, args->first, false);
+  cond_jump = emit_jump(fs, JUMP_FALSE);
+  stack = fs->stack;
+
+  compile(snap, fs, nth(args, 1), tail);
+  jump = emit_jump(fs, JUMP);
+
+  patch_jump(snap, fs, cond_jump);
+  fs->stack = stack;
+  compile(snap, fs, nth(args, 2), tail);
+  patch_jump(snap, fs, jump);
+}
+
+static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
+  int i;
+  SArr* params;
+  SnapFnState* fs;
+  SCode* code;
+
+  if (!args || !is_arr(args->first)) {
     raise(snap, "snap_compile_error", "Expected parameter list");
   }
-
-  if (!as_cons(sexpr->rest)) {
+  if (!as_cons(args->rest)) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
 
-  args = as_arr(sexpr->first);
-  code_gen = anchor_code_gen(snap_code_gen_new(snap, up));
-  code_gen->scope = snap_scope_new(snap, NULL);
+  params = as_arr(args->first);
+  fs = fn_state_new(snap);
+  fs->depth = 1; // def inside a fn makes locals
 
-  for (i = 0; i < args->len; ++i) {
-    SSymStr* sym;
-    if (!is_sym(args->data[i])) {
+  for (i = 0; i < params->len; ++i) {
+    if (!is_sym(params->data[i])) {
       raise(snap, "snap_compile_error", "Expected symbol");
     }
-    sym = as_sym(args->data[i]);
-    *mvec_push(&code_gen->param_names, SValue) = create_obj(sym);
-    add_local(snap, code_gen, sym);
+    add_local(snap, fs, as_sym(params->data[i]));
   }
+  fs->num_args = params->len;
 
-  compile_expr_list(snap, code_gen, true, true, as_cons(sexpr->rest));
-  insts_close_recurs(snap, code_gen, code_gen->scope);
-  insts_append(snap, code_gen, RETURN);
+  fs->fn_loop.top = 0;
+  fs->fn_loop.base = 0;
+  fs->fn_loop.count = params->len;
+  fs->fn_loop.closes = contains_fn(args->rest);
+  fs->loop = &fs->fn_loop;
 
-  load_constant(snap, up, create_obj(snap_code_new(snap, code_gen)));
-  if (code_gen->closed_descs.vsize > 0) {
-    insts_append(snap, up, CLOSURE);
-  }
+  compile_body(snap, fs, as_cons(args->rest), true);
+  emit(fs, RETURN, 0);
 
-  code_gen->scope = code_gen->scope->up;
-  snap_release(snap);
-}
-
-static void compile_arith_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int opcode;
-  SCons* curr;
-  if (!as_cons(sexpr->rest) || !as_cons(as_cons(sexpr->rest)->rest)) {
-    raise(snap, "snap_compile_error", "Expected expressions");
-  }
-  opcode = (sexpr->first.i - TK_ADD) + ADD;
-  curr = as_cons(sexpr->rest);
-  compile(snap, code_gen, curr->first);
-  // Left fold: (- a b c) is ((a - b) - c)
-  for (curr = as_cons(curr->rest); curr != NULL; curr = as_cons(curr->rest)) {
-    compile(snap, code_gen, curr->first);
-    insts_append(snap, code_gen, opcode);
+  code = code_new(snap, fs);
+  fn_state_free(snap);
+  load_constant(snap, up, create_obj(code)); // Rooted again as a constant
+  if (code->num_upvals > 0) {
+    emit(up, CLOSURE, 0);
   }
 }
 
-static void compile_cond_expr_inner(Snap* snap, SCodeGen* code_gen, int opcode, SCons* sexpr) {
-  SInst* jump_false = NULL;
-  SCons* curr = as_cons(sexpr->rest);
-  compile(snap, code_gen, sexpr->first);
+static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail) {
+  int i, base;
+  SArr* bindings;
+  SnapLoop recur_target;
 
-  insts_append(snap, code_gen, DUP);
-  insts_append(snap, code_gen, ROT3);
-  insts_append(snap, code_gen, opcode);
-
-  if (curr) {
-    jump_false = insts_append(snap, code_gen, JUMP_FALSE_OR_POP);
-    compile_cond_expr_inner(snap, code_gen, opcode, curr);
-  }
-
-  if (jump_false) {
-    jump_arg_init(&jump_false->jump_arg, 1, code_gen->insts.prev);
-  }
-}
-
-static void compile_cond_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int i;
-  int opcode;
-  SCons* curr;
-  SInst* jump_false = NULL;
-  if (!as_cons(sexpr->rest) || !as_cons(as_cons(sexpr->rest)->rest)) {
-    raise(snap, "snap_compile_error", "Expected expressions");
-  }
-  opcode = (sexpr->first.i - TK_LT) + LESS_THAN;
-  curr = as_cons(sexpr->rest);
-  jump_false = NULL;
-
-  for (i = 0; i < 2; ++i) {
-    compile(snap, code_gen, curr->first);
-    curr = as_cons(curr->rest);
-  }
-
-  if (curr) {
-    insts_append(snap, code_gen, DUP);
-    insts_append(snap, code_gen, ROT3);
-    insts_append(snap, code_gen, opcode);
-    jump_false = insts_append(snap, code_gen, JUMP_FALSE_OR_POP);
-    compile_cond_expr_inner(snap, code_gen, opcode, curr);
-  } else {
-    insts_append(snap, code_gen, opcode);
-  }
-
-  if (jump_false) {
-    jump_arg_init(&jump_false->jump_arg, 1, code_gen->insts.prev);
-    insts_append(snap, code_gen, ROT2);
-    insts_append(snap, code_gen, POP);
-  }
-}
-
-static void compile_cond_not_expr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  if (!sexpr) {
-    raise(snap, "snap_compile_error", "Expected expression");
-  }
-  compile(snap, code_gen, sexpr->first);
-  insts_append(snap, code_gen, NOT);
-}
-
-static void compile_cond_and_or_expr_inner(Snap* snap, SCodeGen* code_gen, int opcode,
-                                           bool tail, SCons* sexpr) {
-  SInst* jump_false = NULL;
-  SCons* curr = as_cons(sexpr->rest);
-  compile_tail(snap, code_gen, sexpr->first, tail && !curr);
-
-  if (curr) {
-    jump_false = insts_append(snap, code_gen, opcode);
-    compile_cond_and_or_expr_inner(snap, code_gen, opcode, tail, curr);
-  }
-
-  if (jump_false) {
-    jump_arg_init(&jump_false->jump_arg, 1, code_gen->insts.prev);
-  }
-}
-
-static void compile_cond_and_or_expr(Snap* snap, SCodeGen* code_gen, bool tail, SCons* sexpr) {
-  int token = sexpr->first.i;
-  SCons* curr = as_cons(sexpr->rest);
-
-  if (curr) {
-    compile_cond_and_or_expr_inner(snap, code_gen,
-                                   token == TK_AND ? JUMP_FALSE_OR_POP : JUMP_TRUE_OR_POP,
-                                   tail, curr);
-  } else {
-    load_constant(snap, code_gen, create_bool(token == TK_AND));
-  }
-}
-
-static void compile_call(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int count;
-  if (!is_sym(sexpr->first))  {
-    raise(snap, "snap_compile_error", "Expected symbol or lambda");
-  }
-  count = compile_expr_list(snap, code_gen, false, false, as_cons(sexpr->rest));
-  load_variable(snap, code_gen, as_sym(sexpr->first));
-  insts_append(snap, code_gen, CALL)->arg = count;
-}
-
-static void compile_sub_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  int count = compile_expr_list(snap, code_gen, false, false, as_cons(sexpr->rest));
-  compile_sexpr(snap, code_gen, as_cons(sexpr->first));
-  insts_append(snap, code_gen, CALL)->arg = count;
-}
-
-static void compile_set(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  if (!sexpr || !is_sym(sexpr->first)) {
-    raise(snap, "snap_compile_error", "Expected id for first argument of set!");
-  }
-  if (!as_cons(sexpr->rest) || !is_empty(as_cons(sexpr->rest)->rest)) {
-    raise(snap, "snap_compile_error", "Expected a single expression");
-  }
-  compile(snap, code_gen, as_cons(sexpr->rest)->first);
-  store_variable(snap, code_gen, as_sym(sexpr->first));
-  insts_append(snap, code_gen, LOAD_NIL); /* TODO: Hack */
-}
-
-static void compile_loop_or_let(Snap* snap, SCodeGen* code_gen, int loop_or_let,
-                                bool tail, SCons* sexpr) {
-  int i;
-  SArr* args;
-
-  if (!sexpr || !is_arr(sexpr->first)) {
+  if (!args || !is_arr(args->first)) {
     raise(snap, "snap_compile_error", "Expected binding array");
   }
-
-  if (!as_cons(sexpr->rest)) {
+  if (!as_cons(args->rest)) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
 
-  args = as_arr(sexpr->first);
-
-  for (i = 0; i < args->len; ++i) {
-    if (!is_arr(args->data[i])) {
-      raise(snap, "snap_compile_error", "Expected binding pair");
-    }
-    if (as_arr(args->data[i])->len != 2) {
-      raise(snap, "snap_compile_error", "Invalid number of elements in binding pair");
-    }
-    if (!is_sym(as_arr(args->data[i])->data[0])) {
-      raise(snap, "snap_compile_error", "Expected an identifier for the first element of binding pair");
+  bindings = as_arr(args->first);
+  for (i = 0; i < bindings->len; ++i) {
+    SValue binding = bindings->data[i];
+    if (!is_arr(binding) || as_arr(binding)->len != 2 || !is_sym(as_arr(binding)->data[0])) {
+      raise(snap, "snap_compile_error", "Expected binding pair [<id> <expr>]");
     }
   }
 
-  for (i = 0; i < args->len; ++i) {
-    SArr* arg = as_arr(args->data[i]);
-    compile(snap, code_gen, arg->data[1]);
+  // Values are evaluated before any of the names are visible
+  for (i = 0; i < bindings->len; ++i) {
+    compile(snap, fs, as_arr(bindings->data[i])->data[1], false);
   }
 
-  code_gen->scope = snap_scope_new(snap, code_gen->scope);
-
-  for (i = 0; i < args->len; ++i) {
-    SArr* arg = as_arr(args->data[i]);
-    SSymStr* sym = as_sym(arg->data[0]);
-    if (loop_or_let == TK_LOOP) {
-      *mvec_push(&code_gen->scope->param_names, SValue) = create_obj(sym);
-    }
-    add_local(snap, code_gen, sym);
+  begin_scope(fs);
+  base = fs->num_locals;
+  for (i = 0; i < bindings->len; ++i) {
+    add_local(snap, fs, as_sym(as_arr(bindings->data[i])->data[0]));
+  }
+  for (i = bindings->len - 1; i >= 0; --i) {
+    emit(fs, STORE_LOCAL, base + i);
   }
 
-  for (i = args->len - 1; i >= 0; --i) {
-    SArr* arg = as_arr(args->data[i]);
-    int index = get_or_add_index(&code_gen->scope->local_names, arg->data[0]);
-    SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
-    inst->arg = index;
-    inst->arg_data = arg->data[0];
+  if (loop) {
+    recur_target.top = pc(fs);
+    recur_target.base = base;
+    recur_target.count = bindings->len;
+    recur_target.closes = contains_fn(args->rest);
+    recur_target.up = fs->loop;
+    fs->loop = &recur_target;
   }
 
-  code_gen->scope->top = code_gen->insts.prev;
+  // A loop body is a fresh tail context for its recur
+  compile_body(snap, fs, as_cons(args->rest), loop || tail);
 
-  compile_expr_list(snap, code_gen, true, loop_or_let == TK_LOOP || tail,
-                    as_cons(sexpr->rest));
-
-  insts_close_recurs(snap, code_gen, code_gen->scope);
-  if (code_gen->scope->captured) {
-    insts_append(snap, code_gen, CLOSE_UPVALS)->arg = code_gen->scope->base;
+  if (loop) {
+    fs->loop = recur_target.up;
   }
-
-  code_gen->scope = code_gen->scope->up;
+  end_scope(fs);
 }
 
-// An argument that is just the target's own variable needs no store. Checks
-// the symbol resolves to that variable and isn't shadowed by an inner let.
-static bool is_same_local(SCodeGen* code_gen, SScope* target, SValue arg, SValue param) {
-  SValue* index;
-  if (!is_sym(arg) || snap_compare(&arg, &param) != 0) return false;
-  index = snap_hash_get(&target->local_names, param);
-  return index && find_local(code_gen, as_sym(arg)) == index->i;
+// An argument that is just the target's own variable needs no store
+static bool is_same_local(SnapFnState* fs, SValue arg, int slot) {
+  return is_sym(arg) && resolve_local(fs, as_sym(arg)) == slot;
 }
 
-static void compile_recur(Snap* snap, SCodeGen* code_gen, bool tail, SCons* sexpr) {
-  int i, count = 0;
+static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
+  int i;
   SCons* curr;
-  SScope* target;
-  SnapVec* param_names;
-  SInst* first = NULL;
-  SInst* jump;
+  SnapLoop* target = fs->loop;
 
-  if (!code_gen->scope) {
+  if (!target) {
     raise(snap, "snap_compile_error", "recur must be inside a fn or loop");
   }
   if (!tail) {
     raise(snap, "snap_compile_error", "recur must be in tail position");
   }
-
-  // Target the innermost loop, otherwise the fn's outermost scope
-  for (target = code_gen->scope;
-       target->up && target->param_names.vsize == 0;
-       target = target->up) { }
-
-  if (target->param_names.vsize > 0) {
-    param_names = &target->param_names;
-  } else {
-    param_names = &code_gen->param_names;
-  }
-
-  for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
-    if (count >= param_names->vsize) {
-      raise(snap, "snap_compile_error", "Invalid number of arguments");
-    }
-    if (!is_same_local(code_gen, target, curr->first, param_names->vitems[count])) {
-      compile(snap, code_gen, curr->first);
-    }
-    count++;
-  }
-
-  if (count != param_names->vsize) {
+  if (list_length(args) != target->count) {
     raise(snap, "snap_compile_error", "Invalid number of arguments");
   }
 
-  for (i = count - 1; i >= 0; --i) {
-    int j;
-    for (j = 0, curr = sexpr; j < i; ++j, curr = as_cons(curr->rest)) { }
-    if (!is_same_local(code_gen, target, curr->first, param_names->vitems[i])) {
-      SValue* index = snap_hash_get(&target->local_names, param_names->vitems[i]);
-      SInst* inst = insts_append(snap, code_gen, STORE_LOCAL);
-      inst->arg = index->i;
-      inst->arg_data = param_names->vitems[i];
-      if (!first) first = inst;
+  for (i = 0, curr = args; curr != NULL; ++i, curr = as_cons(curr->rest)) {
+    if (!is_same_local(fs, curr->first, target->base + i)) {
+      compile(snap, fs, curr->first, false);
     }
   }
 
-  jump = insts_append(snap, code_gen, JUMP);
-  if (target->param_names.vsize > 0) {
-    jump_arg_init(&jump->jump_arg, -1, target->top->next);
+  // Captured variables must be closed before their slots are overwritten
+  if (target->closes) {
+    emit(fs, CLOSE_UPVALS, target->base);
+  }
+
+  for (i = target->count - 1; i >= 0; --i) {
+    if (!is_same_local(fs, nth(args, i), target->base + i)) {
+      emit(fs, STORE_LOCAL, target->base + i);
+    }
+  }
+
+  emit_jump_back(snap, fs, target->top);
+}
+
+static void compile_raise(Snap* snap, SnapFnState* fs, SCons* args) {
+  if (list_length(args) != 2) {
+    raise(snap, "snap_compile_error", "Expected (raise <err> <msg>)");
+  }
+  compile(snap, fs, nth(args, 1), false);
+  compile(snap, fs, args->first, false);
+  emit(fs, RAISE, 0);
+}
+
+static void compile_arith(Snap* snap, SnapFnState* fs, int opcode, SCons* args) {
+  SCons* curr;
+  if (list_length(args) < 2) {
+    raise(snap, "snap_compile_error", "Expected expressions");
+  }
+  compile(snap, fs, args->first, false);
+  // Left fold: (- a b c) is ((a - b) - c)
+  for (curr = as_cons(args->rest); curr != NULL; curr = as_cons(curr->rest)) {
+    compile(snap, fs, curr->first, false);
+    emit(fs, opcode, 0);
+  }
+}
+
+// Stack on entry: [prev]. Leaves [last result] on every path.
+static void compile_compare_rest(Snap* snap, SnapFnState* fs, int opcode, SCons* curr) {
+  int jump;
+  compile(snap, fs, curr->first, false); // [prev x]
+  emit(fs, DUP, 0);                      // [prev x x]
+  emit(fs, ROT3, 0);                     // [x prev x]
+  emit(fs, opcode, 0);                   // [x result]
+  if (is_empty(curr->rest)) return;
+  jump = emit_jump(fs, JUMP_FALSE_OR_POP); // Stop at the first false: [x false]
+  compile_compare_rest(snap, fs, opcode, as_cons(curr->rest));
+  patch_jump(snap, fs, jump);
+}
+
+static void compile_compare(Snap* snap, SnapFnState* fs, int opcode, SCons* args) {
+  int count = list_length(args);
+  if (count < 2) {
+    raise(snap, "snap_compile_error", "Expected expressions");
+  }
+  compile(snap, fs, args->first, false);
+  if (count == 2) {
+    compile(snap, fs, nth(args, 1), false);
+    emit(fs, opcode, 0);
   } else {
-    jump_arg_init(&jump->jump_arg, -1, code_gen->insts.next);
+    // (< a b c) is (and (< a b) (< b c)) evaluating each operand once
+    compile_compare_rest(snap, fs, opcode, as_cons(args->rest)); // [x result]
+    emit(fs, ROT2, 0);
+    emit(fs, POP, 0);
   }
-
-  // Where to insert CLOSE_UPVALS if the target scope turns out to be captured
-  if (!first) first = jump;
-  *mvec_push(&target->recurs, SValue) = create_obj(first);
 }
 
-static void compile_with_handler(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  // TODO: Exceptions (the VM side, BLOCK/END_BLOCK, exists)
-  raise(snap, "snap_compile_error", "with-handler is not implemented");
+static void compile_and_or(Snap* snap, SnapFnState* fs, int opcode, SCons* args, bool tail) {
+  int jump;
+  compile(snap, fs, args->first, tail && is_empty(args->rest));
+  if (is_empty(args->rest)) return;
+  jump = emit_jump(fs, opcode);
+  compile_and_or(snap, fs, opcode, as_cons(args->rest), tail);
+  patch_jump(snap, fs, jump);
 }
 
-static void compile_raise(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  if (!sexpr || !as_cons(sexpr->rest) || !is_empty(as_cons(sexpr->rest)->rest)) {
-    raise(snap, "snap_compile_error", "Expected error and message");
+static void compile_call(Snap* snap, SnapFnState* fs, SCons* sexpr) {
+  SCons* curr;
+  int count = 0;
+  for (curr = as_cons(sexpr->rest); curr != NULL; curr = as_cons(curr->rest)) {
+    compile(snap, fs, curr->first, false);
+    count++;
   }
-  compile(snap, code_gen, as_cons(sexpr->rest)->first);
-  compile(snap, code_gen, sexpr->first);
-  insts_append(snap, code_gen, RAISE);
+  compile(snap, fs, sexpr->first, false);
+  emit(fs, CALL, count);
 }
 
-static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
-  bool tail = code_gen->is_tail;
-  code_gen->is_tail = false; // Subexpressions aren't in tail position by default
+static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
+  SCons* args = as_cons(sexpr->rest);
   switch (sexpr->first.type) {
     case STYPE_SYM:
-      compile_call(snap, code_gen, sexpr);
-      break;
     case STYPE_CONS:
-      compile_sub_sexpr(snap, code_gen, sexpr);
+      compile_call(snap, fs, sexpr);
       break;
     case STYPE_FORM:
       switch (sexpr->first.i) {
         case TK_BEGIN:
-          if (!as_cons(sexpr->rest)) {
+          if (!args) {
             raise(snap, "snap_compile_error", "Expected expressions");
           }
-          compile_expr_list(snap, code_gen, true, tail, as_cons(sexpr->rest));
+          compile_body(snap, fs, args, tail);
           break;
         case TK_DEF:
-          compile_def(snap, code_gen, as_cons(sexpr->rest));
+          compile_def(snap, fs, args);
           break;
         case TK_IF:
-          compile_if(snap, code_gen, tail, as_cons(sexpr->rest));
+          compile_if(snap, fs, args, tail);
           break;
         case TK_FN:
-          compile_fn(snap, code_gen, as_cons(sexpr->rest));
+          compile_fn(snap, fs, args);
           break;
         case TK_LET:
-          compile_loop_or_let(snap, code_gen, TK_LET, tail, as_cons(sexpr->rest));
+          compile_let(snap, fs, args, false, tail);
           break;
         case TK_LOOP:
-          compile_loop_or_let(snap, code_gen, TK_LOOP, tail, as_cons(sexpr->rest));
+          compile_let(snap, fs, args, true, tail);
           break;
         case TK_QUOTE:
-          if (!as_cons(sexpr->rest) || !is_empty(as_cons(sexpr->rest)->rest)) {
+          if (list_length(args) != 1) {
             raise(snap, "snap_compile_error", "Expected a single expression");
           }
-          load_constant(snap, code_gen, as_cons(sexpr->rest)->first);
+          load_constant(snap, fs, args->first);
           break;
         case TK_RECUR:
-          compile_recur(snap, code_gen, tail, as_cons(sexpr->rest));
+          compile_recur(snap, fs, args, tail);
           break;
         case TK_SET:
-          compile_set(snap, code_gen, as_cons(sexpr->rest));
+          compile_set(snap, fs, args);
           break;
         case TK_RAISE:
-          compile_raise(snap, code_gen, as_cons(sexpr->rest));
+          compile_raise(snap, fs, args);
           break;
         case TK_WITH_HANDLER:
-          compile_with_handler(snap, code_gen, as_cons(sexpr->rest));
+          raise(snap, "snap_compile_error", "with-handler is not implemented"); // TODO: Exceptions
           break;
         case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
-          compile_arith_expr(snap, code_gen, sexpr);
+          compile_arith(snap, fs, (sexpr->first.i - TK_ADD) + ADD, args);
           break;
         case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
-          compile_cond_expr(snap, code_gen, sexpr);
+          compile_compare(snap, fs, (sexpr->first.i - TK_LT) + LESS_THAN, args);
           break;
         case TK_NOT:
-          compile_cond_not_expr(snap, code_gen, as_cons(sexpr->rest));
+          if (list_length(args) != 1) {
+            raise(snap, "snap_compile_error", "Expected expression");
+          }
+          compile(snap, fs, args->first, false);
+          emit(fs, NOT, 0);
           break;
         case TK_AND: case TK_OR:
-          compile_cond_and_or_expr(snap, code_gen, tail, sexpr);
+          if (!args) {
+            load_constant(snap, fs, create_bool(sexpr->first.i == TK_AND));
+          } else {
+            compile_and_or(snap, fs, sexpr->first.i == TK_AND ? JUMP_FALSE_OR_POP
+                                                              : JUMP_TRUE_OR_POP,
+                           args, tail);
+          }
           break;
         default:
           raise(snap, "snap_compile_error", "Unexpected special form");
@@ -2184,36 +1800,93 @@ static void compile_sexpr(Snap* snap, SCodeGen* code_gen, SCons* sexpr) {
       raise(snap, "snap_compile_error", "Expected id, special form or expr");
       break;
   }
-  code_gen->is_tail = tail;
 }
 
-static int compile_expr_list(Snap* snap, SCodeGen* code_gen, bool pop, bool tail, SCons* sexpr) {
-  SCons* curr;
-  int count = 0;
-  for (curr = sexpr; curr != NULL; curr = as_cons(curr->rest)) {
-    if (pop && count > 0) insts_append(snap, code_gen, POP);
-    compile_tail(snap, code_gen, curr->first, tail && is_empty(curr->rest));
-    count++;
+// `tail` is whether expr is in tail position relative to its recur target
+static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
+  int stack = fs->stack;
+  switch (expr.type) {
+    case STYPE_INT:
+    case STYPE_FLOAT:
+    case STYPE_STR:
+    case STYPE_BOOL:
+    case STYPE_KEY:
+      load_constant(snap, fs, expr);
+      break;
+    case STYPE_NIL:
+      emit(fs, LOAD_NIL, 0);
+      break;
+    case STYPE_SYM:
+      load_variable(snap, fs, as_sym(expr));
+      break;
+    case STYPE_CONS:
+      if (is_empty(expr)) {
+        load_constant(snap, fs, expr);
+      } else {
+        compile_sexpr(snap, fs, as_cons(expr), tail);
+      }
+      break;
+    default:
+      raise(snap, "snap_compile_error", "Unexpected type");
+      break;
   }
-  return count;
+  // Every expression leaves exactly one value (even when it ends in a jump,
+  // like recur, or never finishes, like raise)
+  fs->stack = stack;
+  adjust_stack(fs, 1);
 }
 
-static void compile_tail(Snap* snap, SCodeGen* code_gen, SValue expr, bool tail) {
-  bool saved = code_gen->is_tail;
-  code_gen->is_tail = tail;
-  compile(snap, code_gen, expr);
-  code_gen->is_tail = saved;
+SValue snap_exec(Snap* snap, const char* str) {
+  SnapLex lex;
+  SValue expr, result;
+  SnapFnState* fs;
+  SCode* code;
+  bool first = true;
+  int num_anchors = snap->anchors.vsize;
+
+  lex.buf = str;
+  lex.buf_size = strlen(lex.buf);
+  lex.p = lex.buf;
+  lex.line = 1;
+
+  if (setjmp(snap->jmp) > 0) {
+    while (snap->fn_state) fn_state_free(snap);
+    result = create_obj(snap->cause);
+    goto done;
+  }
+
+  fs = fn_state_new(snap);
+  while (parse(snap, &lex, &expr)) {
+    if (is_obj(expr)) snap_anchor(snap, expr.o);
+#ifdef SNAP_DEBUG
+    snap_print(expr);
+    printf("\n");
+#endif
+    if (!first) emit(fs, POP, 0);
+    first = false;
+    compile(snap, fs, expr, false);
+    if (is_obj(expr)) snap_release(snap);
+  }
+  if (first) emit(fs, LOAD_NIL, 0);
+  emit(fs, RETURN, 0);
+
+  code = (SCode*)snap_anchor(snap, (SObject*)code_new(snap, fs));
+  fn_state_free(snap);
+#ifdef SNAP_DEBUG
+  print_code(code, 0);
+#endif
+  push_frame(snap, code, snap->stack, NULL);
+  result = exec(snap);
+
+done:
+  snap->anchors.vsize = num_anchors; // Also unwinds anchors left by a longjmp
+  return result;
 }
 
-static SInst* insts_append(Snap* snap, SCodeGen* code_gen, int opcode) {
-  SInst* inst = snap_inst_new(snap, opcode);
-  code_gen->insts_count++;
-  mlist_append(&code_gen->insts, &inst->list);
-  return inst;
-}
+/* Printing */
 
 void snap_print(SValue val) {
-  print_val(val, 0);
+  print_val(val);
 }
 
 static void iprintf(int indent, const char* format, ...) {
@@ -2224,403 +1897,154 @@ static void iprintf(int indent, const char* format, ...) {
   va_end(args);
 }
 
-static void print_val(SValue val, int indent) {
+static const char* form_name(SnapInt token) {
+  switch (token) {
+    case TK_BEGIN: return "begin";
+    case TK_DEF: return "def";
+    case TK_ELLIPSIS: return "...";
+    case TK_IF: return "if";
+    case TK_FN: return "fn";
+    case TK_LET: return "let";
+    case TK_LOOP: return "loop";
+    case TK_QUOTE: return "quote";
+    case TK_RECUR: return "recur";
+    case TK_SET: return "set!";
+    case TK_RAISE: return "raise";
+    case TK_WITH_HANDLER: return "with-handler";
+    case TK_LT: return "<";
+    case TK_LE: return "<=";
+    case TK_GT: return ">";
+    case TK_GE: return ">=";
+    case TK_EQ: return "=";
+    case TK_NOT: return "not";
+    case TK_AND: return "and";
+    case TK_OR: return "or";
+    case TK_ADD: return "+";
+    case TK_SUB: return "-";
+    case TK_MUL: return "*";
+    case TK_DIV: return "/";
+    case TK_MOD: return "%";
+    default: return "<form>";
+  }
+}
+
+static void print_val(SValue val) {
+  int i;
+  SCons* cons;
   switch(val.type) {
     case STYPE_NIL:
-      iprintf(indent, "nil");
+      printf("nil");
       break;
     case STYPE_BOOL:
-      iprintf(indent, "%s", val.b ? "true" : "false");
+      printf("%s", val.b ? "true" : "false");
       break;
     case STYPE_INT:
-      iprintf(indent, "%ld", val.i);
+      printf("%ld", val.i);
       break;
     case STYPE_FLOAT:
-      iprintf(indent, "%f", val.f);
+      printf("%f", val.f);
       break;
     case STYPE_CFUNC:
-      iprintf(indent, "<cfunc> %p", val.c);
+      printf("<cfunc %p>", (void*)val.c);
       break;
     case STYPE_FORM:
-      switch (val.i) {
-        case TK_BEGIN: iprintf(indent, "begin"); break;
-        case TK_DEF: iprintf(indent, "def"); break;
-        case TK_ELLIPSIS: iprintf(indent, "..."); break;
-        case TK_IF: iprintf(indent, "if"); break;
-        case TK_FN: iprintf(indent, "fn"); break;
-        case TK_LET: iprintf(indent, "let"); break;
-        case TK_LOOP: iprintf(indent, "loop"); break;
-        case TK_QUOTE: iprintf(indent, "quote"); break;
-        case TK_RECUR: iprintf(indent, "recur"); break;
-        case TK_SET: iprintf(indent, "set"); break;
-        case TK_RAISE: iprintf(indent, "raise"); break;
-        case TK_WITH_HANDLER: iprintf(indent, "with-handler"); break;
-        case TK_LT: iprintf(indent, "<"); break;
-        case TK_LE: iprintf(indent, "<="); break;
-        case TK_GT: iprintf(indent, ">"); break;
-        case TK_GE: iprintf(indent, ">="); break;
-        case TK_EQ: iprintf(indent, "="); break;
-        case TK_NOT: iprintf(indent, "not"); break;
-        case TK_AND: iprintf(indent, "and"); break;
-        case TK_OR: iprintf(indent, "or"); break;
-        case TK_ADD: iprintf(indent, "+"); break;
-        case TK_SUB: iprintf(indent, "-"); break;
-        case TK_MUL: iprintf(indent, "*"); break;
-        case TK_DIV: iprintf(indent, "/"); break;
-        case TK_MOD: iprintf(indent, "%%"); break;
-      }
+      printf("%s", form_name(val.i));
       break;
     case STYPE_STR:
-      iprintf(indent, "\"%s\"", as_str(val)->data);
+      printf("\"%s\"", as_str(val)->data);
       break;
     case STYPE_SYM:
-      iprintf(indent, "%s", as_sym(val)->data);
+      printf("%s", as_sym(val)->data);
       break;
     case STYPE_KEY:
-      iprintf(indent, ":%s", as_key(val)->data);
+      printf(":%s", as_key(val)->data);
       break;
     case STYPE_ERR:
-      iprintf(indent, "<err ");
-      print_val(as_err(val)->err, 0);
+      printf("<err ");
+      print_val(as_err(val)->err);
       printf(" ");
-      print_val(as_err(val)->msg, 0);
+      print_val(as_err(val)->msg);
       printf(">");
       break;
     case STYPE_ARR:
-      iprintf(indent, "[");
-      print_arr(as_arr(val), indent);
-      iprintf(indent, "]");
-    break;
+      printf("[");
+      for (i = 0; i < as_arr(val)->len; ++i) {
+        if (i > 0) printf(" ");
+        print_val(as_arr(val)->data[i]);
+      }
+      printf("]");
+      break;
     case STYPE_CONS:
-      iprintf(indent, "(");
-      print_cons(as_cons(val), indent);
-      iprintf(indent, ")");
+      printf("(");
+      for (cons = as_cons(val); cons != NULL; ) {
+        print_val(cons->first);
+        if (!is_cons(cons->rest)) {
+          printf(" . ");
+          print_val(cons->rest);
+          break;
+        }
+        cons = as_cons(cons->rest);
+        if (cons) printf(" ");
+      }
+      printf(")");
       break;
     case STYPE_CODE:
-      iprintf(indent, "<code object (%p)>:\n", val.o);
-      print_code(as_code(val), indent + 1);
+      printf("<fn %p>", (void*)val.o);
       break;
     case STYPE_CLOSURE:
-      iprintf(indent, "<closure object (%p)>:\n", val.o);
-      print_closure((SClosure*)as_closure(val), indent + 1);
+      printf("<closure %p>", (void*)val.o);
       break;
-  }
-}
-
-static void print_arr(SArr* arr, int indent) {
-  int i = 0;
-  for (i = 0; i < arr->len; ++i) {
-    if (i > 0) printf(" ");
-    print_val(arr->data[i], indent);
-  }
-}
-
-static void print_cons(SCons* cons, int indent) {
-  int space = 0;
-  while (cons != NULL) {
-    if (space) printf(" ");
-    space = 1;
-    print_val(cons->first, indent);
-    if (is_cons(cons->rest)) {
-      cons = as_cons(cons->rest);
-    } else {
-      printf(" . ");
-      print_val(cons->rest, indent);
-      break;
-    }
   }
 }
 
 static void print_code(SCode* code, int indent) {
-  int i = 0;
-  if (code->global_names->len > 0) {
-    iprintf(indent, "global names: {\n");
-    for (i = 0; i < code->global_names->len; ++i) {
-      iprintf(indent + 1, "%d => ", i);
-      print_val(code->global_names->data[i], 0);
-      printf("\n");
-    }
-    iprintf(indent, "}\n");
-  }
-  if (code->constants->len > 0) {
-    iprintf(indent, "constants: {\n");
-    for (i = 0; i < code->constants->len; ++i) {
-      if (is_code(code->constants->data[i])) {
-        iprintf(indent + 1, "%d =>\n", i);
-        print_val(code->constants->data[i], indent + 2);
-      } else {
-        iprintf(indent + 1, "%d => ", i);
-        print_val(code->constants->data[i], 0);
-        printf("\n");
-      }
-    }
-    iprintf(indent, "}\n");
-  }
-  if (code->closed_descs->len > 0) {
-    iprintf(indent, "closed_descs: {\n");
-    for (i = 0; i < code->closed_descs->len; ++i) {
-      SClosedDesc* desc = (SClosedDesc*)code->closed_descs->data[i].o;
-      iprintf(indent + 1, "%d => { name: %s, islocal: %s, index: %d }\n",
-              i, desc->name->data, desc->islocal ? "true" : "false", desc->index);
-    }
-    iprintf(indent, "}\n");
-  }
-  iprintf(indent, "instructions: {\n");
-  insts_dump(&code->insts_debug, indent);
-  iprintf(indent, "}\n");
-}
-
-static void print_closure(SClosure* closure, int indent) {
   int i;
-  iprintf(indent, "code: {\n");
-  print_code(closure->code, indent + 1);
-  iprintf(indent, "}\n");
-  iprintf(indent, "closed: {\n");
-  for (i = 0; i < closure->code->closed_descs->len; ++i) {
-    iprintf(indent + 1, "%d => ", i);
-    print_val(*closure->upvals[i]->value, 0);
+  iprintf(indent, "args: %d, locals: %d, max stack: %d\n",
+          code->num_args, code->num_locals, code->max_stack_size);
+  for (i = 0; i < code->num_upvals; ++i) {
+    iprintf(indent, "upval %d: %s %d\n", i,
+            (code->upvals[i] & 1) ? "local" : "upval", code->upvals[i] >> 1);
+  }
+  for (i = 0; i < code->insts_count; ++i) {
+    int op = INST_OP(code->insts[i]);
+    int arg = INST_ARG(code->insts[i]);
+    iprintf(indent, "%6d %-18s", i, opcode_name(op));
+    switch (op) {
+      case LOAD_GLOBAL: case STORE_GLOBAL: case LOAD_CONSTANT:
+        printf(" %-6d ", arg);
+        print_val(code->constants[arg]);
+        break;
+      case JUMP: case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
+        printf(" %-6d (to %d)", arg, i + 1 + arg);
+        break;
+      case LOAD_LOCAL: case STORE_LOCAL: case LOAD_CLOSED: case STORE_CLOSED:
+      case CALL: case CLOSE_UPVALS:
+        printf(" %d", arg);
+        break;
+    }
     printf("\n");
   }
-  iprintf(indent, "}\n");
-}
-
-
-static int insts_calculate_jump(SInst* inst) {
-  int total = 0;
-  SInst* prev_inst;
-  do {
-    int i;
-    prev_inst = inst;
-    if (inst->jump_arg.dir > 0) {
-      int jump = mlist_forward_count(&inst->list, inst->jump_arg.dest) + 1;
-      for (i = 0; i < jump; ++i) {
-        inst = mlist_entry(SInst, inst->list.next, list);
-      }
-      total += jump;
-    } else {
-      int jump = mlist_backward_count(&inst->list, inst->jump_arg.dest);
-      for (i = 0; i < jump; ++i) {
-        inst = mlist_entry(SInst, inst->list.prev, list);
-      }
-      total -= jump;
-    }
-  } while (inst->opcode == JUMP && prev_inst != inst);
-  return total;
-}
-
-static void insts_remove(MList* insts, SInst* to_remove) {
-  MList* pos;
-  mlist_foreach(insts) {
-    SInst* inst = mlist_entry(SInst, pos, list);
-    switch (inst->opcode) {
-      case JUMP:
-      case JUMP_FALSE:
-      case JUMP_FALSE_OR_POP:
-      case JUMP_TRUE:
-      case JUMP_TRUE_OR_POP:
-      case BLOCK:
-        // Forward jumps land after `dest`, backward jumps land on it
-        if (inst->jump_arg.dest == &to_remove->list) {
-          inst->jump_arg.dest = inst->jump_arg.dir > 0 ? to_remove->list.prev
-                                                       : to_remove->list.next;
-        }
-        break;
-    }
-  }
-  mlist_remove(&to_remove->list);
-}
-
-// Does any jump land on `target`? Forward jumps land after `dest`, backward
-// jumps land on it.
-static bool insts_is_jump_target(MList* insts, SInst* target) {
-  MList* pos;
-  mlist_foreach(insts) {
-    SInst* inst = mlist_entry(SInst, pos, list);
-    switch (inst->opcode) {
-      case JUMP:
-      case JUMP_FALSE:
-      case JUMP_FALSE_OR_POP:
-      case JUMP_TRUE:
-      case JUMP_TRUE_OR_POP:
-      case BLOCK:
-        if (inst->jump_arg.dir > 0 ? inst->jump_arg.dest == target->list.prev
-                                   : inst->jump_arg.dest == &target->list) {
-          return true;
-        }
-        break;
-    }
-  }
-  return false;
-}
-
-static void insts_remove_dead_code(MList* insts) {
-  MList* pos = insts->next;
-  while (pos != insts) {
-    SInst* inst = mlist_entry(SInst, pos, list);
-    SInst* prev_inst;
-    pos = pos->next;
-    switch (inst->opcode) {
-      case POP:
-        assert(inst->list.prev != insts);
-        prev_inst = mlist_entry(SInst, inst->list.prev, list);
-        if (insts_is_jump_target(insts, inst)) break;
-        switch (prev_inst->opcode) {
-          case LOAD_CONSTANT:
-          case LOAD_GLOBAL:
-          case LOAD_LOCAL:
-          case LOAD_CLOSED:
-          case LOAD_NIL:
-            insts_remove(insts, prev_inst);
-            insts_remove(insts, inst);
-            break;
-        }
-        break;
-      case RETURN:
-        // RETURN closes all of the frame's upvalues anyway
-        if (inst->list.prev == insts) break;
-        prev_inst = mlist_entry(SInst, inst->list.prev, list);
-        if (prev_inst->opcode == CLOSE_UPVALS) {
-          insts_remove(insts, prev_inst);
-        }
-        break;
-      case STORE_GLOBAL:
-        assert(inst->list.prev != insts);
-        prev_inst = mlist_entry(SInst, inst->list.prev, list);
-        if (prev_inst->opcode == LOAD_GLOBAL && prev_inst->arg == inst->arg &&
-            !insts_is_jump_target(insts, inst)) {
-          insts_remove(insts, prev_inst);
-          insts_remove(insts, inst);
-        }
-        break;
-      case STORE_LOCAL:
-        assert(inst->list.prev != insts);
-        prev_inst = mlist_entry(SInst, inst->list.prev, list);
-        if (prev_inst->opcode == LOAD_LOCAL && prev_inst->arg == inst->arg &&
-            !insts_is_jump_target(insts, inst)) {
-          insts_remove(insts, prev_inst);
-          insts_remove(insts, inst);
-        }
-        break;
+  for (i = 0; i < code->num_constants; ++i) {
+    if (is_code(code->constants[i])) {
+      iprintf(indent, "constant %d:\n", i);
+      print_code(as_code(code->constants[i]), indent + 2);
     }
   }
 }
 
-static void insts_dump(MList* insts, int indent) {
-  MList* pos;
-  int i = 0;
-  int jump;
-  mlist_foreach(insts) {
-    SInst* inst = mlist_entry(SInst, pos, list);
-    switch(inst->opcode) {
-      case LOAD_GLOBAL:
-      case STORE_GLOBAL:
-      case LOAD_LOCAL:
-      case STORE_LOCAL:
-      case LOAD_CLOSED:
-      case STORE_CLOSED:
-        iprintf(indent + 1, "%8d %-18s %-8d (%s)\n",
-                i, opcode_name(inst->opcode), inst->arg, as_sym(inst->arg_data)->data);
-        break;
-      case LOAD_CONSTANT:
-        if (inst->arg_data.type == STYPE_BOOL  || inst->arg_data.type == STYPE_INT ||
-            inst->arg_data.type == STYPE_FLOAT || inst->arg_data.type == STYPE_STR ||
-            inst->arg_data.type == STYPE_SYM || inst->arg_data.type == STYPE_KEY) {
-          iprintf(indent + 1, "%8d %-18s %-8d (",
-                  i, opcode_name(inst->opcode), inst->arg);
-          print_val(inst->arg_data, 0);
-          printf(")\n");
-        } else {
-          iprintf(indent + 1, "%8d %-18s %-8d (<%s at %p>)\n",
-                  i, opcode_name(inst->opcode), inst->arg,
-                  stype_name(inst->arg_data.type), inst->arg_data.o);
-        }
-        break;
-      case CALL:
-      case CLOSE_UPVALS:
-        iprintf(indent + 1, "%8d %-18s %-8d\n",
-                i, opcode_name(inst->opcode), inst->arg);
-        break;
-      case LOAD_NIL:
-      case POP:
-      case DUP:
-      case ROT2:
-      case ROT3:
-      case CLOSURE:
-      case RETURN:
-      case END_BLOCK:
-      case RAISE:
-      case ADD:
-      case SUB:
-      case MUL:
-      case DIV:
-      case MOD:
-      case LESS_THAN:
-      case LESS_EQUALS:
-      case GREATER_THAN:
-      case GREATER_EQUALS:
-      case EQUALS:
-      case NOT:
-        iprintf(indent + 1, "%8d %-18s\n", i, opcode_name(inst->opcode));
-        break;
-      case JUMP:
-      case JUMP_FALSE:
-      case JUMP_FALSE_OR_POP:
-      case JUMP_TRUE:
-      case JUMP_TRUE_OR_POP:
-      case BLOCK:
-        jump = insts_calculate_jump(inst);
-        iprintf(indent + 1, "%8d %-18s %-8d (jump to %d)\n", i,
-                opcode_name(inst->opcode), jump, i + jump);
-        break;
-    }
-    i++;
-  }
-}
+/* Builtins */
 
 void builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  if (num_args > 0) {
-    int i;
-    for (i = 0; i < num_args; ++i) {
-      if (i > 0) printf(" ");
-      snap_print(args[i]);
-    }
+  int i;
+  for (i = 0; i < num_args; ++i) {
+    if (i > 0) printf(" ");
+    snap_print(args[i]);
   }
 }
 
 void builtin_println(Snap* snap, const SValue* args, int num_args, SValue* result) {
   builtin_print(snap, args, num_args, result);
   printf("\n");
-}
-
-void builtin_eval(Snap* snap, const SValue* args, int num_args, SValue* result) {
-#if 0
-  SCodeGen* code_gen;
-
-  if (num_args !=  1) {
-    *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
-  }
-
-  code_gen = anchor_code_gen(snap_code_gen_new(snap, NULL));
-  af (setjmp(snap->jmp) > 0) {
-    *result =  create_obj(snap->cause);
-    goto err;
-  } else {
-    SValue result;
-    SCode* code;
-
-    code = anchor_code(snap_code_new(snap, code_gen));
-    compile(snap, code_gen, args[0]);
-    insts_append(snap, code_gen, POP);
-
-    print_code(code, 0);
-    push_frame(snap, code, snap->stack, NULL);
-    *result = exec(snap);
-  }
-
-err:
-  snap_release(snap);
-  snap_release(snap);
-#endif
 }
 
 void builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -2642,13 +2066,14 @@ void snap_init(Snap* snap) {
   snap->all = NULL;
   snap->gray = NULL;
   snap->open_upvals = NULL;
+  snap->fn_state = NULL;
   snap->cause = NULL;
-  snap_hash_init(&snap->globals);
+  snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
 
-  snap_def(snap, "print", create_cfunc(builtin_print));
-  snap_def(snap, "println", create_cfunc(builtin_println));
-  snap_def(snap, "nil?", create_cfunc(builtin_isnil));
+  snap_def_cfunc(snap, "print", builtin_print);
+  snap_def_cfunc(snap, "println", builtin_println);
+  snap_def_cfunc(snap, "nil?", builtin_isnil);
 }
 
 void snap_destroy(Snap* snap) {
@@ -2661,7 +2086,7 @@ void snap_destroy(Snap* snap) {
   free((void*)snap->stack);
   mvec_destroy(&snap->frames);
   mvec_destroy(&snap->anchors);
-  snap_hash_destroy(&snap->globals);
+  snap_hash_destroy(&snap->symbols);
   snap_hash_destroy(&snap->keywords);
   assert(snap->num_bytes_alloced == 0);
 }
