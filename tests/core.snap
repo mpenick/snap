@@ -1,0 +1,32 @@
+; vi: filetype=scheme
+
+; arithmetic folds left
+(println "fold:" (- 5 1 1) (/ 100 10 5) (- 10 3 2) (+ 1 2 3 4))
+
+; ints and floats mix
+(println "mixed:" (+ 1 2.5) (< 1 2.5) (* 2 1.5) (= 1 1.0))
+
+; ints wrap instead of trapping
+(println "wrap:" (/ (- 0 9223372036854775807 1) -1) (* 9223372036854775807 2))
+(println "float div zero:" (/ 7.0 0))
+
+; comparison chains
+(println "chains:" (< 1 2 3) (< 1 3 2) (< 3 1 2) (= 2 2 2))
+
+; distinct quoted arrays are distinct constants
+(println "quoted:" (quote [1 2]) (quote [3 4]) (= (quote [1 2]) (quote [3 4])))
+
+; empty list
+(println "empty:" () (quote ()) (quote (1 () 2)))
+
+; forms print in quoted data
+(println "forms:" (quote (/ % <= = >)))
+
+; recur doesn't skip an argument that's shadowed by a let
+(loop [[a 0] [n 0]] (if (> n 0) (println "shadow:" a) (let [[a 5]] (recur a 1))))
+
+; a jump landing on a POP keeps the POP (stack would leak and overflow)
+(println "peephole:" (loop [[i 0]] (if (< i 100000) (begin (if true 1 2) 3 (recur (+ i 1))) i)))
+
+; the last operand of and/or is in tail position
+(println "and tail:" (loop [[i 0]] (and true (if (< i 5) (recur (+ i 1)) i))))

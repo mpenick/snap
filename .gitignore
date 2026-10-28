@@ -7,3 +7,4 @@ snap_lex.h
 .depends
 *.user
 gc
+snap_stress

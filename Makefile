@@ -24,7 +24,18 @@ endif
 snap_lex.h: snap_lex.rh
 	ragel snap_lex.rh
 
-.PHONY: clean
+test: $(TARGET)
+	@tests/run.sh ./$(TARGET)
+
+# Collect every few bytes under ASan/UBSan to shake out missing GC roots
+stress: snap_lex.h
+	$(CC) -g -O0 -fsanitize=address,undefined -DGC_EVERY_NUM_BYTES=256 -o snap_stress $(SOURCES) $(LDFLAGS)
+	@for f in test.snap closure.snap loop.snap new.snap; do \
+		echo "== $$f"; ./snap_stress $$f > /dev/null || exit 1; \
+	done
+	@tests/run.sh ./snap_stress
+
+.PHONY: clean test stress
 clean:
 	rm -rf $(TARGET).dSYM .depends
-	rm -f $(TARGET) snap_lex.h *.o a.out
+	rm -f $(TARGET) snap_stress snap_lex.h *.o a.out

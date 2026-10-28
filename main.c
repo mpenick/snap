@@ -5,6 +5,7 @@
 
 int main(int argc, char** argv) {
   const char* filename;
+  int rc = 0;
   Snap snap;
   snap_init(&snap);
 
@@ -45,7 +46,7 @@ int main(int argc, char** argv) {
       if (result.type == STYPE_ERR) {
         snap_print(result);
         printf("\n");
-        return -1;
+        rc = -1;
       }
     } else {
       fprintf(stderr, "Unable to read %s\n", filename);
@@ -58,5 +59,5 @@ int main(int argc, char** argv) {
 
   snap_destroy(&snap);
 
-  return 0;
+  return rc;
 }

@@ -1,0 +1,5 @@
+; vi: filetype=scheme
+
+(def f (fn [] (+ 1 "a")))
+(f)
+(println "not reached")

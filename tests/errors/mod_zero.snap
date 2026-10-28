@@ -1,0 +1,3 @@
+; vi: filetype=scheme
+
+(println (% 7 0))

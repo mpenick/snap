@@ -1,0 +1,4 @@
+; vi: filetype=scheme
+
+(def f (fn [n] (if (= n 0) (raise :oops "from deep") (f (- n 1)))))
+(f 50)

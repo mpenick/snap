@@ -1,0 +1,43 @@
+; vi: filetype=scheme
+
+; two closures share x after mk returns
+(def g nil)
+(def mk (fn [x]
+  (let [[inc (fn [] (set! x (+ x 1)) x)]]
+    (set! g (fn [] x))
+    inc)))
+(def i (mk 0))
+(println "shared:" (i) (i) (i) (g))
+
+; sibling lets reuse the same slot; first closure must keep its value
+(def h nil)
+(def sib (fn []
+  (let [[a 1]] (set! h (fn [] a)))
+  (let [[b 2]] b)
+  (h)))
+(println "sibling let:" (sib))
+
+; each loop iteration gets a fresh binding
+(def f0 nil) (def f1 nil) (def f2 nil)
+(def stash (fn [n f] (if (= n 0) (set! f0 f) (if (= n 1) (set! f1 f) (set! f2 f)))))
+(loop [[n 0]]
+  (if (< n 3)
+    (begin (stash n (fn [] n)) (recur (+ n 1)))
+    nil))
+(println "loop:" (f0) (f1) (f2))
+
+; fn-level recur with captured param
+(def walk (fn [k]
+  (if (< k 3)
+    (begin (stash k (fn [] k)) (recur (+ k 1)))
+    nil)))
+(walk 0)
+(println "fn recur:" (f0) (f1) (f2))
+
+; recur inside a let inside a loop targets the loop
+(println "let in loop:" (loop [[i 0] [s 0]] (let [[t (+ s i)]] (if (< i 4) (recur (+ i 1) t) t))))
+
+; nested capture through two levels
+(def outer (fn [x] (fn [] (fn [] (set! x (+ x 10)) x))))
+(def mid ((outer 5)))
+(println "nested:" (mid) (mid))

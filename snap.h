@@ -85,7 +85,8 @@
   XX(STYPE_KEY, 17, "key") \
   XX(STYPE_TEMPSTR, 18, "tempstr") \
   XX(STYPE_CLOSURE, 19, "closure") \
-  XX(STYPE_CLOSED_DESC, 20, "closeddesc")
+  XX(STYPE_CLOSED_DESC, 20, "closeddesc") \
+  XX(STYPE_UPVAL, 21, "upval")
 
 enum {
 #define XX(type, id, name) type,
@@ -198,6 +199,9 @@ typedef struct SScope_ {
   MList* top; // Top of code for looping/tail recursion
   SnapHash local_names;
   SnapVec param_names;
+  SnapVec recurs; // First inst of each `recur` targeting this scope
+  int base; // Index of the scope's first local
+  bool captured; // A local in this scope (or an inner scope) is closed over
   struct SScope_* up;
 }  SScope;
 
@@ -208,16 +212,18 @@ typedef struct SClosedDesc_ {
   SSymStr* name;
 } SClosedDesc;
 
-typedef struct SnapClosed_ {
-  SValue* value;
+typedef struct SUpval_ {
+  SOBJECT_FIELDS
+  SValue* value; // Points into the stack while open, at `closed` once closed
   SValue closed;
-} SnapClosed;
+  struct SUpval_* next; // Next open upvalue (sorted by descending stack address)
+} SUpval;
 
 typedef struct SClosure_ {
   SOBJECT_FIELDS
   SCode* code;
-  struct SClosure_* next;
-  SnapClosed closed[0];
+  int num_upvals;
+  SUpval* upvals[0];
 } SClosure;
 
 typedef struct SCodeGen_ {
@@ -258,7 +264,6 @@ typedef struct SnapFrame_ {
   int* pc;
   SCode* code;
   SClosure* closure;
-  SClosure* enclosed;
   SValue* stack_base;
   SValue* stack_top;
   SnapBlock blocks[SNAP_MAX_BLOCKS];
@@ -277,6 +282,7 @@ struct Snap_ {
   size_t num_bytes_alloced_last_gc;
   SObject* all;
   SObject* gray;
+  SUpval* open_upvals;
   SErr* cause;
   jmp_buf jmp;
 };
