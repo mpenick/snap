@@ -44,7 +44,8 @@ typedef struct SValue_ SValue;
 
 typedef int64_t SnapInt;
 typedef double SnapFloat;
-typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
+// Returns false to panic, with *result set to the error
+typedef bool (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
 
 // Opcode in the low 8 bits, signed argument in the high 24 bits
 typedef uint32_t SnapInst;

@@ -5,5 +5,5 @@
   (let [[get (fn [] n)]]
     (if (= n 0) (get) (+ (get) (- (deep (- n 1)) (get)))))))
 (println "deep:" (deep 5000))
-(def boom (fn [n] (let [[f (fn [] n)]] (if (= n 0) (raise :oops "deep error") (boom (- n 1))))))
+(def boom (fn [n] (let [[f (fn [] n)]] (if (= n 0) (panic :oops "deep error") (boom (- n 1))))))
 (boom 100)

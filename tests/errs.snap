@@ -1,0 +1,68 @@
+; vi: filetype=scheme
+
+; Errors are values: err makes one, err? checks for one and try returns it
+; from the enclosing fn. Anything that isn't an error passes through try.
+
+(def safe-div (fn [a b] (if (= b 0) (err :div-by-zero "can't divide by zero") (/ a b))))
+
+(println (safe-div 10 2))
+(println (safe-div 1 0))
+(println (err? (safe-div 1 0)) (err? (safe-div 10 2)) (err? nil) (err? false))
+
+; try passes values through and returns errors early
+(def calc (fn [a b c]
+  (let [[x (try (safe-div a b))]]
+    (let [[y (try (safe-div x c))]]
+      (println "both ok")
+      (+ x y)))))
+(println (calc 100 10 5))
+(println (calc 100 0 5))
+(println (calc 100 10 0))
+
+; try in a loop returns from the fn, not just the loop
+(def first-err (fn [n]
+  (loop [[i 0]]
+    (if (= i n)
+      :done
+      (begin (try (if (= i 3) (err :stop i) i)) (recur (+ i 1)))))))
+(println (first-err 2))
+(println (first-err 10))
+
+; Upvalues are closed when try returns
+(def make (fn [fail]
+  (let [[v 42]]
+    (let [[get (fn [] v)]]
+      (try (if fail (err :fail "failed") nil))
+      get))))
+(println ((make false)))
+(println (make true))
+
+; Errors pass up through several calls, one try at a time
+(def a (fn [n] (if (= n 0) (err :bottom n) n)))
+(def b (fn [n] (+ 1 (try (a n)))))
+(def c (fn [n] (* 2 (try (b n)))))
+(println (c 5) (c 0))
+
+; Deep recursion with try at every level
+(def down (fn [n] (if (= n 0) (err :deep "at the bottom") (+ 1 (try (down (- n 1)))))))
+(println (down 1000))
+
+; Errors are just values: store them, pass them, compare kinds
+(def e (err :kind (+ 1 2)))
+(println e (err? e))
+
+; Check the kind, read the kind and message
+(def r (safe-div 1 0))
+(println (err? r :div-by-zero) (err? r :other) (err? 5 :div-by-zero))
+(println (err-kind r) (err-msg r))
+
+; Handle one kind, pass the rest up
+(def div-or-zero (fn [a b]
+  (let [[r (safe-div a b)]]
+    (if (err? r :div-by-zero) 0 (try r)))))
+(println (div-or-zero 10 2) (div-or-zero 10 0))
+
+; try at the top level stops the script and returns the error
+(println "before")
+(try (safe-div 1 0))
+(println "not reached")

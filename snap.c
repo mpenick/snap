@@ -51,7 +51,8 @@ enum {
   XX(JUMP_FALSE) \
   XX(JUMP_FALSE_OR_POP) \
   XX(JUMP_TRUE_OR_POP) \
-  XX(RAISE) \
+  XX(TRY) \
+  XX(PANIC) \
   XX(ADD) \
   XX(SUB) \
   XX(MUL) \
@@ -767,7 +768,7 @@ static SValue exec(Snap* snap) {
   SValue* stack;
   SValue* a, * b;
   SValue temp;
-  bool cond;
+  bool cond, ok;
   int arg;
 
 #ifdef INDIRECT_DISPATCH
@@ -794,7 +795,7 @@ new_frame:
   *stack++ = create_obj(snap_str_new_format(snap, __VA_ARGS__)); \
   frame->stack_top = stack;                                \
   *stack++ = create_obj(snap_key_new(snap, err));          \
-  goto raise;
+  goto panic;
 
 #ifdef INDIRECT_DISPATCH
   DISPATCH();
@@ -867,12 +868,12 @@ new_frame:
         if (is_cfunc(*a)) {
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
-          as_cfunc(*a)(snap, stack - arg, arg, &temp);
+          ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
           stack -= arg; // Pop arguments
-          if (is_err(temp)) {
+          if (!ok) {
             *stack++ = as_err(temp)->msg;
             *stack++ = as_err(temp)->err;
-            goto raise;
+            goto panic;
           }
           *stack++ = temp;
         } else if (is_code(*a) || is_closure(*a)) {
@@ -909,6 +910,7 @@ new_frame:
         DISPATCH();
       }
       OP(RETURN) {
+      do_return:
         close_upvals(snap, locals);
         if (snap->frames.vsize > 1) {
           SnapFrame* frame_prev = &mvec_back(&snap->frames) - 1;
@@ -944,8 +946,13 @@ new_frame:
         }
         DISPATCH();
       }
-      OP(RAISE) {
-        goto raise;
+      OP(TRY) {
+        // An error returns from the function, otherwise it's the value
+        if (is_err(*(stack - 1))) goto do_return;
+        DISPATCH();
+      }
+      OP(PANIC) {
+        goto panic;
       }
       OP(NOT) {
         *(stack - 1) = create_bool(is_false(*(stack - 1)));
@@ -982,7 +989,7 @@ new_frame:
 
 #undef RUNTIME_ERROR
 
-raise:
+panic:
   // Stack: [... msg err]. Allocate the error while the stack is still rooted.
   frame->stack_top = stack;
   temp = create_obj(snap_err_new(snap, *(stack - 1), *(stack - 2)));
@@ -1128,7 +1135,8 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case TK_QUOTE:
     case TK_RECUR:
     case TK_SET:
-    case TK_RAISE: case TK_WITH_HANDLER:
+    case TK_PANIC:
+    case TK_TRY:
     case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
     case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
     case TK_NOT: case TK_AND: case TK_OR:
@@ -1324,7 +1332,7 @@ static int emit(SnapFnState* fs, int op, int arg) {
       adjust_stack(fs, 1);
       break;
     case STORE_GLOBAL: case STORE_LOCAL: case STORE_CLOSED:
-    case POP: case RETURN: case RAISE:
+    case POP: case RETURN: case PANIC:
     case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
       adjust_stack(fs, -1);
       break;
@@ -1744,13 +1752,21 @@ static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
   emit_jump_back(snap, fs, target->top);
 }
 
-static void compile_raise(Snap* snap, SnapFnState* fs, SCons* args) {
+static void compile_panic(Snap* snap, SnapFnState* fs, SCons* args) {
   if (list_length(args) != 2) {
-    raise(snap, "snap_compile_error", "Expected (raise <err> <msg>)");
+    raise(snap, "snap_compile_error", "Expected (panic <err> <msg>)");
   }
   compile(snap, fs, nth(args, 1), false);
   compile(snap, fs, args->first, false);
-  emit(fs, RAISE, 0);
+  emit(fs, PANIC, 0);
+}
+
+static void compile_try(Snap* snap, SnapFnState* fs, SCons* args) {
+  if (list_length(args) != 1) {
+    raise(snap, "snap_compile_error", "Expected (try <expr>)");
+  }
+  compile(snap, fs, args->first, false);
+  emit(fs, TRY, 0);
 }
 
 static void compile_arith(Snap* snap, SnapFnState* fs, int opcode, SCons* args) {
@@ -1857,11 +1873,11 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
         case TK_SET:
           compile_set(snap, fs, args);
           break;
-        case TK_RAISE:
-          compile_raise(snap, fs, args);
+        case TK_PANIC:
+          compile_panic(snap, fs, args);
           break;
-        case TK_WITH_HANDLER:
-          raise(snap, "snap_compile_error", "with-handler is not implemented"); // TODO: Exceptions
+        case TK_TRY:
+          compile_try(snap, fs, args);
           break;
         case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
           compile_arith(snap, fs, (as_form(sexpr->first) - TK_ADD) + ADD, args);
@@ -1925,7 +1941,7 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
       break;
   }
   // Every expression leaves exactly one value (even when it ends in a jump,
-  // like recur, or never finishes, like raise)
+  // like recur, or never finishes, like panic)
   fs->stack = stack;
   adjust_stack(fs, 1);
 }
@@ -2001,8 +2017,8 @@ static const char* form_name(int token) {
     case TK_QUOTE: return "quote";
     case TK_RECUR: return "recur";
     case TK_SET: return "set!";
-    case TK_RAISE: return "raise";
-    case TK_WITH_HANDLER: return "with-handler";
+    case TK_PANIC: return "panic";
+    case TK_TRY: return "try";
     case TK_LT: return "<";
     case TK_LE: return "<=";
     case TK_GT: return ">";
@@ -2136,25 +2152,67 @@ static void print_code(SCode* code, int indent) {
 
 /* Builtins */
 
-void builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
+static bool arity_error(Snap* snap, SValue* result) {
+  *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
+  return false;
+}
+
+bool builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
   int i;
   for (i = 0; i < num_args; ++i) {
     if (i > 0) printf(" ");
     snap_print(args[i]);
   }
+  return true;
 }
 
-void builtin_println(Snap* snap, const SValue* args, int num_args, SValue* result) {
+bool builtin_println(Snap* snap, const SValue* args, int num_args, SValue* result) {
   builtin_print(snap, args, num_args, result);
   printf("\n");
+  return true;
 }
 
-void builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  if (num_args != 1) {
-    *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
-    return;
-  }
+bool builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
   *result = create_bool(is_nil(args[0]));
+  return true;
+}
+
+// (err <kind> <msg>) makes an error value. Unlike panic it doesn't unwind;
+// it's returned like any other value (see try).
+bool builtin_err(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 2) return arity_error(snap, result);
+  *result = create_obj(snap_err_new(snap, args[0], args[1]));
+  return true;
+}
+
+// (err? <x>) or (err? <x> <kind>)
+bool builtin_iserr(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1 && num_args != 2) return arity_error(snap, result);
+  *result = create_bool(is_err(args[0]) &&
+                        (num_args == 1 || snap_compare(&as_err(args[0])->err, &args[1]) == 0));
+  return true;
+}
+
+static bool err_arg(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  if (!is_err(args[0])) {
+    *result = create_obj(snap_err_new_format(snap, "snap_type_error", "Expected an error"));
+    return false;
+  }
+  return true;
+}
+
+bool builtin_err_kind(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!err_arg(snap, args, num_args, result)) return false;
+  *result = as_err(args[0])->err;
+  return true;
+}
+
+bool builtin_err_msg(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!err_arg(snap, args, num_args, result)) return false;
+  *result = as_err(args[0])->msg;
+  return true;
 }
 
 void snap_init(Snap* snap) {
@@ -2177,6 +2235,10 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "print", builtin_print);
   snap_def_cfunc(snap, "println", builtin_println);
   snap_def_cfunc(snap, "nil?", builtin_isnil);
+  snap_def_cfunc(snap, "err", builtin_err);
+  snap_def_cfunc(snap, "err?", builtin_iserr);
+  snap_def_cfunc(snap, "err-kind", builtin_err_kind);
+  snap_def_cfunc(snap, "err-msg", builtin_err_msg);
 }
 
 void snap_destroy(Snap* snap) {

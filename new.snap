@@ -26,7 +26,7 @@
 ;(< 1 2 3 4)
 ;
 ;
-;(define func1 (fn [] (raise :error1 "some error")))
+;(define func1 (fn [] (panic :error1 "some error")))
 ;(define func2 (fn [] (println "here") (func1)))
 ;
 ;(if false

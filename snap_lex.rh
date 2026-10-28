@@ -22,7 +22,8 @@ enum {
   TK_QUOTE,
   TK_RECUR,
   TK_SET,
-  TK_RAISE, TK_WITH_HANDLER,
+  TK_PANIC,
+  TK_TRY,
   TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
   TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ,
   TK_AND, TK_OR, TK_NOT,
@@ -95,8 +96,8 @@ int snap_lex_next_token(SnapLex* lex) {
       'quote' => { token = TK_QUOTE; fbreak; };
       'recur' => { token = TK_RECUR; fbreak; };
       'set!' => { token = TK_SET; fbreak; };
-      'raise' => { token = TK_RAISE; fbreak; };
-      'with-handler' => { token = TK_WITH_HANDLER; fbreak; };
+      'panic' => { token = TK_PANIC; fbreak; };
+      'try' => { token = TK_TRY; fbreak; };
       'true' => { token = TK_TRUE; fbreak; };
       'false' => { token = TK_FALSE; fbreak; };
       'nil' => { token = TK_NIL; fbreak; };

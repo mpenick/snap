@@ -93,7 +93,7 @@
 (def recerr (fn [n]
              (println n)
              (if (= n 1)
-               (begin (println "Going to throw") (raise :err "Inside a recursive func"))
+               (begin (println "Going to throw") (panic :err "Inside a recursive func"))
                (recerr (- n 1)))
              )
      )
