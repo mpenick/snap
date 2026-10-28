@@ -63,5 +63,8 @@
 ; Quoted maps aren't evaluated, and an empty map is true
 (println (quote {a (b c)}) (if {} :true :false))
 
+; map? checks the type
+(println (map? {}) (map? '{:a 1}) (map? []) (map? nil) (map? (keys {:a 1})))
+
 ; Maps in loop bodies, read by recur
 (println (loop [[i 0] [m {}]] (if (< i 3) (recur (+ i 1) {:i i :prev m}) m)))

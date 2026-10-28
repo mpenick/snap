@@ -50,9 +50,9 @@ vectors, maps, lists (only from `quote`), `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
 arithmetic wraps on overflow, and mixing integers with floats gives a float.
 
-Built-in functions: `print`, `println`, `nil?`, `err`, `err?`, `err-kind`,
-`err-msg`, `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`, `keys` and
-`vals`.
+Built-in functions: `print`, `println`, `nil?`, `vector?`, `map?`, `err`,
+`err?`, `err-kind`, `err-msg`, `count`, `nth`, `push!`, `pop!`, `put!`, `get`,
+`del!`, `keys` and `vals`.
 
 ## Vectors
 

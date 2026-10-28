@@ -55,5 +55,8 @@
 ; Quoted vectors aren't evaluated, and an empty vector is true
 (println (quote [a (b c) 1]) (if [] :true :false))
 
+; vector? checks the type
+(println (vector? []) (vector? '[1]) (vector? {}) (vector? nil) (vector? (quote (1))))
+
 ; Script arguments are a vector
 (println args (count args))

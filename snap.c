@@ -2401,6 +2401,18 @@ bool builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result)
   return true;
 }
 
+bool builtin_isvec(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  *result = create_bool(is_vec(args[0]));
+  return true;
+}
+
+bool builtin_ismap(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  *result = create_bool(is_map(args[0]));
+  return true;
+}
+
 // (err <kind> <msg>) makes an error value. Unlike panic it doesn't unwind;
 // it's returned like any other value (see try).
 bool builtin_err(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -2590,6 +2602,8 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "print", builtin_print);
   snap_def_cfunc(snap, "println", builtin_println);
   snap_def_cfunc(snap, "nil?", builtin_isnil);
+  snap_def_cfunc(snap, "vector?", builtin_isvec);
+  snap_def_cfunc(snap, "map?", builtin_ismap);
   snap_def_cfunc(snap, "err", builtin_err);
   snap_def_cfunc(snap, "err?", builtin_iserr);
   snap_def_cfunc(snap, "err-kind", builtin_err_kind);
