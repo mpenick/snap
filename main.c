@@ -2,19 +2,27 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 int main(int argc, char** argv) {
   const char* filename;
   int rc = 0;
+  int first = 1; // Index of the file argument
   Snap snap;
   snap_init(&snap);
 
-  if (argc < 2) {
-    fprintf(stderr, "%s <file> <arg_1>...<arg_n>\n", argv[0]);
+  if (argc > first && strcmp(argv[first], "-d") == 0) {
+    snap.dump_code = true;
+    first++;
+  }
+
+  if (argc <= first) {
+    fprintf(stderr, "%s [-d] <file> <arg_1>...<arg_n>\n"
+                    "  -d  Print the bytecode before running\n", argv[0]);
     exit(-1);
   }
 
-  filename = argv[1];
+  filename = argv[first];
   FILE* file = fopen(filename, "r");
   if (file) {
     long int end;
@@ -28,7 +36,7 @@ int main(int argc, char** argv) {
       int i;
       SValue args = create_empty(), result;
       SCons* tail = NULL;
-      for (i = 2; i < argc; ++i) {
+      for (i = first + 1; i < argc; ++i) {
         SCons* next = snap_cons_new(&snap);
         if (tail) {
           tail->rest = create_obj(next);
@@ -53,7 +61,7 @@ int main(int argc, char** argv) {
     fclose(file);
     free(buf);
   } else {
-    fprintf(stderr, "'%s' not found\n", argv[1]);
+    fprintf(stderr, "'%s' not found\n", filename);
   }
 
   snap_destroy(&snap);

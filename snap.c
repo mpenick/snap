@@ -1966,9 +1966,7 @@ SValue snap_exec(Snap* snap, const char* str) {
 
   code = (SCode*)snap_anchor(snap, (SObject*)code_new(snap, fs));
   fn_state_free(snap);
-#ifdef SNAP_DEBUG
-  print_code(code, 0);
-#endif
+  if (snap->dump_code) print_code(code, 0);
   push_frame(snap, code, snap->stack, NULL);
   result = exec(snap);
 
@@ -2172,6 +2170,7 @@ void snap_init(Snap* snap) {
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
   snap->cause = NULL;
+  snap->dump_code = false;
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
 

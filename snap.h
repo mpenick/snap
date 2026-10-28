@@ -202,6 +202,7 @@ struct Snap_ {
   struct SnapFnState_* fn_state; // Innermost function being compiled
   SErr* cause;
   jmp_buf jmp;
+  bool dump_code; // Print the bytecode from snap_exec() before running it
 };
 
 #define is_int(v) ((v).bits & 1)
