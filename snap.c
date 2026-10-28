@@ -2,6 +2,7 @@
 #include "snap_lex.h"
 
 #include <assert.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdarg.h>
@@ -120,15 +121,15 @@ static int compare_chars(const char* data1, size_t len1, const char* data2, size
 }
 
 static int compare_tempstring(const STempStr* ts, const SValue* val) {
-  switch (val->type) {
-  case STYPE_SYM:
-    return compare_chars(ts->data, ts->len, ((SSym*)val->o)->data, ((SSym*)val->o)->len);
-  case STYPE_STR:
-    return compare_chars(ts->data, ts->len, ((SStr*)val->o)->data, ((SStr*)val->o)->len);
-  case STYPE_KEY:
-    return compare_chars(ts->data, ts->len, ((SKeyword*)val->o)->data, ((SKeyword*)val->o)->len);
-  default:
-    return STYPE_TEMPSTR < val->type ? -1 : 1;
+  switch (snap_type(*val)) {
+    case STYPE_SYM:
+      return compare_chars(ts->data, ts->len, as_sym(*val)->data, as_sym(*val)->len);
+    case STYPE_STR:
+      return compare_chars(ts->data, ts->len, as_str(*val)->data, as_str(*val)->len);
+    case STYPE_KEY:
+      return compare_chars(ts->data, ts->len, as_key(*val)->data, as_key(*val)->len);
+    default:
+      return STYPE_TEMPSTR < snap_type(*val) ? -1 : 1;
   }
 }
 
@@ -138,63 +139,50 @@ static int hash_pointer(void* ptr) {
 }
 
 int snap_hash(const SValue* val) {
-  switch (val->type) {
-    case STYPE_NIL:
-      return 0;
-    case STYPE_BOOL:
-      return val->b ? 1 : 0;
-    case STYPE_INT:
-      return val->i;
+  SObject* obj = as_obj(*val);
+  if (!is_obj(*val)) {
+    return (int)(val->bits ^ (val->bits >> 32)); // Ints, nil, bools, forms and cfuncs
+  }
+  switch (obj->type) {
     case STYPE_FLOAT:
-      return hash_float(val->f);
-    case STYPE_FORM:
-      return val->i;
-    case STYPE_CFUNC:
-      return hash_pointer((void*)val->c);
+      return hash_float(((SFloat*)obj)->f);
     // Hashed by contents so interning can look them up with a STempStr
     case STYPE_SYM:
-      return hash_chars(((SSym*)val->o)->data, ((SSym*)val->o)->len);
+      return hash_chars(((SSym*)obj)->data, ((SSym*)obj)->len);
     case STYPE_STR:
-      return hash_chars(((SStr*)val->o)->data, ((SStr*)val->o)->len);
+      return hash_chars(((SStr*)obj)->data, ((SStr*)obj)->len);
     case STYPE_KEY:
-      return hash_chars(((SKeyword*)val->o)->data, ((SKeyword*)val->o)->len);
+      return hash_chars(((SKeyword*)obj)->data, ((SKeyword*)obj)->len);
     case STYPE_TEMPSTR:
-      return hash_chars(((STempStr*)val->o)->data, ((STempStr*)val->o)->len);
+      return hash_chars(((STempStr*)obj)->data, ((STempStr*)obj)->len);
     default:
-      return hash_pointer((void*)val->o);
+      return hash_pointer(obj);
   }
 }
 
 int snap_compare(const SValue* val1, const SValue* val2) {
-  assert(val2->type != STYPE_TEMPSTR);
+  int type1 = snap_type(*val1), type2 = snap_type(*val2);
+  assert(type2 != STYPE_TEMPSTR);
 
-  if (val1->type == STYPE_TEMPSTR) {
-    return compare_tempstring((STempStr*)val1->o, val2);
-  } else if (val1->type != val2->type) {
-    return val1->type < val2->type ? -1 : 1;
+  if (type1 == STYPE_TEMPSTR) {
+    return compare_tempstring((STempStr*)as_obj(*val1), val2);
+  } else if (type1 != type2) {
+    return type1 < type2 ? -1 : 1;
   }
 
-  switch (val1->type) {
-    case STYPE_NIL:
-      return 0;
-    case STYPE_BOOL:
-      return compare(val1->b, val2->b);
+  switch (type1) {
     case STYPE_INT:
-      return compare(val1->i, val2->i);
+      return compare((SnapInt)val1->bits, (SnapInt)val2->bits);
     case STYPE_FLOAT:
-      return compare(val1->f, val2->f);
-    case STYPE_FORM:
-      return compare(val1->i, val2->i);
-    case STYPE_CFUNC:
-      return compare((void*)val1->c, (void*)val2->c);
+      return compare(as_float(*val1), as_float(*val2));
     case STYPE_STR:
-      return compare_chars(((SStr*)val1->o)->data, ((SStr*)val1->o)->len,
-                           ((SStr*)val2->o)->data, ((SStr*)val2->o)->len);
+      return compare_chars(as_str(*val1)->data, as_str(*val1)->len,
+                           as_str(*val2)->data, as_str(*val2)->len);
     case STYPE_ERR:
-      return snap_compare(&((SErr*)val1->o)->err, &((SErr*)val2->o)->err);
+      return snap_compare(&as_err(*val1)->err, &as_err(*val2)->err);
     default:
       // Everything else, including interned symbols and keywords, by identity
-      return compare((void*)val1->o, (void*)val2->o);
+      return compare(val1->bits, val2->bits);
   }
 }
 
@@ -202,78 +190,6 @@ static SValue exec(Snap* snap);
 
 static void print_val(SValue val);
 static void print_code(SCode* code, int indent);
-
-SValue create_undef() {
-  SValue val;
-  val.type = STYPE_UNDEF;
-  val.o = NULL;
-  return val;
-}
-
-SValue create_deleted() {
-  SValue val;
-  val.type = STYPE_DELETED;
-  val.o = NULL;
-  return val;
-}
-
-SValue create_nil() {
-  SValue val;
-  val.type = STYPE_NIL;
-  val.o = NULL;
-  return val;
-}
-
-SValue create_empty() {
-  SValue val;
-  val.type = STYPE_CONS;
-  val.o = NULL;
-  return val;
-}
-
-SValue create_bool(bool b) {
-  SValue val;
-  val.type = STYPE_BOOL;
-  val.b = b;
-  return val;
-}
-
-SValue create_int(SnapInt i) {
-  SValue val;
-  val.type = STYPE_INT;
-  val.i = i;
-  return val;
-}
-
-SValue create_form(SnapInt i) {
-  SValue val;
-  val.type = STYPE_FORM;
-  val.i = i;
-  return val;
-}
-
-SValue create_float(SnapFloat f) {
-  SValue val;
-  val.type = STYPE_FLOAT;
-  val.f = f;
-  return val;
-}
-
-SValue create_cfunc(SCFunc c) {
-  SValue val;
-  val.type = STYPE_CFUNC;
-  val.c = c;
-  return val;
-}
-
-SValue create_object(SObject* o) {
-  SValue val;
-  val.type = o->type;
-  val.o = o;
-  return val;
-}
-
-#define create_obj(o) create_object((SObject*)o)
 
 static inline MHASH_FUNC(SnapHashEntry, SValue) {
   return snap_hash(&key);
@@ -284,7 +200,7 @@ static inline MHASH_EQUALS_FUNC(SnapHashEntry, SValue) {
 }
 
 void snap_hash_init(SnapHash* hash) {
-  mhash_init(hash, SnapHashEntry, create_undef(), create_deleted(), 0);
+  mhash_init(hash, SnapHashEntry, create_undef(), snap_val(SV_DELETED), 0);
 }
 
 void snap_hash_put(SnapHash* hash, SValue key, SValue val) {
@@ -330,6 +246,9 @@ static size_t code_extra_bytes(SCode* code) {
 
 static void gc_free(Snap* snap, SObject* obj) {
   switch (obj->type) {
+    case STYPE_FLOAT:
+      snap->num_bytes_alloced -= sizeof(SFloat);
+      break;
     case STYPE_SYM:
       snap->num_bytes_alloced -= (sizeof(SSym) + ((SSym*)obj)->len + 1);
       break;
@@ -371,6 +290,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
   if (!obj || obj->mark == MARKED) return;
   obj->mark = MARKED;
   switch (obj->type) {
+    case STYPE_FLOAT:
     case STYPE_STR:
     case STYPE_KEY:
       break; // No children
@@ -390,7 +310,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
 }
 
 static void gc_mark_val(Snap* snap, SValue val) {
-  if (is_obj(val)) gc_mark(snap, val.o);
+  if (is_obj(val)) gc_mark(snap, as_obj(val));
 }
 
 static void gc_mark_vals(Snap* snap, SValue* vals, int count) {
@@ -516,6 +436,12 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
 
 /* Objects */
 
+SValue create_float(Snap* snap, SnapFloat f) {
+  SFloat* n = (SFloat*)gc_new(snap, STYPE_FLOAT, sizeof(SFloat));
+  n->f = f;
+  return create_obj(n);
+}
+
 static SStr* str_new(Snap* snap, const char* data, size_t len) {
   SStr* s = (SStr*)gc_new(snap, STYPE_STR, sizeof(SStr) + len + 1);
   s->len = len;
@@ -549,7 +475,7 @@ SSym* snap_sym_new(Snap* snap, const char* name) {
   SValue* existing = snap_hash_get_str(&snap->symbols, name, len);
   SSym* s;
   if (existing) {
-    return (SSym*)existing->o;
+    return as_sym(*existing);
   }
   s = (SSym*)gc_new(snap, STYPE_SYM, sizeof(SSym) + len + 1);
   s->value = create_undef();
@@ -564,7 +490,7 @@ SKeyword* snap_key_new(Snap* snap, const char* name) {
   SValue* existing = snap_hash_get_str(&snap->keywords, name, len);
   SKeyword* k;
   if (existing) {
-    return (SKeyword*)existing->o;
+    return as_key(*existing);
   }
   k = (SKeyword*)gc_new(snap, STYPE_KEY, sizeof(SKeyword) + len + 1);
   k->len = len;
@@ -727,8 +653,9 @@ static void close_upvals(Snap* snap, SValue* level) {
   }
 }
 
-#define is_num_p(v) (is_int_p(v) || is_float_p(v))
-#define num_p(v) (is_int_p(v) ? (SnapFloat)(v)->i : (v)->f)
+#define is_int_p(v) is_int(*(v))
+#define is_num_p(v) (is_int_p(v) || is_float(*(v)))
+#define num_p(v) (is_int_p(v) ? (SnapFloat)as_int(*(v)) : as_float(*(v)))
 
 #define operand(n) ((n) > 0 ? &locals[(n) - 1] : &constants[-(n) - 1])
 
@@ -737,24 +664,36 @@ static void close_upvals(Snap* snap, SValue* level) {
   b = OPERAND_RIGHT(arg) ? operand(OPERAND_RIGHT(arg)) : --stack; \
   a = OPERAND_LEFT(arg) ? operand(OPERAND_LEFT(arg)) : --stack;
 
-// Pushes (a op b). Mixed int/float operands promote to float. Results are
-// written straight to the stack: building them in a temporary first stalls
-// the next 16-byte load of the slot (failed store-to-load forwarding).
+// Floats are allocated, so a float result is pushed by saving the frame,
+// calling this and reloading the frame. Keeping the VM's registers live across
+// the call instead would spill them in every handler.
+static void push_float(Snap* snap, SnapFloat f) {
+  SValue val = create_float(snap, f);
+  *mvec_back(&snap->frames).stack_top++ = val;
+}
+
+// Pushes (a op b). Int ops work on the tagged words directly. Mixed int/float
+// operands promote to float.
 #define arith_op(iop, fop) \
   if (is_int_p(a) && is_int_p(b)) { \
-    *stack++ = create_int(iop(a->i, b->i)); \
+    (stack++)->bits = iop(a->bits, b->bits); \
   } else if (is_num_p(a) && is_num_p(b)) { \
-    *stack++ = create_float(fop(num_p(a), num_p(b))); \
+    SnapFloat f = fop(num_p(a), num_p(b)); \
+    frame->pc = pc; \
+    frame->stack_top = stack; \
+    push_float(snap, f); \
+    goto new_frame; \
   } else { \
     RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
   }
 
 // A compare followed by JUMP_FALSE (as in every `(if (< ...) ...)`) takes the
-// branch itself rather than pushing a bool for the next instruction
+// branch itself rather than pushing a bool for the next instruction. Tagged
+// ints order the same as their values.
 #define compare_op(op) \
   binary_operands() \
   if (is_int_p(a) && is_int_p(b)) { \
-    cond = a->i op b->i; \
+    cond = (SnapInt)a->bits op (SnapInt)b->bits; \
   } else if (is_num_p(a) && is_num_p(b)) { \
     cond = num_p(a) op num_p(b); \
   } else { \
@@ -767,13 +706,15 @@ static void close_upvals(Snap* snap, SValue* level) {
     *stack++ = create_bool(cond); \
   }
 
-// Integer ops wrap on overflow (done unsigned to avoid undefined behavior)
-#define wrap(x) ((SnapInt)(x))
-#define add_iop(x, y) wrap((unsigned long)(x) + (unsigned long)(y))
-#define sub_iop(x, y) wrap((unsigned long)(x) - (unsigned long)(y))
-#define mul_iop(x, y) wrap((unsigned long)(x) * (unsigned long)(y))
-#define div_iop(x, y) ((y) == -1 ? sub_iop(0, x) : (x) / (y))
-#define mod_iop(x, y) ((y) == -1 ? 0 : (x) % (y))
+// Integer ops on tagged words (2x + 1). They wrap on overflow, done unsigned
+// to avoid undefined behavior. 63-bit division can't overflow an int64_t.
+#define untag(x) ((SnapInt)(x) >> 1)
+#define tag(x) (((uint64_t)(x) << 1) | 1)
+#define add_iop(x, y) ((x) + (y) - 1)
+#define sub_iop(x, y) ((x) - (y) + 1)
+#define mul_iop(x, y) ((uint64_t)untag(x) * ((y) - 1) + 1)
+#define div_iop(x, y) tag(untag(x) / untag(y))
+#define mod_iop(x, y) tag(untag(x) % untag(y))
 
 #define add_fop(x, y) ((x) + (y))
 #define sub_fop(x, y) ((x) - (y))
@@ -781,7 +722,7 @@ static void close_upvals(Snap* snap, SValue* level) {
 #define div_fop(x, y) ((x) / (y))
 #define mod_fop(x, y) fmod(x, y)
 
-#define int_zero_divisor() (is_int_p(b) && b->i == 0 && is_int_p(a))
+#define int_zero_divisor() (is_int_p(b) && as_int(*b) == 0 && is_int_p(a))
 
 // Build with -fno-crossjumping (see Makefile): each handler must keep its own
 // indirect jump so the branch predictor can learn opcode sequences
@@ -847,7 +788,7 @@ new_frame:
     switch (INST_OP(inst)) {
 #endif
       OP(LOAD_GLOBAL) {
-        SSym* sym = (SSym*)constants[arg].o;
+        SSym* sym = as_sym(constants[arg]);
         if (is_undef(sym->value)) {
           RUNTIME_ERROR("snap_name_error", "'%s' is not defined", sym->data);
         }
@@ -855,7 +796,7 @@ new_frame:
         DISPATCH();
       }
       OP(STORE_GLOBAL) {
-        ((SSym*)constants[arg].o)->value = *--stack;
+        as_sym(constants[arg])->value = *--stack;
         DISPATCH();
       }
       OP(LOAD_LOCAL) {
@@ -906,20 +847,20 @@ new_frame:
       }
       OP(CALL) {
         a = --stack; // Pop callable
-        if (is_cfunc_p(a)) {
+        if (is_cfunc(*a)) {
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
-          a->c(snap, stack - arg, arg, &temp);
+          as_cfunc(*a)(snap, stack - arg, arg, &temp);
           stack -= arg; // Pop arguments
-          if (temp.type == STYPE_ERR) {
+          if (is_err(temp)) {
             *stack++ = as_err(temp)->msg;
             *stack++ = as_err(temp)->err;
             goto raise;
           }
           *stack++ = temp;
-        } else if (is_code_p(a) || is_closure_p(a)) {
-          SClosure* cl = is_closure_p(a) ? (SClosure*)a->o : NULL;
-          SCode* c = cl ? cl->code : (SCode*)a->o;
+        } else if (is_code(*a) || is_closure(*a)) {
+          SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
+          SCode* c = cl ? cl->code : as_code(*a);
           if (arg != c->num_args) {
             RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
           }
@@ -934,7 +875,7 @@ new_frame:
       }
       OP(CLOSURE) {
         int i;
-        SCode* c = as_code_p(stack - 1);
+        SCode* c = as_code(*(stack - 1));
         SClosure* cl;
         frame->stack_top = stack;
         cl = snap_closure_new(snap, c);
@@ -967,13 +908,11 @@ new_frame:
         DISPATCH();
       }
       OP(JUMP_FALSE) {
-        a = --stack;
-        if (is_bool_p(a) && !a->b) pc += arg;
+        if (is_false(*--stack)) pc += arg;
         DISPATCH();
       }
       OP(JUMP_FALSE_OR_POP) {
-        a = stack - 1;
-        if (is_bool_p(a) && !a->b) {
+        if (is_false(*(stack - 1))) {
           pc += arg;
         } else {
           --stack;
@@ -981,8 +920,7 @@ new_frame:
         DISPATCH();
       }
       OP(JUMP_TRUE_OR_POP) {
-        a = stack - 1;
-        if (!is_bool_p(a) || a->b) {
+        if (!is_false(*(stack - 1))) {
           pc += arg;
         } else {
           --stack;
@@ -993,8 +931,7 @@ new_frame:
         goto raise;
       }
       OP(NOT) {
-        a = stack - 1;
-        *a = create_bool(is_bool_p(a) && !a->b);
+        *(stack - 1) = create_bool(is_false(*(stack - 1)));
         DISPATCH();
       }
       OP(ADD) { binary_operands() arith_op(add_iop, add_fop) DISPATCH(); }
@@ -1053,19 +990,19 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token);
 
 static SValue parse_sexpr(Snap* snap, SnapLex* lex) {
   SCons* sexpr;
-  SCons** curr;
+  SCons* tail;
   int token = snap_lex_next_token(lex);
   if (token == ')') {
     return create_empty();
   }
-  sexpr = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
+  sexpr = tail = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
   sexpr->first = parse_expr(snap, lex, token);
-  curr = (SCons**)&sexpr->rest.o;
   // parse_expr() raises on EOF, so this always ends at ')'
   while ((token = snap_lex_next_token(lex)) != ')') {
-    (*curr) = snap_cons_new(snap);
-    (*curr)->first = parse_expr(snap, lex, token);
-    curr = (SCons**)&(*curr)->rest.o;
+    SCons* next = snap_cons_new(snap);
+    tail->rest = create_obj(next);
+    tail = next;
+    tail->first = parse_expr(snap, lex, token);
   }
   snap_release(snap);
   return create_obj(sexpr);
@@ -1130,6 +1067,17 @@ static SValue parse_quote(Snap* snap, SnapLex* lex) {
   return create_obj(sexpr);
 }
 
+static SValue parse_int(Snap* snap, SnapLex* lex) {
+  char* end;
+  long long i;
+  errno = 0;
+  i = strtoll(lex->val, &end, 10);
+  if (errno == ERANGE || i < SNAP_INT_MIN || i > SNAP_INT_MAX) {
+    raise(snap, "snap_parse_error", "Integer literal is out of range on line %d", lex->line);
+  }
+  return create_int(i);
+}
+
 static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
   switch (token) {
     case '(':
@@ -1139,9 +1087,9 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case '\'':
       return parse_quote(snap, lex);
     case TK_INT:
-      return create_int(atol(lex->val));
+      return parse_int(snap, lex);
     case TK_FLOAT:
-      return create_float(atof(lex->val));
+      return create_float(snap, atof(lex->val));
     case TK_STR:
       return create_obj(snap_str_new(snap, lex->val));
     case TK_ID:
@@ -1498,7 +1446,7 @@ static bool contains_fn(SValue expr) {
   if (is_cons(expr)) {
     SCons* curr;
     for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) {
-      if ((is_form(curr->first) && curr->first.i == TK_FN) ||
+      if ((is_form(curr->first) && as_form(curr->first) == TK_FN) ||
           contains_fn(curr->first)) {
         return true;
       }
@@ -1783,13 +1731,13 @@ static void compile_call(Snap* snap, SnapFnState* fs, SCons* sexpr) {
 
 static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   SCons* args = as_cons(sexpr->rest);
-  switch (sexpr->first.type) {
+  switch (snap_type(sexpr->first)) {
     case STYPE_SYM:
     case STYPE_CONS:
       compile_call(snap, fs, sexpr);
       break;
     case STYPE_FORM:
-      switch (sexpr->first.i) {
+      switch (as_form(sexpr->first)) {
         case TK_BEGIN:
           if (!args) {
             raise(snap, "snap_compile_error", "Expected expressions");
@@ -1830,10 +1778,10 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
           raise(snap, "snap_compile_error", "with-handler is not implemented"); // TODO: Exceptions
           break;
         case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
-          compile_arith(snap, fs, (sexpr->first.i - TK_ADD) + ADD, args);
+          compile_arith(snap, fs, (as_form(sexpr->first) - TK_ADD) + ADD, args);
           break;
         case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
-          compile_compare(snap, fs, (sexpr->first.i - TK_LT) + LESS_THAN, args);
+          compile_compare(snap, fs, (as_form(sexpr->first) - TK_LT) + LESS_THAN, args);
           break;
         case TK_NOT:
           if (list_length(args) != 1) {
@@ -1844,9 +1792,9 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
           break;
         case TK_AND: case TK_OR:
           if (!args) {
-            load_constant(snap, fs, create_bool(sexpr->first.i == TK_AND));
+            load_constant(snap, fs, create_bool(as_form(sexpr->first) == TK_AND));
           } else {
-            compile_and_or(snap, fs, sexpr->first.i == TK_AND ? JUMP_FALSE_OR_POP
+            compile_and_or(snap, fs, as_form(sexpr->first) == TK_AND ? JUMP_FALSE_OR_POP
                                                               : JUMP_TRUE_OR_POP,
                            args, tail);
           }
@@ -1865,7 +1813,7 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
 // `tail` is whether expr is in tail position relative to its recur target
 static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   int stack = fs->stack;
-  switch (expr.type) {
+  switch (snap_type(expr)) {
     case STYPE_INT:
     case STYPE_FLOAT:
     case STYPE_STR:
@@ -1917,7 +1865,7 @@ SValue snap_exec(Snap* snap, const char* str) {
 
   fs = fn_state_new(snap);
   while (parse(snap, &lex, &expr)) {
-    if (is_obj(expr)) snap_anchor(snap, expr.o);
+    if (is_obj(expr)) snap_anchor(snap, as_obj(expr));
 #ifdef SNAP_DEBUG
     snap_print(expr);
     printf("\n");
@@ -1957,7 +1905,7 @@ static void iprintf(int indent, const char* format, ...) {
   va_end(args);
 }
 
-static const char* form_name(SnapInt token) {
+static const char* form_name(int token) {
   switch (token) {
     case TK_BEGIN: return "begin";
     case TK_DEF: return "def";
@@ -1991,24 +1939,24 @@ static const char* form_name(SnapInt token) {
 static void print_val(SValue val) {
   int i;
   SCons* cons;
-  switch(val.type) {
+  switch (snap_type(val)) {
     case STYPE_NIL:
       printf("nil");
       break;
     case STYPE_BOOL:
-      printf("%s", val.b ? "true" : "false");
+      printf("%s", is_false(val) ? "false" : "true");
       break;
     case STYPE_INT:
-      printf("%ld", val.i);
+      printf("%ld", (long)as_int(val));
       break;
     case STYPE_FLOAT:
-      printf("%f", val.f);
+      printf("%f", as_float(val));
       break;
     case STYPE_CFUNC:
-      printf("<cfunc %p>", (void*)val.c);
+      printf("<cfunc %p>", (void*)as_cfunc(val));
       break;
     case STYPE_FORM:
-      printf("%s", form_name(val.i));
+      printf("%s", form_name(as_form(val)));
       break;
     case STYPE_STR:
       printf("\"%s\"", as_str(val)->data);
@@ -2049,10 +1997,10 @@ static void print_val(SValue val) {
       printf(")");
       break;
     case STYPE_CODE:
-      printf("<fn %p>", (void*)val.o);
+      printf("<fn %p>", (void*)as_obj(val));
       break;
     case STYPE_CLOSURE:
-      printf("<closure %p>", (void*)val.o);
+      printf("<closure %p>", (void*)as_obj(val));
       break;
   }
 }
@@ -2121,7 +2069,7 @@ void builtin_isnil(Snap* snap, const SValue* args, int num_args, SValue* result)
     *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
     return;
   }
-  *result = create_bool(args[0].type == STYPE_NIL);
+  *result = create_bool(is_nil(args[0]));
 }
 
 void snap_init(Snap* snap) {

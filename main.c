@@ -26,24 +26,23 @@ int main(int argc, char** argv) {
     buf = (char*)malloc(end + 1);
     if ((num_bytes = fread(buf, 1, end, file)) > 0) {
       int i;
-      SValue val, result;
-      SCons* first = NULL;
-      SCons** args = &first;
+      SValue args = create_empty(), result;
+      SCons* tail = NULL;
       for (i = 2; i < argc; ++i) {
-        *args = first ? snap_cons_new(&snap)
-          : (SCons*)snap_anchor(&snap, (SObject*)snap_cons_new(&snap));
-        val.type = STYPE_STR;
-        val.o = (SObject*)snap_str_new(&snap, argv[i]);
-        (*args)->first = val;
-        args = (SCons**)&(*args)->rest.o;
+        SCons* next = snap_cons_new(&snap);
+        if (tail) {
+          tail->rest = create_obj(next);
+        } else {
+          args = create_obj(snap_anchor(&snap, (SObject*)next));
+        }
+        tail = next;
+        tail->first = create_obj(snap_str_new(&snap, argv[i]));
       }
-      val.type = STYPE_CONS;
-      val.o = (SObject*)first;
-      snap_def(&snap, "args", val);
-      if (first) snap_release(&snap);
+      snap_def(&snap, "args", args);
+      if (tail) snap_release(&snap);
       buf[num_bytes] = '\0';
       result = snap_exec(&snap, buf);
-      if (result.type == STYPE_ERR) {
+      if (is_err(result)) {
         snap_print(result);
         printf("\n");
         rc = -1;

@@ -7,7 +7,7 @@
 (println "mixed:" (+ 1 2.5) (< 1 2.5) (* 2 1.5) (= 1 1.0))
 
 ; ints wrap instead of trapping
-(println "wrap:" (/ (- 0 9223372036854775807 1) -1) (* 9223372036854775807 2))
+(println "wrap:" (/ (- 0 4611686018427387903 1) -1) (* 4611686018427387903 2) (+ 4611686018427387903 1))
 (println "float div zero:" (/ 7.0 0))
 
 ; comparison chains

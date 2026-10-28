@@ -3,46 +3,13 @@
 
 #include "mstructs.h"
 
+#include <assert.h>
 #include <setjmp.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #define check(a, e) (assert(a), (e))
-
-#define is_undef(v) ((v).type == STYPE_UNDEF)
-#define is_obj(v) ((v).type > STYPE_CFUNC)
-#define is_nil(v) ((v).type == STYPE_NIL)
-#define is_arr(v) ((v).type == STYPE_ARR)
-#define is_bool(v) ((v).type == STYPE_BOOL)
-#define is_bool_p(v) ((v)->type == STYPE_BOOL)
-#define is_int(v) ((v).type == STYPE_INT)
-#define is_int_p(v) ((v)->type == STYPE_INT)
-#define is_float(v) ((v).type == STYPE_FLOAT)
-#define is_float_p(v) ((v)->type == STYPE_FLOAT)
-#define is_form(v) ((v).type == STYPE_FORM)
-#define is_cfunc_p(v) ((v)->type == STYPE_CFUNC)
-#define is_sym(v) ((v).type == STYPE_SYM)
-#define is_str(v) ((v).type == STYPE_STR)
-#define is_key(v) ((v).type == STYPE_KEY)
-#define is_err(v) ((v).type == STYPE_ERR)
-#define is_cons(v) ((v).type == STYPE_CONS)
-#define is_code(v) ((v).type == STYPE_CODE)
-#define is_code_p(v) ((v)->type == STYPE_CODE)
-#define is_closure(v) ((v).type == STYPE_CLOSURE)
-#define is_closure_p(v) ((v)->type == STYPE_CLOSURE)
-
-#define as_arr(v) check(is_arr(v), (SArr*)(v).o)
-#define as_str(v) check(is_str(v), (SStr*)(v).o)
-#define as_sym(v) check(is_sym(v), (SSym*)(v).o)
-#define as_key(v) check(is_key(v), (SKeyword*)(v).o)
-#define as_err(v) check(is_err(v), (SErr*)(v).o)
-#define as_cons(v) check(is_cons(v), (SCons*)(v).o)
-#define as_code(v) check(is_code(v), (SCode*)(v).o)
-#define as_code_p(v) check(is_code_p(v), (SCode*)(v)->o)
-#define as_closure(v) check(is_closure(v), (SClosure*)(v).o)
-
-#define is_empty(v) (is_cons(v) && as_cons(v) == NULL)
 
 #define STYPE_MAPPING(XX) \
   XX(STYPE_UNDEF, 0, "undef") \
@@ -75,23 +42,39 @@ typedef struct SCode_ SCode;
 typedef struct SObject_ SObject;
 typedef struct SValue_ SValue;
 
-typedef long SnapInt;
+typedef int64_t SnapInt;
 typedef double SnapFloat;
 typedef void (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
 
 // Opcode in the low 8 bits, signed argument in the high 24 bits
 typedef uint32_t SnapInst;
 
+// A value is one tagged word:
+//   ...xxx1  63-bit integer (i << 1 | 1)
+//   ...x000  pointer to a GC object, whose header holds its type (floats too)
+//   ...x010  undef, deleted, nil, false, true or the empty list (n << 3 | 2)
+//   ...x100  special form (token << 3 | 4)
+//   ...x110  C function (pointer << 3 | 6; user space pointers fit in 61 bits)
 struct SValue_ {
-  uint8_t type;
-  union {
-    bool b;
-    SnapInt i;
-    SnapFloat f;
-    SObject* o;
-    SCFunc c;
-  };
+  uint64_t bits;
 };
+
+#define TAG_MASK 7
+#define TAG_OBJ 0
+#define TAG_SPECIAL 2
+#define TAG_FORM 4
+#define TAG_CFUNC 6
+
+#define SV_SPECIAL(n) (((uint64_t)(n) << 3) | TAG_SPECIAL)
+#define SV_UNDEF SV_SPECIAL(0)
+#define SV_DELETED SV_SPECIAL(1)
+#define SV_NIL SV_SPECIAL(2)
+#define SV_FALSE SV_SPECIAL(3)
+#define SV_TRUE SV_SPECIAL(4)
+#define SV_EMPTY SV_SPECIAL(5)
+
+#define SNAP_INT_MAX ((SnapInt)(((uint64_t)1 << 62) - 1))
+#define SNAP_INT_MIN (-SNAP_INT_MAX - 1)
 
 int snap_hash(const SValue* val);
 int snap_compare(const SValue* val1, const SValue* val2);
@@ -117,6 +100,11 @@ typedef struct {
 struct SObject_ {
   SOBJECT_FIELDS
 };
+
+typedef struct SFloat_ {
+  SOBJECT_FIELDS
+  SnapFloat f;
+} SFloat;
 
 typedef struct SStr_ {
   SOBJECT_FIELDS
@@ -216,13 +204,69 @@ struct Snap_ {
   jmp_buf jmp;
 };
 
-SValue create_undef();
-SValue create_nil();
-SValue create_empty();
-SValue create_bool(bool b);
-SValue create_int(SnapInt i);
-SValue create_float(SnapFloat f);
-SValue create_cfunc(SCFunc c);
+#define is_int(v) ((v).bits & 1)
+#define is_obj(v) (((v).bits & TAG_MASK) == TAG_OBJ)
+#define is_undef(v) ((v).bits == SV_UNDEF)
+#define is_nil(v) ((v).bits == SV_NIL)
+#define is_false(v) ((v).bits == SV_FALSE)
+#define is_bool(v) (is_false(v) || (v).bits == SV_TRUE)
+#define is_empty(v) ((v).bits == SV_EMPTY)
+#define is_form(v) (((v).bits & TAG_MASK) == TAG_FORM)
+#define is_cfunc(v) (((v).bits & TAG_MASK) == TAG_CFUNC)
+#define is_obj_type(v, t) (is_obj(v) && as_obj(v)->type == (t))
+#define is_float(v) is_obj_type(v, STYPE_FLOAT)
+#define is_sym(v) is_obj_type(v, STYPE_SYM)
+#define is_str(v) is_obj_type(v, STYPE_STR)
+#define is_key(v) is_obj_type(v, STYPE_KEY)
+#define is_err(v) is_obj_type(v, STYPE_ERR)
+#define is_arr(v) is_obj_type(v, STYPE_ARR)
+#define is_code(v) is_obj_type(v, STYPE_CODE)
+#define is_closure(v) is_obj_type(v, STYPE_CLOSURE)
+#define is_cons(v) (is_empty(v) || is_obj_type(v, STYPE_CONS))
+
+#define as_obj(v) ((SObject*)(uintptr_t)(v).bits)
+#define as_int(v) check(is_int(v), (SnapInt)(v).bits >> 1)
+#define as_float(v) check(is_float(v), ((SFloat*)as_obj(v))->f)
+#define as_form(v) check(is_form(v), (int)((v).bits >> 3))
+#define as_cfunc(v) check(is_cfunc(v), (SCFunc)(uintptr_t)((v).bits >> 3))
+#define as_str(v) check(is_str(v), (SStr*)as_obj(v))
+#define as_sym(v) check(is_sym(v), (SSym*)as_obj(v))
+#define as_key(v) check(is_key(v), (SKeyword*)as_obj(v))
+#define as_err(v) check(is_err(v), (SErr*)as_obj(v))
+#define as_arr(v) check(is_arr(v), (SArr*)as_obj(v))
+#define as_code(v) check(is_code(v), (SCode*)as_obj(v))
+#define as_closure(v) check(is_closure(v), (SClosure*)as_obj(v))
+#define as_cons(v) check(is_cons(v), is_empty(v) ? NULL : (SCons*)as_obj(v)) // NULL for ()
+
+static inline SValue snap_val(uint64_t bits) {
+  SValue val;
+  val.bits = bits;
+  return val;
+}
+
+static inline SValue create_undef(void) { return snap_val(SV_UNDEF); }
+static inline SValue create_nil(void) { return snap_val(SV_NIL); }
+static inline SValue create_empty(void) { return snap_val(SV_EMPTY); }
+static inline SValue create_bool(bool b) { return snap_val(b ? SV_TRUE : SV_FALSE); }
+static inline SValue create_int(SnapInt i) { return snap_val(((uint64_t)i << 1) | 1); }
+static inline SValue create_form(int token) { return snap_val(((uint64_t)token << 3) | TAG_FORM); }
+static inline SValue create_cfunc(SCFunc c) { return snap_val(((uint64_t)(uintptr_t)c << 3) | TAG_CFUNC); }
+static inline SValue create_object(SObject* o) { return snap_val((uint64_t)(uintptr_t)o); }
+#define create_obj(o) create_object((SObject*)(o))
+SValue create_float(Snap* snap, SnapFloat f); // Allocates
+
+static inline int snap_type(SValue val) {
+  static const uint8_t specials[] = {
+    STYPE_UNDEF, STYPE_DELETED, STYPE_NIL, STYPE_BOOL, STYPE_BOOL, STYPE_CONS
+  };
+  if (is_int(val)) return STYPE_INT;
+  switch (val.bits & TAG_MASK) {
+    case TAG_OBJ: return as_obj(val)->type;
+    case TAG_SPECIAL: return specials[val.bits >> 3];
+    case TAG_FORM: return STYPE_FORM;
+    default: return STYPE_CFUNC;
+  }
+}
 
 SStr* snap_str_new(Snap* snap, const char* str);
 SSym* snap_sym_new(Snap* snap, const char* name);
