@@ -23,8 +23,8 @@ make
 ./snap [-d] <file> <arg_1>...<arg_n>
 ```
 
-`-d` prints the byte code before running it. The script's arguments are a list
-in `args`.
+`-d` prints the byte code before running it. The script's arguments are a
+vector of strings in `args`.
 
 ```
 make test     # Run tests/ and compare with the expected output
@@ -46,13 +46,28 @@ Special forms: `def`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
 `< <= > >= =`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
-lists, `nil`, `true`, `false`, functions and errors. Square brackets are only
-used for parameters and bindings. `nil` and `false` are false, everything else
-is true. Integer arithmetic wraps on overflow, and mixing integers with floats
-gives a float.
+vectors, lists (only from `quote`), `nil`, `true`, `false`, functions and
+errors. `nil` and `false` are false, everything else is true. Integer
+arithmetic wraps on overflow, and mixing integers with floats gives a float.
 
-Built-in functions: `print`, `println`, `nil?`, `err`, `err?`, `err-kind` and
-`err-msg`.
+Built-in functions: `print`, `println`, `nil?`, `err`, `err?`, `err-kind`,
+`err-msg`, `count`, `nth`, `push!`, `pop!` and `put!`.
+
+## Vectors
+
+Vectors are mutable and grow as needed. Functions that change one end in `!`.
+
+```clojure
+(def v [1 2 3])     ; A literal makes a new vector each time it's evaluated
+(count v)           ; => 3
+(nth v 0)           ; => 1
+(push! v 4 5)       ; => [1 2 3 4 5], appends and returns v
+(pop! v)            ; => 5, removes and returns the last value
+(put! v 0 :a)       ; => [:a 2 3 4], replaces and returns v
+(= [1 [2]] [1 [2]]) ; => true, compared by contents
+```
+
+An index that's out of range, or popping an empty vector, panics.
 
 ## Errors
 

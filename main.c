@@ -34,20 +34,14 @@ int main(int argc, char** argv) {
     buf = (char*)malloc(end + 1);
     if ((num_bytes = fread(buf, 1, end, file)) > 0) {
       int i;
-      SValue args = create_empty(), result;
-      SCons* tail = NULL;
+      SValue result;
+      SVec* args = (SVec*)snap_anchor(&snap, (SObject*)snap_vec_new(&snap, argc - first - 1));
       for (i = first + 1; i < argc; ++i) {
-        SCons* next = snap_cons_new(&snap);
-        if (tail) {
-          tail->rest = create_obj(next);
-        } else {
-          args = create_obj(snap_anchor(&snap, (SObject*)next));
-        }
-        tail = next;
-        tail->first = create_obj(snap_str_new(&snap, argv[i]));
+        SValue arg = create_obj(snap_str_new(&snap, argv[i]));
+        snap_vec_push(&snap, args, arg);
       }
-      snap_def(&snap, "args", args);
-      if (tail) snap_release(&snap);
+      snap_def(&snap, "args", create_obj(args));
+      snap_release(&snap);
       buf[num_bytes] = '\0';
       result = snap_exec(&snap, buf);
       if (is_err(result)) {

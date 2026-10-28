@@ -25,7 +25,7 @@
   XX(STYPE_KEY, 10, "key") \
   XX(STYPE_ERR, 11, "err") \
   XX(STYPE_CONS, 12, "cons") \
-  XX(STYPE_ARR, 13, "array") \
+  XX(STYPE_VEC, 13, "vector") \
   XX(STYPE_CODE, 14, "code") \
   XX(STYPE_CLOSURE, 15, "closure") \
   XX(STYPE_UPVAL, 16, "upval") \
@@ -147,11 +147,13 @@ typedef struct SCons_ {
   SValue rest;
 } SCons;
 
-typedef struct SArr_ {
+// Mutable and growable
+typedef struct SVec_ {
   SOBJECT_FIELDS
   int len;
-  SValue data[1];
-} SArr;
+  int cap;
+  SValue* data;
+} SVec;
 
 typedef struct SUpval_ {
   SOBJECT_FIELDS
@@ -224,7 +226,7 @@ struct Snap_ {
 #define is_str(v) is_obj_type(v, STYPE_STR)
 #define is_key(v) is_obj_type(v, STYPE_KEY)
 #define is_err(v) is_obj_type(v, STYPE_ERR)
-#define is_arr(v) is_obj_type(v, STYPE_ARR)
+#define is_vec(v) is_obj_type(v, STYPE_VEC)
 #define is_code(v) is_obj_type(v, STYPE_CODE)
 #define is_closure(v) is_obj_type(v, STYPE_CLOSURE)
 #define is_cons(v) (is_empty(v) || is_obj_type(v, STYPE_CONS))
@@ -238,7 +240,7 @@ struct Snap_ {
 #define as_sym(v) check(is_sym(v), (SSym*)as_obj(v))
 #define as_key(v) check(is_key(v), (SKeyword*)as_obj(v))
 #define as_err(v) check(is_err(v), (SErr*)as_obj(v))
-#define as_arr(v) check(is_arr(v), (SArr*)as_obj(v))
+#define as_vec(v) check(is_vec(v), (SVec*)as_obj(v))
 #define as_code(v) check(is_code(v), (SCode*)as_obj(v))
 #define as_closure(v) check(is_closure(v), (SClosure*)as_obj(v))
 #define as_cons(v) check(is_cons(v), is_empty(v) ? NULL : (SCons*)as_obj(v)) // NULL for ()
@@ -277,6 +279,8 @@ SStr* snap_str_new(Snap* snap, const char* str);
 SSym* snap_sym_new(Snap* snap, const char* name);
 SErr* snap_err_new(Snap* snap, SValue err, SValue msg);
 SCons* snap_cons_new(Snap* snap);
+SVec* snap_vec_new(Snap* snap, int cap);
+void snap_vec_push(Snap* snap, SVec* vec, SValue val);
 
 SObject* snap_anchor(Snap* snap, SObject* obj);
 void snap_release(Snap* snap);

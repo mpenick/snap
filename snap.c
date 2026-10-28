@@ -188,6 +188,15 @@ int snap_compare(const SValue* val1, const SValue* val2) {
                            as_str(*val2)->data, as_str(*val2)->len);
     case STYPE_ERR:
       return snap_compare(&as_err(*val1)->err, &as_err(*val2)->err);
+    case STYPE_VEC: {
+      // By contents, element by element
+      SVec* v1 = as_vec(*val1), * v2 = as_vec(*val2);
+      int i, c;
+      for (i = 0; i < v1->len && i < v2->len; ++i) {
+        if ((c = snap_compare(&v1->data[i], &v2->data[i])) != 0) return c;
+      }
+      return compare(v1->len, v2->len);
+    }
     default:
       // Everything else, including interned symbols and keywords, by identity
       return compare(val1->bits, val2->bits);
@@ -272,8 +281,9 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_CONS:
       snap->num_bytes_alloced -= sizeof(SCons);
       break;
-    case STYPE_ARR:
-      snap->num_bytes_alloced -= (sizeof(SArr) + ((SArr*)obj)->len * sizeof(SValue));
+    case STYPE_VEC:
+      snap->num_bytes_alloced -= (sizeof(SVec) + ((SVec*)obj)->cap * sizeof(SValue));
+      free(((SVec*)obj)->data);
       break;
     case STYPE_CODE:
       snap->num_bytes_alloced -= sizeof(SCode) + code_extra_bytes((SCode*)obj);
@@ -305,7 +315,7 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_SYM:
     case STYPE_ERR:
     case STYPE_CONS:
-    case STYPE_ARR:
+    case STYPE_VEC:
     case STYPE_CODE:
     case STYPE_CLOSURE:
     case STYPE_UPVAL:
@@ -353,8 +363,8 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark_val(snap, ((SCons*)obj)->first);
       gc_mark_val(snap, ((SCons*)obj)->rest);
       break;
-    case STYPE_ARR:
-      gc_mark_vals(snap, ((SArr*)obj)->data, ((SArr*)obj)->len);
+    case STYPE_VEC:
+      gc_mark_vals(snap, ((SVec*)obj)->data, ((SVec*)obj)->len);
       break;
     case STYPE_CODE:
       gc_mark_vals(snap, ((SCode*)obj)->constants, ((SCode*)obj)->num_constants);
@@ -536,14 +546,24 @@ SCons* snap_cons_new(Snap* snap) {
   return c;
 }
 
-SArr* snap_arr_new(Snap* snap, int len) {
-  int i;
-  SArr* a = (SArr*)gc_new(snap, STYPE_ARR, sizeof(SArr) + len * sizeof(SValue));
-  a->len = len;
-  for (i = 0; i < len; ++i) {
-    a->data[i] = create_nil();
+SVec* snap_vec_new(Snap* snap, int cap) {
+  SVec* v = (SVec*)gc_new(snap, STYPE_VEC, sizeof(SVec));
+  v->len = 0;
+  v->cap = cap;
+  v->data = cap > 0 ? (SValue*)malloc(cap * sizeof(SValue)) : NULL;
+  snap->num_bytes_alloced += cap * sizeof(SValue);
+  return v;
+}
+
+// Doesn't allocate GC objects, so it never collects
+void snap_vec_push(Snap* snap, SVec* vec, SValue val) {
+  if (vec->len == vec->cap) {
+    int cap = vec->cap > 0 ? vec->cap * 2 : 4;
+    vec->data = (SValue*)realloc(vec->data, cap * sizeof(SValue));
+    snap->num_bytes_alloced += (cap - vec->cap) * sizeof(SValue);
+    vec->cap = cap;
   }
-  return a;
+  vec->data[vec->len++] = val;
 }
 
 SClosure* snap_closure_new(Snap* snap, SCode* code) {
@@ -1045,41 +1065,16 @@ static void parse_skip_seq(const int open, const int close, SnapLex* lex) {
            token != TK_INVALID);
 }
 
-static SValue parse_arr(Snap* snap, SnapLex* lex) {
-  int token, len = 0, count = 0;
-  SArr* arr;
-
-  // Count the elements first, then rewind and parse them
-  const char* p = lex->p;
-  int line = lex->line;
-  while ((token = snap_lex_next_token(lex)) != ']' &&
-         token != TK_EOF && token != TK_TOO_BIG && token != TK_INVALID) {
-    switch (token) {
-      case '[':
-        parse_skip_seq('[', ']', lex);
-        ++len;
-        break;
-      case '(':
-        parse_skip_seq('(', ')', lex);
-        ++len;
-        break;
-      case '\'':
-        // Don't count
-        break;
-      default:
-        ++len;
-        break;
-    }
-  }
-  lex->p = p;
-  lex->line = line;
-
-  arr = (SArr*)snap_anchor(snap, (SObject*)snap_arr_new(snap, len));
+static SValue parse_vec(Snap* snap, SnapLex* lex) {
+  int token;
+  SVec* vec = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
+  // parse_expr() raises on EOF, so this always ends at ']'
   while ((token = snap_lex_next_token(lex)) != ']') {
-    arr->data[count++] = parse_expr(snap, lex, token);
+    SValue val = parse_expr(snap, lex, token);
+    snap_vec_push(snap, vec, val);
   }
   snap_release(snap);
-  return create_obj(arr);
+  return create_obj(vec);
 }
 
 static SValue parse_quote(Snap* snap, SnapLex* lex) {
@@ -1107,7 +1102,7 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case '(':
       return parse_sexpr(snap, lex);
     case '[':
-      return parse_arr(snap, lex);
+      return parse_vec(snap, lex);
     case '\'':
       return parse_quote(snap, lex);
     case TK_INT:
@@ -1489,9 +1484,9 @@ static bool contains_fn(SValue expr) {
         return true;
       }
     }
-  } else if (is_arr(expr)) {
-    for (i = 0; i < as_arr(expr)->len; ++i) {
-      if (contains_fn(as_arr(expr)->data[i])) return true;
+  } else if (is_vec(expr)) {
+    for (i = 0; i < as_vec(expr)->len; ++i) {
+      if (contains_fn(as_vec(expr)->data[i])) return true;
     }
   }
   return false;
@@ -1507,9 +1502,9 @@ static bool references(SValue expr, SSym* name) {
     for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) {
       if (references(curr->first, name)) return true;
     }
-  } else if (is_arr(expr)) {
-    for (i = 0; i < as_arr(expr)->len; ++i) {
-      if (references(as_arr(expr)->data[i], name)) return true;
+  } else if (is_vec(expr)) {
+    for (i = 0; i < as_vec(expr)->len; ++i) {
+      if (references(as_vec(expr)->data[i], name)) return true;
     }
   }
   return false;
@@ -1611,18 +1606,18 @@ static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
 
 static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   int i;
-  SArr* params;
+  SVec* params;
   SnapFnState* fs;
   SCode* code;
 
-  if (!args || !is_arr(args->first)) {
+  if (!args || !is_vec(args->first)) {
     raise(snap, "snap_compile_error", "Expected parameter list");
   }
   if (!as_cons(args->rest)) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
 
-  params = as_arr(args->first);
+  params = as_vec(args->first);
   fs = fn_state_new(snap);
   fs->depth = 1; // def inside a fn makes locals
 
@@ -1653,33 +1648,33 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
 
 static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail) {
   int i, base;
-  SArr* bindings;
+  SVec* bindings;
   SnapLoop recur_target;
 
-  if (!args || !is_arr(args->first)) {
-    raise(snap, "snap_compile_error", "Expected binding array");
+  if (!args || !is_vec(args->first)) {
+    raise(snap, "snap_compile_error", "Expected binding vector");
   }
   if (!as_cons(args->rest)) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
 
-  bindings = as_arr(args->first);
+  bindings = as_vec(args->first);
   for (i = 0; i < bindings->len; ++i) {
     SValue binding = bindings->data[i];
-    if (!is_arr(binding) || as_arr(binding)->len != 2 || !is_sym(as_arr(binding)->data[0])) {
+    if (!is_vec(binding) || as_vec(binding)->len != 2 || !is_sym(as_vec(binding)->data[0])) {
       raise(snap, "snap_compile_error", "Expected binding pair [<id> <expr>]");
     }
   }
 
   // Values are evaluated before any of the names are visible
   for (i = 0; i < bindings->len; ++i) {
-    compile(snap, fs, as_arr(bindings->data[i])->data[1], false);
+    compile(snap, fs, as_vec(bindings->data[i])->data[1], false);
   }
 
   begin_scope(fs);
   base = fs->num_locals;
   for (i = 0; i < bindings->len; ++i) {
-    add_local(snap, fs, as_sym(as_arr(bindings->data[i])->data[0]));
+    add_local(snap, fs, as_sym(as_vec(bindings->data[i])->data[0]));
   }
   for (i = bindings->len - 1; i >= 0; --i) {
     emit(fs, STORE_LOCAL, base + i);
@@ -1759,6 +1754,18 @@ static void compile_panic(Snap* snap, SnapFnState* fs, SCons* args) {
   compile(snap, fs, nth(args, 1), false);
   compile(snap, fs, args->first, false);
   emit(fs, PANIC, 0);
+}
+
+bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result);
+
+// Vectors are mutable, so a literal makes a new one each time it's evaluated
+static void compile_vec(Snap* snap, SnapFnState* fs, SVec* vec) {
+  int i;
+  for (i = 0; i < vec->len; ++i) {
+    compile(snap, fs, vec->data[i], false);
+  }
+  load_constant(snap, fs, create_cfunc(builtin_vector));
+  emit(fs, CALL, vec->len);
 }
 
 static void compile_try(Snap* snap, SnapFnState* fs, SCons* args) {
@@ -1929,6 +1936,9 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
     case STYPE_SYM:
       load_variable(snap, fs, as_sym(expr));
       break;
+    case STYPE_VEC:
+      compile_vec(snap, fs, as_vec(expr));
+      break;
     case STYPE_CONS:
       if (is_empty(expr)) {
         load_constant(snap, fs, expr);
@@ -2074,11 +2084,11 @@ static void print_val(SValue val) {
       print_val(as_err(val)->msg);
       printf(">");
       break;
-    case STYPE_ARR:
+    case STYPE_VEC:
       printf("[");
-      for (i = 0; i < as_arr(val)->len; ++i) {
+      for (i = 0; i < as_vec(val)->len; ++i) {
         if (i > 0) printf(" ");
-        print_val(as_arr(val)->data[i]);
+        print_val(as_vec(val)->data[i]);
       }
       printf("]");
       break;
@@ -2152,9 +2162,15 @@ static void print_code(SCode* code, int indent) {
 
 /* Builtins */
 
-static bool arity_error(Snap* snap, SValue* result) {
-  *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
+// Sets *result to a new error and returns false, so a builtin can panic with
+// `return fail(...)`
+static bool fail(Snap* snap, SValue* result, const char* err, const char* msg) {
+  *result = create_obj(snap_err_new_format(snap, err, "%s", msg));
   return false;
+}
+
+static bool arity_error(Snap* snap, SValue* result) {
+  return fail(snap, result, "snap_arity_error", "Invalid number of arguments");
 }
 
 bool builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -2196,10 +2212,7 @@ bool builtin_iserr(Snap* snap, const SValue* args, int num_args, SValue* result)
 
 static bool err_arg(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 1) return arity_error(snap, result);
-  if (!is_err(args[0])) {
-    *result = create_obj(snap_err_new_format(snap, "snap_type_error", "Expected an error"));
-    return false;
-  }
+  if (!is_err(args[0])) return fail(snap, result, "snap_type_error", "Expected an error");
   return true;
 }
 
@@ -2212,6 +2225,71 @@ bool builtin_err_kind(Snap* snap, const SValue* args, int num_args, SValue* resu
 bool builtin_err_msg(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (!err_arg(snap, args, num_args, result)) return false;
   *result = as_err(args[0])->msg;
+  return true;
+}
+
+// Builds vector literals (see compile_vec())
+bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SVec* vec = snap_vec_new(snap, num_args);
+  if (num_args > 0) memcpy(vec->data, args, num_args * sizeof(SValue));
+  vec->len = num_args;
+  *result = create_obj(vec);
+  return true;
+}
+
+// Checks for a vector, and an index that's in range when there is one
+static bool vec_args(Snap* snap, const SValue* args, int num_args, int expected, SValue* result) {
+  if (num_args != expected) return arity_error(snap, result);
+  if (!is_vec(args[0])) return fail(snap, result, "snap_type_error", "Expected a vector");
+  if (expected > 1) {
+    if (!is_int(args[1])) return fail(snap, result, "snap_type_error", "Expected an integer index");
+    if (as_int(args[1]) < 0 || as_int(args[1]) >= as_vec(args[0])->len) {
+      return fail(snap, result, "snap_index_error", "Index out of range");
+    }
+  }
+  return true;
+}
+
+bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!vec_args(snap, args, num_args, 1, result)) return false;
+  *result = create_int(as_vec(args[0])->len);
+  return true;
+}
+
+// (nth <vec> <index>)
+bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!vec_args(snap, args, num_args, 2, result)) return false;
+  *result = as_vec(args[0])->data[as_int(args[1])];
+  return true;
+}
+
+// (put! <vec> <index> <val>) returns the vector
+bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!vec_args(snap, args, num_args, 3, result)) return false;
+  as_vec(args[0])->data[as_int(args[1])] = args[2];
+  *result = args[0];
+  return true;
+}
+
+// (push! <vec> <val>...) appends to the end and returns the vector
+bool builtin_push(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i;
+  if (num_args < 2) return arity_error(snap, result);
+  if (!is_vec(args[0])) return fail(snap, result, "snap_type_error", "Expected a vector");
+  for (i = 1; i < num_args; ++i) {
+    snap_vec_push(snap, as_vec(args[0]), args[i]);
+  }
+  *result = args[0];
+  return true;
+}
+
+// (pop! <vec>) removes and returns the last value
+bool builtin_pop(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SVec* vec;
+  if (!vec_args(snap, args, num_args, 1, result)) return false;
+  vec = as_vec(args[0]);
+  if (vec->len == 0) return fail(snap, result, "snap_index_error", "Vector is empty");
+  *result = vec->data[--vec->len];
   return true;
 }
 
@@ -2239,6 +2317,11 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "err?", builtin_iserr);
   snap_def_cfunc(snap, "err-kind", builtin_err_kind);
   snap_def_cfunc(snap, "err-msg", builtin_err_msg);
+  snap_def_cfunc(snap, "count", builtin_count);
+  snap_def_cfunc(snap, "nth", builtin_nth);
+  snap_def_cfunc(snap, "put!", builtin_put);
+  snap_def_cfunc(snap, "push!", builtin_push);
+  snap_def_cfunc(snap, "pop!", builtin_pop);
 }
 
 void snap_destroy(Snap* snap) {

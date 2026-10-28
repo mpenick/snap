@@ -1,0 +1,3 @@
+; vi: filetype=scheme
+
+(nth [1 2] 2)

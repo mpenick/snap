@@ -1,0 +1,59 @@
+; vi: filetype=scheme
+
+; Vectors are mutable and grow. Literals evaluate their elements and make a
+; new vector each time.
+
+(def x 10)
+(println [] [1 2 3] [x (+ x 1) "s" :k nil [4 [5]]])
+(println (count []) (count [1 2 3]) (nth [1 2 3] 0) (nth [1 2 3] 2))
+
+; push! appends (any number of values) and returns the vector, which is
+; changed in place
+(def v [1])
+(println (push! v 2))
+(println (push! v 3 4 5) (count v))
+
+; pop! removes and returns the last value
+(println (pop! v) v)
+
+; put! replaces and returns the vector
+(println (put! v 0 :first))
+
+; Each evaluation of a literal is a new vector
+(def make (fn [] [1 2]))
+(def a (make))
+(push! a 3)
+(println a (make))
+
+; Grow past several reallocations, then sum by index
+(def big [])
+(loop [[i 0]] (if (< i 1000) (begin (push! big i) (recur (+ i 1))) nil))
+(println (count big) (nth big 999)
+  (loop [[i 0] [sum 0]] (if (< i (count big)) (recur (+ i 1) (+ sum (nth big i))) sum)))
+
+; Vectors of vectors, kept alive while lots of garbage is made
+(def grid [])
+(loop [[r 0]]
+  (if (< r 100)
+    (begin
+      (push! grid [r (* r r) (* r r r)])
+      (loop [[g 0]] (if (< g 20) (begin [g g g g] (recur (+ g 1))) nil))
+      (recur (+ r 1)))
+    nil))
+(println (nth grid 0) (nth grid 99) (count grid))
+
+; Mutation is visible through every reference, including closures
+(def acc [])
+(def add! (fn [n] (push! acc n)))
+(add! 1) (add! 2)
+(println acc)
+
+; Equality and ordering are by contents
+(println (= [1 2] [1 2]) (= [1 2] [1 3]) (= [] []) (= [1 [2]] [1 [2]]))
+(println (< [1 2] [1 3]) (< [1 2] [1 2 0]) (> [2] [1 9]))
+
+; Quoted vectors aren't evaluated, and an empty vector is true
+(println (quote [a (b c) 1]) (if [] :true :false))
+
+; Script arguments are a vector
+(println args (count args))
