@@ -206,6 +206,13 @@ typedef struct SnapFrame_ {
   bool recover; // Called by recover: a panic unwinds to here
 } SnapFrame;
 
+// A marked object and the index of its next child to mark, so that big
+// vectors and maps are marked a chunk at a time
+typedef struct {
+  SObject* obj;
+  int pos;
+} SnapGray;
+
 struct Snap_ {
   SnapHash symbols;
   SnapHash keywords;
@@ -215,9 +222,17 @@ struct Snap_ {
   struct { MVEC_FIELDS(SnapFrame); } frames;
   struct { MVEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
-  size_t next_gc; // Collect when num_bytes_alloced reaches this
+  size_t next_gc; // Start a collection when num_bytes_alloced reaches this
   SObject* all;
-  struct { MVEC_FIELDS(SObject*); } gray; // Marked objects whose children still need marking
+  // The collector runs in small steps between allocations (see snap.c)
+  uint8_t gc_phase;     // Idle, marking or sweeping
+  uint8_t gc_unmarked;  // Mark value of unmarked objects (0 or 1), flipped each collection
+  bool gc_manual;       // Only collect in snap_gc_step(), never while allocating
+  int gc_sym;           // Next symbol table entry to mark the value of (globals)
+  size_t gc_debt;       // Bytes allocated since the last step
+  size_t gc_live;       // Estimate of live bytes: the heap when the collection started, less what it freed
+  SObject** gc_sweep;   // Next object to sweep
+  struct { MVEC_FIELDS(SnapGray); } gray; // Marked objects whose children still need marking
   SUpval* open_upvals;
   struct SnapFnState_* fn_state; // Innermost function being compiled
   SErr* cause;
@@ -303,7 +318,7 @@ void snap_vec_push(Snap* snap, SVec* vec, SValue val);
 SMap* snap_map_new(Snap* snap);
 SValue* snap_map_get(SMap* map, SValue key);
 void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val);
-bool snap_map_del(SMap* map, SValue key);
+bool snap_map_del(Snap* snap, SMap* map, SValue key);
 
 SObject* snap_anchor(Snap* snap, SObject* obj);
 void snap_release(Snap* snap);
@@ -317,6 +332,12 @@ SValue snap_compile(Snap* snap, const char* str);
 SValue snap_run(Snap* snap, SValue fn);
 SValue snap_exec(Snap* snap, const char* str);
 void snap_print(SValue value);
+
+// Does about `work` units of collection (one is marking a value or sweeping an
+// object), starting a collection if none is running. Returns true when a
+// collection finishes. With gc_manual set, this is the only way the collector
+// runs, e.g. in a program's idle time each frame.
+bool snap_gc_step(Snap* snap, size_t work);
 
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);

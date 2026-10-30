@@ -9,7 +9,7 @@ are fast, small and simple.
 * Closures
 * Tail recursion (`recur` and `loop`)
 * Byte code compiler and stack-based interpreter
-* Mark-and-sweep GC
+* Incremental mark-and-sweep GC with short pauses
 * FFI (C functions)
 * Errors as values (no exceptions)
 
@@ -34,7 +34,7 @@ vector of strings in `args`.
 
 ```
 make test     # Run tests/ and compare with the expected output
-make stress   # The same under ASan/UBSan, collecting every few bytes
+make stress   # The same under ASan/UBSan, collecting all the time
 ```
 
 ## Language
@@ -74,6 +74,9 @@ Built-in functions:
 * Code: `(compile src)` compiles a string into a function without arguments.
   It returns an error if the code doesn't parse or compile (`:snap_eof_error`
   when it ends early), and `nil` if there's no code.
+* GC: `(gc-step work)` does about `work` units of collection (marking a value
+  or sweeping an object is one), starting a collection if none is running,
+  and returns `true` when a collection finishes. `(gc-step 0)` just starts one.
 
 ## Vectors
 
@@ -184,9 +187,24 @@ string in `repl.h`: it reads lines until `compile` stops returning
   a single `STEP` instruction that adds to the counter, compares it and jumps
   back. Closed-over variables are shared between closures and closed when
   their frame returns.
-* **The GC** is mark and sweep with an explicit mark stack. It collects once
-  the heap has grown to twice what was live after the last collection.
+* **The GC** is incremental mark and sweep, so pauses stay short however big
+  the heap is. A collection starts once the heap has grown to twice what was
+  live after the last one, then runs in small steps that allocation pays for.
+  Allocating 4KB does a step of about 2,000 units, which takes well under a
+  millisecond. Marking uses a snapshot-at-the-beginning write barrier: while
+  marking, a value removed from the heap (by `set!`, `put!`, `pop!` or
+  `del!`) is marked first, so changes to the heap can't hide a live object.
+  The stack is marked all at once when a collection starts, so stack writes,
+  which are most of what the VM does, don't need the barrier. Objects made
+  during a collection survive it. Big vectors and maps are marked 64 values at
+  a time, and sweeping goes a few objects at a time. Which mark value means
+  "marked" flips each collection, so objects never need to be unmarked.
+* **Real-time programs** can set `gc_manual` in the `Snap` struct so that
+  allocation never collects, and call `snap_gc_step()` (or `gc-step`) in
+  their idle time, such as the end of each frame.
 
 ## TODO
 
-* Better GC
+* Allocate objects from pools of fixed sizes, so that allocation has bounded
+  time too (`malloc` and `free` don't)
+* Floats in values instead of on the heap

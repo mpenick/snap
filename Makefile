@@ -34,9 +34,10 @@ repl.h: repl.snap
 test: $(TARGET)
 	@tests/run.sh ./$(TARGET)
 
-# Collect every few bytes under ASan/UBSan to shake out missing GC roots
+# Collect constantly, a few units of work per allocation, under ASan/UBSan to
+# shake out missing GC roots and barriers
 stress: snap_lex.h repl.h
-	$(CC) -g -O0 -fsanitize=address,undefined -DGC_HEAP_GROWTH=1 -DGC_MIN_STEP=256 -o snap_stress $(SOURCES) $(LDFLAGS)
+	$(CC) -g -O0 -fsanitize=address,undefined -DGC_HEAP_GROWTH=1 -DGC_MIN_STEP=256 -DGC_STEP_SIZE=1 -DGC_STEP_MUL=1 -o snap_stress $(SOURCES) $(LDFLAGS)
 	@for f in test.snap closure.snap loop.snap new.snap; do \
 		echo "== $$f"; ./snap_stress $$f > /dev/null || exit 1; \
 	done

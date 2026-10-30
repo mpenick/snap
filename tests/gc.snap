@@ -1,0 +1,104 @@
+; vi: filetype=scheme
+
+; Moves objects out of places the collector hasn't marked yet. Each test starts
+; a collection, then moves objects without allocating (so the collector can't
+; take a step) into a vector made after the collection started, which the
+; collector doesn't look inside. Without the write barrier, the moved objects
+; are freed when the collection finishes (the stress build's ASan catches the
+; use after that).
+
+(def n 300)
+
+(def finish (fn [] (if (gc-step 1000000) nil (recur))))
+(def start (fn [] (finish) (gc-step 0)))
+
+; [[0] [1] ... [n-1]]
+(def make (fn []
+  (loop [v [] i 0]
+    (if (< i n) (recur (push! v [i]) (+ i 1)) v))))
+
+; [n-1 [n-2 ... [0 nil]]]
+(def chain (fn []
+  (loop [c nil i 0]
+    (if (< i n) (recur [i c] (+ i 1)) c))))
+
+; b holds n values whose first values go from n-1 down to 0
+(def check (fn [b]
+  (finish)
+  (loop [i 0 ok (= (count b) n)]
+    (if (< i (count b))
+      (recur (+ i 1) (if (= (nth (nth b i) 0) (- (- n 1) i)) ok false))
+      ok))))
+
+; pop!
+(def a (make))
+(start)
+(def b [])
+(loop [i 0] (if (< i n) (begin (push! b (pop! a)) (recur (+ i 1))) nil))
+(println (check b))
+
+; put! on a vector
+(def a (make))
+(start)
+(def b [])
+(loop [i (- n 1)]
+  (if (< i 0) nil (begin (push! b (nth a i)) (put! a i nil) (recur (- i 1)))))
+(println (check b))
+
+; put! and del! on a map
+(def m {})
+(loop [i 0] (if (< i n) (begin (put! m i [i]) (recur (+ i 1))) nil))
+(start)
+(def b [])
+(loop [i (- n 1)]
+  (if (< i 0)
+    nil
+    (begin
+      (push! b (get m i))
+      (if (= (% i 2) 0) (del! m i) (put! m i nil))
+      (recur (- i 1)))))
+(println (check b))
+
+; del! of object keys
+(def m {})
+(loop [i 0] (if (< i n) (begin (put! m [i] i) (recur (+ i 1))) nil))
+(start)
+(def ks (keys m)) ; Made during the collection, so it isn't scanned either
+(def b [])
+(loop [i (- n 1)]
+  (if (< i 0) nil (let [k (nth ks i)] (del! m k) (push! b k) (recur (- i 1)))))
+(println (check b))
+
+; set! on a global
+(def g (chain))
+(start)
+(def b [])
+(loop [i 0] (if (< i n) (begin (push! b g) (set! g (nth g 1)) (recur (+ i 1))) nil))
+(println (check b))
+
+; set! on a captured variable (made in a function, so that no stack slot
+; still holds the chain)
+(def make-next (fn [] (let [c (chain)] (fn [] (let [x c] (set! c (nth c 1)) x)))))
+(def next! (make-next))
+(start)
+(def b [])
+(loop [i 0] (if (< i n) (begin (push! b (next!)) (recur (+ i 1))) nil))
+(println (check b))
+
+; Rebuilding a map moves its entries down, past where the collector may be
+; partway through marking it. Try a range of amounts of work before the
+; rebuild so that some land partway (less to mark makes this quicker).
+(set! a nil) (set! b nil) (set! m nil) (set! ks nil) (set! g nil) (set! next! nil)
+(def rebuild (fn [work]
+  (let [m {}]
+    (loop [i 0] (if (< i n) (begin (put! m [i] [i]) (recur (+ i 1))) nil))
+    (loop [i 0] (if (< i (- n 20)) (begin (del! m [i]) (recur (+ i 1))) nil))
+    (start)
+    (gc-step work)
+    (loop [i n] (if (< i (* 3 n)) (begin (put! m i i) (recur (+ i 1))) nil))
+    (finish)
+    (loop [i (- n 20) ok true]
+      (if (< i n) (recur (+ i 1) (if (= (nth (get m [i]) 0) i) ok false)) ok)))))
+(println (loop [work 0 ok true]
+  (if (< work 4000) (recur (+ work 40) (if (rebuild work) ok false)) ok)))
+

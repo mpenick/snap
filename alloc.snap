@@ -1,0 +1,10 @@
+; vi: filetype=scheme
+
+; GC benchmark: a big live heap (200k small vectors), then lots of short-lived
+; garbage. With a stop-the-world collector every collection marks the whole
+; live heap at once; the incremental one spreads that out.
+
+(def live (loop [v [] i 0] (if (< i 200000) (recur (push! v [i i]) (+ i 1)) v)))
+(def churn (fn [n acc]
+  (if (< n 2000000) (recur (+ n 1) (+ acc (nth [n 1] 1))) acc)))
+(println (churn 0 0) (count live))

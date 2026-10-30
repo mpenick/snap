@@ -11,8 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-// After a collection the next one happens once the heap has grown by
-// GC_HEAP_GROWTH times the live size, and by at least GC_MIN_STEP bytes
+// The collector is incremental mark and sweep. A collection starts once the
+// heap has grown to GC_HEAP_GROWTH times what the last one found live, and by
+// at least GC_MIN_STEP bytes. It then runs in steps: every GC_STEP_SIZE bytes
+// allocated does GC_STEP_MUL units of work (one is marking a value or
+// sweeping an object) per 8 bytes, so it keeps ahead of the program. A step
+// marks at most GC_CHUNK values of one object.
 #ifndef GC_HEAP_GROWTH
 #define GC_HEAP_GROWTH 2
 #endif
@@ -21,14 +25,29 @@
 #define GC_MIN_STEP (1024 * 1024)
 #endif
 
+#ifndef GC_STEP_SIZE
+#define GC_STEP_SIZE 4096
+#endif
+
+#ifndef GC_STEP_MUL
+#define GC_STEP_MUL 4
+#endif
+
+#define GC_CHUNK 64
+
 #define MAX_ARG ((1 << 23) - 1)
 #define MAX_LOCALS 256
 #define MAX_UPVALS 256
 
 enum {
-  UNMARKED,
-  MARKED
+  GC_IDLE,
+  GC_MARK,
+  GC_SWEEP
 };
+
+// Mark value of objects that are never freed (symbols and keywords). Others
+// are 0 or 1, see gc_unmarked.
+#define GC_FIXED 2
 
 #define OPCODE_MAP(XX) \
   XX(LOAD_GLOBAL) \
@@ -376,24 +395,26 @@ static void gc_free(Snap* snap, SObject* obj) {
   free(obj);
 }
 
+// Symbols and keywords are GC_FIXED, so they never get past the first line
 static void gc_mark(Snap* snap, SObject* obj) {
-  if (!obj || obj->mark == MARKED) return;
-  obj->mark = MARKED;
+  if (!obj || obj->mark != snap->gc_unmarked) return;
+  obj->mark = snap->gc_unmarked ^ 1;
   switch (obj->type) {
     case STYPE_FLOAT:
     case STYPE_STR:
-    case STYPE_KEY:
       break; // No children
-    case STYPE_SYM:
     case STYPE_ERR:
     case STYPE_CONS:
     case STYPE_VEC:
     case STYPE_MAP:
     case STYPE_CODE:
     case STYPE_CLOSURE:
-    case STYPE_UPVAL:
-      *mvec_push(&snap->gray, SObject*) = obj;
+    case STYPE_UPVAL: {
+      SnapGray* gray = mvec_push(&snap->gray, SnapGray);
+      gray->obj = obj;
+      gray->pos = 0;
       break;
+    }
     default:
       assert(0 && "Not a GC object");
       break;
@@ -411,23 +432,42 @@ static void gc_mark_vals(Snap* snap, SValue* vals, int count) {
   }
 }
 
-static void gc_mark_hash(Snap* snap, SnapHash* hash) {
-  int i;
-  for (i = 0; i < hash->hcapacity; ++i) {
-    SnapHashEntry* entry = &hash->hentries[i];
-    if (!is_undef(entry->hkey)) {
-      gc_mark_val(snap, entry->hkey);
-      gc_mark_val(snap, entry->val);
-    }
+// Snapshot-at-the-beginning write barrier: while marking, a heap value about
+// to be overwritten or removed is marked first. So everything reachable when
+// the collection started gets marked, however the program changes the heap.
+// Stores to the stack don't need it (it's marked when the collection starts),
+// and neither do stores that only add values.
+#define gc_barrier(snap, old) \
+  do { if ((snap)->gc_phase == GC_MARK && is_obj(old)) gc_mark(snap, as_obj(old)); } while (0)
+
+// Marks up to GC_CHUNK of vals[gray->pos, count) and moves gray->pos past them,
+// or sets it to -1 when they're all marked. Returns the work done.
+static int gc_scan_vals(Snap* snap, SnapGray* gray, SValue* vals, int count) {
+  int start = gray->pos, end;
+  if (start >= count) { // The vector shrank
+    gray->pos = -1;
+    return 1;
   }
+  end = count - start > GC_CHUNK ? start + GC_CHUNK : count;
+  gc_mark_vals(snap, vals + start, end - start);
+  gray->pos = end < count ? end : -1;
+  return end - start + 1;
 }
 
-static void gc_mark_children(Snap* snap, SObject* obj) {
+// Marks the children of a gray object, a chunk at a time for the ones that
+// can be big. Vectors and maps can change between chunks: positions are
+// indexes, removed values go through the barrier, and map_rebuild() marks
+// the entries it moves.
+static int gc_scan(Snap* snap, SnapGray* gray) {
+  SObject* obj = gray->obj;
   int i;
   switch (obj->type) {
-    case STYPE_SYM:
-      gc_mark_val(snap, ((SSym*)obj)->value);
-      break;
+    case STYPE_VEC:
+      return gc_scan_vals(snap, gray, ((SVec*)obj)->data, ((SVec*)obj)->len);
+    case STYPE_MAP:
+      return gc_scan_vals(snap, gray, ((SMap*)obj)->entries, 2 * ((SMap*)obj)->used); // Deleted keys aren't objects
+    case STYPE_CODE:
+      return gc_scan_vals(snap, gray, ((SCode*)obj)->constants, ((SCode*)obj)->num_constants);
     case STYPE_ERR:
       gc_mark_val(snap, ((SErr*)obj)->err);
       gc_mark_val(snap, ((SErr*)obj)->msg);
@@ -436,21 +476,13 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       gc_mark_val(snap, ((SCons*)obj)->first);
       gc_mark_val(snap, ((SCons*)obj)->rest);
       break;
-    case STYPE_VEC:
-      gc_mark_vals(snap, ((SVec*)obj)->data, ((SVec*)obj)->len);
-      break;
-    case STYPE_MAP:
-      gc_mark_vals(snap, ((SMap*)obj)->entries, 2 * ((SMap*)obj)->used); // Deleted keys aren't objects
-      break;
-    case STYPE_CODE:
-      gc_mark_vals(snap, ((SCode*)obj)->constants, ((SCode*)obj)->num_constants);
-      break;
     case STYPE_CLOSURE:
       gc_mark(snap, (SObject*)((SClosure*)obj)->code);
       for (i = 0; i < ((SClosure*)obj)->num_upvals; ++i) {
         gc_mark(snap, (SObject*)((SClosure*)obj)->upvals[i]);
       }
-      break;
+      gray->pos = -1;
+      return i + 1;
     case STYPE_UPVAL:
       gc_mark_val(snap, *((SUpval*)obj)->value);
       break;
@@ -458,22 +490,31 @@ static void gc_mark_children(Snap* snap, SObject* obj) {
       assert(0 && "Not a valid gray object");
       break;
   }
+  gray->pos = -1;
+  return 2;
 }
 
 static void gc_mark_fn_states(Snap* snap);
 
-static void gc_collect(Snap* snap) {
+// Starts a collection by flipping which mark value means unmarked, so that
+// every object is unmarked without touching them, then marks the roots. The
+// stack is marked all at once here, which is what lets stack stores skip the
+// barrier. Symbols (and so globals) are marked in steps instead.
+static void gc_start(Snap* snap) {
   SObject** obj;
   SnapFrame* frame;
   SUpval* upval;
+
+  snap->gc_phase = GC_MARK;
+  snap->gc_unmarked ^= 1;
+  snap->gc_sym = 0;
+  snap->gc_debt = 0;
+  snap->gc_live = snap->num_bytes_alloced; // Less what the sweep frees
 
   mvec_foreach(&snap->anchors, obj) {
     gc_mark(snap, *obj);
   }
 
-  // Interned symbols (and so all globals) and keywords live forever
-  gc_mark_hash(snap, &snap->symbols);
-  gc_mark_hash(snap, &snap->keywords);
   gc_mark(snap, (SObject*)snap->cause);
 
   // Each frame's [stack_base, stack_top) region is live (args, locals and
@@ -489,39 +530,82 @@ static void gc_collect(Snap* snap) {
   }
 
   gc_mark_fn_states(snap);
+}
 
-  while (snap->gray.vsize > 0) {
-    gc_mark_children(snap, snap->gray.vitems[--snap->gray.vsize]);
-  }
-
-  obj = &snap->all;
-
-  while (*obj) {
-    if ((*obj)->mark == UNMARKED) {
-      SObject* temp = *obj;
-      *obj = (*obj)->gc_next;
-      gc_free(snap, temp);
+// Does about `work` units of marking or sweeping. Returns true when it
+// finishes the collection.
+static bool gc_step(Snap* snap, size_t work) {
+  size_t done = 0;
+  while (done < work) {
+    if (snap->gc_phase == GC_MARK) {
+      if (snap->gc_sym < snap->symbols.hcapacity) {
+        // Symbols and keywords are never freed (GC_FIXED), but symbols hold
+        // the globals. A resize of the table restarts this (see snap_sym_new()).
+        SnapHashEntry* entry = &snap->symbols.hentries[snap->gc_sym++];
+        if (!is_undef(entry->hkey)) gc_mark_val(snap, as_sym(entry->hkey)->value);
+        done++;
+      } else if (snap->gray.vsize > 0) {
+        SnapGray gray = snap->gray.vitems[--snap->gray.vsize];
+        done += gc_scan(snap, &gray);
+        if (gray.pos >= 0) *mvec_push(&snap->gray, SnapGray) = gray;
+      } else {
+        snap->gc_phase = GC_SWEEP;
+        snap->gc_sweep = &snap->all;
+      }
+    } else if (snap->gc_phase == GC_SWEEP) {
+      // New objects go on the front of the list, so they're never between
+      // the sweep position and the end, and they're marked anyway
+      SObject* obj = *snap->gc_sweep;
+      if (!obj) {
+        // Grow from the live estimate rather than the heap size, which
+        // includes everything allocated during the collection
+        snap->gc_phase = GC_IDLE;
+        snap->next_gc = snap->gc_live * GC_HEAP_GROWTH;
+        if (snap->next_gc < snap->num_bytes_alloced + GC_MIN_STEP) {
+          snap->next_gc = snap->num_bytes_alloced + GC_MIN_STEP;
+        }
+        return true;
+      }
+      if (obj->mark == snap->gc_unmarked) {
+        size_t before = snap->num_bytes_alloced;
+        *snap->gc_sweep = obj->gc_next;
+        gc_free(snap, obj);
+        snap->gc_live -= before - snap->num_bytes_alloced;
+      } else {
+        snap->gc_sweep = &obj->gc_next;
+      }
+      done++;
     } else {
-      (*obj)->mark = UNMARKED;
-      obj = &(*obj)->gc_next;
+      break;
     }
   }
+  return false;
+}
 
-  snap->next_gc = snap->num_bytes_alloced * GC_HEAP_GROWTH;
-  if (snap->next_gc < snap->num_bytes_alloced + GC_MIN_STEP) {
-    snap->next_gc = snap->num_bytes_alloced + GC_MIN_STEP;
-  }
+bool snap_gc_step(Snap* snap, size_t work) {
+  if (snap->gc_phase == GC_IDLE) gc_start(snap);
+  return gc_step(snap, work);
 }
 
 static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   SObject* obj;
   assert(size > sizeof(SObject));
-  if (snap->num_bytes_alloced + size > snap->next_gc) {
-    gc_collect(snap);
+  if (snap->gc_manual) {
+    // The program collects with snap_gc_step()
+  } else if (snap->gc_phase != GC_IDLE) {
+    // Pay for allocations with collection work, so that the collection
+    // finishes before the heap grows much
+    snap->gc_debt += size;
+    if (snap->gc_debt >= GC_STEP_SIZE) {
+      gc_step(snap, snap->gc_debt * GC_STEP_MUL / sizeof(SValue));
+      snap->gc_debt = 0;
+    }
+  } else if (snap->num_bytes_alloced + size > snap->next_gc) {
+    gc_start(snap);
   }
   obj = (SObject*)malloc(size);
   obj->type = type;
-  obj->mark = UNMARKED;
+  obj->mark = snap->gc_unmarked ^ 1; // New objects survive the collection they're made in
   obj->read_only = false;
   obj->gc_next = snap->all;
   snap->all = obj;
@@ -567,16 +651,20 @@ SStr* snap_str_new_format(Snap* snap, const char* format, ...) {
 
 SSym* snap_sym_new(Snap* snap, const char* name) {
   size_t len = strlen(name);
+  int capacity;
   SValue* existing = snap_hash_get_str(&snap->symbols, name, len);
   SSym* s;
   if (existing) {
     return as_sym(*existing);
   }
   s = (SSym*)gc_new(snap, STYPE_SYM, sizeof(SSym) + len + 1);
+  s->mark = GC_FIXED;
   s->value = create_undef();
   s->len = len;
   memcpy(s->data, name, len + 1);
+  capacity = snap->symbols.hcapacity;
   snap_hash_put(&snap->symbols, create_obj(s), create_obj(s));
+  if (snap->symbols.hcapacity != capacity) snap->gc_sym = 0; // Entries moved, so mark them again
   return s;
 }
 
@@ -588,6 +676,7 @@ SKeyword* snap_key_new(Snap* snap, const char* name) {
     return as_key(*existing);
   }
   k = (SKeyword*)gc_new(snap, STYPE_KEY, sizeof(SKeyword) + len + 1);
+  k->mark = GC_FIXED;
   k->len = len;
   memcpy(k->data, name, len + 1);
   k->id = snap->keywords.hcount;
@@ -678,6 +767,10 @@ static void map_rebuild(Snap* snap, SMap* map) {
   entries = (SValue*)malloc(2 * cap * sizeof(SValue));
   for (i = 0; i < map->used; ++i) {
     if (map->entries[2 * i].bits != SV_DELETED) {
+      // A collection marking this map a chunk at a time could miss moved
+      // entries, so mark them
+      gc_barrier(snap, map->entries[2 * i]);
+      gc_barrier(snap, map->entries[2 * i + 1]);
       entries[2 * len] = map->entries[2 * i];
       entries[2 * len + 1] = map->entries[2 * i + 1];
       len++;
@@ -708,13 +801,17 @@ void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val) {
     map->entries[2 * e] = key;
     map_index(map, e);
     map->len++;
+  } else {
+    gc_barrier(snap, map->entries[2 * e + 1]);
   }
   map->entries[2 * e + 1] = val;
 }
 
-bool snap_map_del(SMap* map, SValue key) {
+bool snap_map_del(Snap* snap, SMap* map, SValue key) {
   int e = map_find(map, key);
   if (e < 0) return false;
+  gc_barrier(snap, map->entries[2 * e]);
+  gc_barrier(snap, map->entries[2 * e + 1]);
   map->entries[2 * e] = snap_val(SV_DELETED);
   map->entries[2 * e + 1] = create_nil();
   map->len--;
@@ -746,7 +843,9 @@ void snap_release(Snap* snap) {
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
-  snap_sym_new(snap, name)->value = val;
+  SSym* sym = snap_sym_new(snap, name);
+  gc_barrier(snap, sym->value);
+  sym->value = val;
 }
 
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
@@ -1083,7 +1182,9 @@ new_frame:
         DISPATCH();
       }
       OP(STORE_GLOBAL) {
-        as_sym(constants[arg])->value = *--stack;
+        SSym* sym = as_sym(constants[arg]);
+        gc_barrier(snap, sym->value);
+        sym->value = *--stack;
         DISPATCH();
       }
       OP(LOAD_LOCAL) {
@@ -1099,7 +1200,9 @@ new_frame:
         DISPATCH();
       }
       OP(STORE_CLOSED) {
-        *closure->upvals[arg]->value = *--stack;
+        SValue* value = closure->upvals[arg]->value;
+        gc_barrier(snap, *value);
+        *value = *--stack;
         DISPATCH();
       }
       OP(LOAD_CONSTANT) {
@@ -2816,6 +2919,7 @@ bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
   }
   if (!vec_args(snap, args, num_args, 3, result)) return false;
   if (as_obj(args[0])->read_only) return read_only_error(snap, result);
+  gc_barrier(snap, as_vec(args[0])->data[as_int(args[1])]);
   as_vec(args[0])->data[as_int(args[1])] = args[2];
   *result = args[0];
   return true;
@@ -2842,6 +2946,7 @@ bool builtin_pop(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (vec->read_only) return read_only_error(snap, result);
   if (vec->len == 0) return fail(snap, result, "snap_index_error", "Vector is empty");
   *result = vec->data[--vec->len];
+  gc_barrier(snap, *result);
   return true;
 }
 
@@ -2860,7 +2965,7 @@ bool builtin_del(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 2) return arity_error(snap, result);
   if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map");
   if (as_obj(args[0])->read_only) return read_only_error(snap, result);
-  snap_map_del(as_map(args[0]), args[1]);
+  snap_map_del(snap, as_map(args[0]), args[1]);
   *result = args[0];
   return true;
 }
@@ -2910,6 +3015,15 @@ bool builtin_compile(Snap* snap, const SValue* args, int num_args, SValue* resul
   return true;
 }
 
+// (gc-step <work>) does about <work> units of collection, and returns true
+// if that finished a collection
+bool builtin_gc_step(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  if (!is_int(args[0]) || as_int(args[0]) < 0) return fail(snap, result, "snap_type_error", "Expected a non-negative integer");
+  *result = create_bool(snap_gc_step(snap, as_int(args[0])));
+  return true;
+}
+
 bool builtin_keys(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return map_entries(snap, args, num_args, 0, result);
 }
@@ -2927,7 +3041,14 @@ void snap_init(Snap* snap) {
   snap->num_bytes_alloced = 0;
   snap->next_gc = GC_MIN_STEP;
   snap->all = NULL;
-  mvec_init(&snap->gray, SObject*, 64);
+  snap->gc_phase = GC_IDLE;
+  snap->gc_unmarked = 0;
+  snap->gc_manual = false;
+  snap->gc_sym = 0;
+  snap->gc_debt = 0;
+  snap->gc_live = 0;
+  snap->gc_sweep = NULL;
+  mvec_init(&snap->gray, SnapGray, 64);
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
   snap->cause = NULL;
@@ -2955,6 +3076,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "vals", builtin_vals);
   snap_def_cfunc(snap, "str", builtin_str);
   snap_def_cfunc(snap, "compile", builtin_compile);
+  snap_def_cfunc(snap, "gc-step", builtin_gc_step);
 }
 
 void snap_destroy(Snap* snap) {
