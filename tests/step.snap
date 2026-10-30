@@ -1,0 +1,58 @@
+; vi: filetype=scheme
+
+; A counting loop, (if (< i limit) ... (recur (+ i k) ...)), ends in a single
+; STEP instruction. Each case prints the fused result, then the same loop with
+; a step that isn't a literal, (+ 0 1), which isn't fused. They must match.
+
+(def one (+ 0 1))
+
+; < and <=, counting up
+(println (loop [i 0 s 0] (if (< i 100) (recur (+ i 1) (+ s i)) s))
+         (loop [i 0 s 0] (if (< i 100) (recur (+ i one) (+ s i)) s)))
+(println (loop [i 0 s 0] (if (<= i 100) (recur (+ i 1) (+ s i)) s))
+         (loop [i 0 s 0] (if (<= i 100) (recur (+ i one) (+ s i)) s)))
+
+; > and >=, counting down with -
+(println (loop [i 10 v []] (if (> i 0) (recur (- i 1) (push! v i)) v))
+         (loop [i 10 v []] (if (> i 0) (recur (- i one) (push! v i)) v)))
+(println (loop [i 10 v []] (if (>= i 0) (recur (- i 3) (push! v i)) v))
+         (loop [i 10 v []] (if (>= i 0) (recur (- i (* 3 one)) (push! v i)) v)))
+
+; The constant first, and a step that overshoots the limit
+(println (loop [i 0 v []] (if (< i 10) (recur (+ 3 i) (push! v i)) [i v]))
+         (loop [i 0 v []] (if (< i 10) (recur (+ (* 3 one) i) (push! v i)) [i v])))
+
+; A limit that recur changes too: compared after every value is stored
+(println (loop [i 0 m 10 n 0] (if (< i m) (recur (+ i 1) (- m 1) (+ n 1)) [i m n]))
+         (loop [i 0 m 10 n 0] (if (< i m) (recur (+ i one) (- m 1) (+ n 1)) [i m n])))
+
+; Other values see the variable before it's stepped
+(println (loop [i 0 prev nil] (if (< i 5) (recur (+ i 1) i) [i prev]))
+         (loop [i 0 prev nil] (if (< i 5) (recur (+ i one) i) [i prev])))
+
+; Floats take the slow path: a float variable, then a float limit
+(println (loop [i 0.5 n 0] (if (< i 3) (recur (+ i 1) (+ n 1)) [i n]))
+         (loop [i 0.5 n 0] (if (< i 3) (recur (+ i one) (+ n 1)) [i n])))
+(println (loop [i 0 n 0] (if (< i 2.5) (recur (+ i 1) (+ n 1)) [i n]))
+         (loop [i 0 n 0] (if (< i 2.5) (recur (+ i one) (+ n 1)) [i n])))
+
+; No iterations
+(println (loop [i 5 n 0] (if (< i 5) (recur (+ i 1) (+ n 1)) [i n])))
+
+; recur to a fn, and nested loops (as in loop.snap)
+(def count-up (fn [i acc] (if (< i 10) (recur (+ i 1) (+ acc i)) acc)))
+(println (count-up 0 0) (count-up 20 0))
+(println (loop [i 0 s 0]
+  (if (< i 10) (recur (+ i 1) (loop [j 0 t s] (if (< j 10) (recur (+ j 1) (+ t (* i j))) t))) s)))
+
+; A shadowed name steps the binding the compare reads
+(println (loop [i 0 i 5] (if (< i 8) (recur 0 (+ i 1)) i)))
+
+; Not fused (set! in another value, or a fn in the body), but still correct
+(println (loop [i 0 x 0] (if (< i 3) (recur (+ i 1) (set! i (+ i 1))) [i x])))
+(println (count (loop [i 0 fs []] (if (< i 3) (recur (+ i 1) (push! fs (fn [] i))) fs))))
+
+; A variable that isn't a number panics (keywords order after numbers, so the
+; compare holds and the body runs)
+(println (recover (fn [] (loop [i :a] (if (> i 3) (recur (+ i 1)) i))))
+         (recover (fn [] (loop [i :a] (if (> i 3) (recur (+ i one)) i)))))

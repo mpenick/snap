@@ -64,7 +64,11 @@ enum {
   XX(GREATER_THAN) \
   XX(GREATER_EQUALS) \
   XX(EQUALS) \
-  XX(NOT)
+  XX(NOT) \
+  XX(STEP_LT) \
+  XX(STEP_LE) \
+  XX(STEP_GT) \
+  XX(STEP_GE)
 
 enum {
 #define XX(opcode) opcode,
@@ -873,6 +877,28 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
     *stack++ = create_bool(cond); \
   }
 
+// i += k, then if (i op limit) jump into the loop body; otherwise fall through
+// to the jump back to the loop's compare (on exit, or for non-int limits).
+// The jump back is the next instruction, and the body starts two after its
+// target. k is an int constant; a float i takes the slow path.
+#define step_op(op) \
+  a = &locals[OPERAND_DEST(inst) - 1]; \
+  b = operand(OPERAND_RIGHT(inst)); \
+  if (is_int_p(a)) { \
+    a->bits = add_iop(a->bits, constants[-OPERAND_LEFT(inst) - 1].bits); \
+    if (is_int_p(b) && (SnapInt)a->bits op (SnapInt)b->bits) { \
+      pc += INST_ARG(*pc) + 3; \
+    } \
+  } else if (is_float(*a)) { \
+    SnapFloat f = as_float(*a) + as_int(constants[-OPERAND_LEFT(inst) - 1]); \
+    frame->pc = pc; \
+    frame->stack_top = stack; \
+    store_float(snap, f, OPERAND_DEST(inst)); \
+    goto new_frame; \
+  } else { \
+    RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
+  }
+
 // Integer ops on tagged words (2x + 1). They wrap on overflow, done unsigned
 // to avoid undefined behavior. 63-bit division can't overflow an int64_t.
 #define untag(x) ((SnapInt)(x) >> 1)
@@ -1168,6 +1194,10 @@ new_frame:
         arith_op(mod_iop, mod_fop)
         DISPATCH();
       }
+      OP(STEP_LT) { step_op(<) DISPATCH(); }
+      OP(STEP_LE) { step_op(<=) DISPATCH(); }
+      OP(STEP_GT) { step_op(>) DISPATCH(); }
+      OP(STEP_GE) { step_op(>=) DISPATCH(); }
       OP(LESS_THAN)      { compare_op(<) DISPATCH();  }
       OP(GREATER_THAN)   { compare_op(>) DISPATCH();  }
       OP(LESS_EQUALS)    { compare_op(<=) DISPATCH(); }
@@ -1687,23 +1717,24 @@ static void store_variable(Snap* snap, SnapFnState* fs, SSym* name) {
 }
 
 // Conservative check for an inner fn (quoted data can give false positives)
-static bool contains_fn(SValue expr) {
+// Whether expr uses a special form anywhere in it (like fn or set!)
+static bool contains_form(SValue expr, int form) {
   int i;
   if (is_cons(expr)) {
     SCons* curr;
     for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) {
-      if ((is_form(curr->first) && as_form(curr->first) == TK_FN) ||
-          contains_fn(curr->first)) {
+      if ((is_form(curr->first) && as_form(curr->first) == form) ||
+          contains_form(curr->first, form)) {
         return true;
       }
     }
   } else if (is_vec(expr)) {
     for (i = 0; i < as_vec(expr)->len; ++i) {
-      if (contains_fn(as_vec(expr)->data[i])) return true;
+      if (contains_form(as_vec(expr)->data[i], form)) return true;
     }
   } else if (is_map(expr)) {
     for (i = 0; i < 2 * as_map(expr)->used; ++i) {
-      if (contains_fn(as_map(expr)->entries[i])) return true;
+      if (contains_form(as_map(expr)->entries[i], form)) return true;
     }
   }
   return false;
@@ -1869,7 +1900,7 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   fs->fn_loop.top = 0;
   fs->fn_loop.base = 0;
   fs->fn_loop.count = params->len;
-  fs->fn_loop.closes = contains_fn(args->rest);
+  fs->fn_loop.closes = contains_form(args->rest, TK_FN);
   fs->loop = &fs->fn_loop;
 
   compile_body(snap, fs, as_cons(args->rest), true);
@@ -1922,7 +1953,7 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
     recur_target.top = pc(fs);
     recur_target.base = base;
     recur_target.count = count;
-    recur_target.closes = contains_fn(args->rest);
+    recur_target.closes = contains_form(args->rest, TK_FN);
     recur_target.up = fs->loop;
     fs->loop = &recur_target;
   }
@@ -1941,8 +1972,59 @@ static bool is_same_local(SnapFnState* fs, SValue arg, int slot) {
   return is_sym(arg) && resolve_local(fs, as_sym(arg)) == slot;
 }
 
+// A counting loop, where the loop starts with a compare of one of its
+// variables, (if (< i limit) ...), and recur steps that variable by a
+// constant, (+ i 1), can end in a single STEP instruction: it adds the
+// constant and runs the compare, and jumps straight into the body when it
+// holds. Returns the STEP instruction, or -1 (with *var unchanged) when the
+// loop doesn't qualify.
+static int step_inst(Snap* snap, SnapFnState* fs, SnapLoop* target, SCons* args, int* var) {
+  static const int steps[] = { STEP_LT, STEP_LE, STEP_GT, STEP_GE };
+  SnapInst header;
+  SValue arg, k, v;
+  SCons* curr, * operands;
+  int slot, op, step, i;
+
+  if (target->closes || target->top + 1 >= pc(fs)) return -1;
+  header = fs->insts.vitems[target->top];
+  op = INST_OP(header);
+  if (op < LESS_THAN || op > GREATER_EQUALS || OPERAND_RIGHT(header) == 0 ||
+      INST_OP(fs->insts.vitems[target->top + 1]) != JUMP_FALSE) {
+    return -1;
+  }
+  slot = OPERAND_LEFT(header) - 1;
+  if (slot < target->base || slot >= target->base + target->count || slot + 1 > MAX_DEST) return -1;
+
+  // The variable's new value is (+ i k), (+ k i) or (- i k)
+  arg = nth(args, slot - target->base);
+  if (!is_cons(arg) || !is_form(as_cons(arg)->first)) return -1;
+  operands = as_cons(as_cons(arg)->rest);
+  if (list_length(operands) != 2) return -1;
+  if (as_form(as_cons(arg)->first) == TK_ADD && is_int(operands->first)) {
+    k = operands->first;
+    v = nth(operands, 1);
+  } else if (as_form(as_cons(arg)->first) == TK_ADD || as_form(as_cons(arg)->first) == TK_SUB) {
+    v = operands->first;
+    k = nth(operands, 1);
+  } else {
+    return -1;
+  }
+  if (!is_int(k) || !is_sym(v) || resolve_local(fs, as_sym(v)) != slot) return -1;
+  if (as_form(as_cons(arg)->first) == TK_SUB) k = create_int(-as_int(k));
+
+  // Nothing else may assign the variable before it's stepped
+  for (i = 0, curr = args; curr; ++i, curr = as_cons(curr->rest)) {
+    if (i != slot - target->base && contains_form(curr->first, TK_SET)) return -1;
+  }
+
+  step = add_constant(snap, fs, k);
+  if (step + 1 > MAX_OPERAND) return -1;
+  *var = slot - target->base;
+  return INST(steps[op - LESS_THAN], OPERANDS(slot + 1, -(step + 1), OPERAND_RIGHT(header)));
+}
+
 static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
-  int i;
+  int i, step, var = -1;
   bool stored[MAX_LOCALS];
   SCons* curr;
   SnapLoop* target = fs->loop;
@@ -1957,14 +2039,16 @@ static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
     raise(snap, "snap_compile_error", "Invalid number of arguments");
   }
 
+  step = step_inst(snap, fs, target, args, &var);
+
   // Each value is stored as soon as it's computed unless a later argument
   // reads the variable, otherwise it's left on the stack and stored after.
   // Captured variables must be closed before they are overwritten, so
-  // everything is stored after then.
+  // everything is stored after then. A stepped variable is left to STEP.
   for (i = 0, curr = args; curr != NULL; ++i, curr = as_cons(curr->rest)) {
     int slot = target->base + i;
     SCons* later;
-    stored[i] = is_same_local(fs, curr->first, slot);
+    stored[i] = i == var || is_same_local(fs, curr->first, slot);
     if (stored[i]) continue;
     compile(snap, fs, curr->first, false);
     stored[i] = !target->closes;
@@ -1982,6 +2066,8 @@ static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
     if (!stored[i]) emit(fs, STORE_LOCAL, target->base + i);
   }
 
+  // STEP is followed by the jump back, which it skips when the compare holds
+  if (step >= 0) *mvec_push(&fs->insts, SnapInst) = step;
   emit_jump_back(snap, fs, target->top);
 }
 
@@ -2448,6 +2534,13 @@ static void print_code(SCode* code, int indent) {
         else printf(" S");
       }
       if (OPERAND_DEST(code->insts[i])) printf(" -> L%d", OPERAND_DEST(code->insts[i]) - 1);
+    }
+    if (op >= STEP_LT && op <= STEP_GE) {
+      // L += K, then compared with the right operand
+      int right = OPERAND_RIGHT(code->insts[i]);
+      printf(" L%d K%d", OPERAND_DEST(code->insts[i]) - 1, -OPERAND_LEFT(code->insts[i]) - 1);
+      if (right > 0) printf(" L%d", right - 1);
+      else printf(" K%d", -right - 1);
     }
     switch (op) {
       case LOAD_GLOBAL: case STORE_GLOBAL: case LOAD_CONSTANT:
