@@ -1530,6 +1530,9 @@ new_frame:
       }
       OP(STORE_GLOBAL) {
         SSym* sym = as_sym(constants[arg]);
+        if (sym->read_only) { // Code compiled before the global was made a constant
+          RUNTIME_ERROR("snap_type_error", "%s is a constant", sym->data);
+        }
         gc_barrier(snap, sym->value);
         sym->value = *--stack;
         DISPATCH();
@@ -2486,15 +2489,40 @@ static int resolve_upval(Snap* snap, SnapFnState* fs, SSym* name) {
   return -1;
 }
 
+// A constant global's value, as a constant of the function. These are
+// matched by identity rather than contents, so that two constant vectors that
+// happen to be equal stay two vectors.
+static int add_global_constant(Snap* snap, SnapFnState* fs, SValue val) {
+  int i;
+  for (i = 0; i < fs->constants.vsize; ++i) {
+    if (fs->constants.vitems[i].bits == val.bits) return i;
+  }
+  if (i > MAX_ARG) {
+    raise(snap, "snap_compile_error", "Too many constants");
+  }
+  *mvec_push(&fs->constants, SValue) = val;
+  return i;
+}
+
 static void load_variable(Snap* snap, SnapFnState* fs, SSym* name) {
   int index;
   if ((index = resolve_local(fs, name)) >= 0) {
     emit(fs, LOAD_LOCAL, index);
   } else if ((index = resolve_upval(snap, fs, name)) >= 0) {
     emit(fs, LOAD_CLOSED, index);
+  } else if (name->read_only) {
+    // A constant (see set-const!): its value goes in the code in its place
+    emit(fs, LOAD_CONSTANT, add_global_constant(snap, fs, name->value));
   } else {
     emit(fs, LOAD_GLOBAL, add_constant(snap, fs, create_obj(name)));
   }
+}
+
+static void store_global(Snap* snap, SnapFnState* fs, SSym* name) {
+  if (name->read_only) {
+    raise(snap, "snap_compile_error", "%s is a constant", name->data);
+  }
+  emit(fs, STORE_GLOBAL, add_constant(snap, fs, create_obj(name)));
 }
 
 static void store_variable(Snap* snap, SnapFnState* fs, SSym* name) {
@@ -2504,7 +2532,7 @@ static void store_variable(Snap* snap, SnapFnState* fs, SSym* name) {
   } else if ((index = resolve_upval(snap, fs, name)) >= 0) {
     emit(fs, STORE_CLOSED, index);
   } else {
-    emit(fs, STORE_GLOBAL, add_constant(snap, fs, create_obj(name)));
+    store_global(snap, fs, name);
   }
 }
 
@@ -2626,7 +2654,7 @@ static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
   if (fs->depth > 0) {
     emit(fs, STORE_LOCAL, add_local(snap, fs, name, false));
   } else {
-    emit(fs, STORE_GLOBAL, add_constant(snap, fs, create_obj(name)));
+    store_global(snap, fs, name);
   }
   emit(fs, LOAD_NIL, 0); /* TODO: Hack */
 }
@@ -2646,7 +2674,7 @@ static void compile_defmacro(Snap* snap, SnapFnState* fs, SCons* args) {
   compile_fn(snap, fs, as_cons(args->rest));
   load_constant(snap, fs, create_cfunc(builtin_make_macro));
   emit(fs, CALL, 1);
-  emit(fs, STORE_GLOBAL, add_constant(snap, fs, args->first));
+  store_global(snap, fs, as_sym(args->first));
   emit(fs, LOAD_NIL, 0); /* TODO: Hack */
 }
 
@@ -4217,6 +4245,26 @@ bool builtin_rand(Snap* snap, const SValue* args, int num_args, SValue* result) 
   return true;
 }
 
+/* Constants */
+
+// (set-const! 'name val) makes a global that can't change (see defconst in
+// stdlib.snap). Its symbol is marked read-only, and code compiled after this
+// uses the value in place of the global.
+bool builtin_set_const(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SSym* sym;
+  if (num_args != 2 || !is_sym(args[0])) return fail(snap, result, "snap_type_error", "Expected (set-const! <name> <value>)");
+  sym = as_sym(args[0]);
+  if (sym->read_only) {
+    *result = create_obj(snap_err_new_format(snap, "snap_type_error", "%s is already a constant", sym->data));
+    return false;
+  }
+  gc_barrier(snap, sym->value);
+  sym->value = args[1];
+  sym->read_only = true;
+  *result = create_nil();
+  return true;
+}
+
 /* Types and methods */
 
 bool builtin_type(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -4344,6 +4392,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "compile", builtin_compile);
   snap_def_cfunc(snap, "gc-step", builtin_gc_step);
   snap_def_cfunc(snap, "gc-stats", builtin_gc_stats);
+  snap_def_cfunc(snap, "set-const!", builtin_set_const);
   snap_def_cfunc(snap, "list", builtin_list);
   snap_def_cfunc(snap, "cons", builtin_cons);
   snap_def_cfunc(snap, "first", builtin_first);

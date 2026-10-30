@@ -1,0 +1,28 @@
+; defconst
+(defconst N 10)
+(defconst HALF (/ N 2))
+(defconst SCALE 1.5)
+(defn f [x] (+ (* x N) HALF))
+(println N HALF (f 2) (* SCALE N) (let [g (fn [] (- N 1))] (g)))
+(println ((fn [N] (* N 2)) 4) (let [N 3] N)) ; Locals hide constants
+
+; Constants are the values themselves: a vector stays the same vector, and two
+; equal ones stay two
+(defconst A [])
+(defconst B [])
+(defn add [x] (push! A x) [A B])
+(println (add 1) (add 2) A B)
+(defconst SQUARE (fn [x] (* x x)))
+(println (SQUARE 7) (map SQUARE [1 2 3]))
+
+; They can't change
+(println (compile "(set! N 1)"))
+(println (compile "(def N 1)"))
+(println (compile "(defmacro N [] 1)"))
+(println (recover (fn [] (defconst N 12))))
+(println (recover (fn [] (set-const! "N" 1))))
+(def x 1)
+(defn set-x [] (set! x 2))
+(defconst x 3)
+(println x (recover set-x) x)
+(println N)

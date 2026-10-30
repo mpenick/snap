@@ -5,6 +5,11 @@
 (defmacro defn [name params & body]
   `(def ~name (fn ~params ~@body)))
 
+; (defconst name expr) defines a global that can't change. Code compiled after
+; it uses the value itself in place of the global, so arithmetic can read it
+; like a literal.
+(defmacro defconst [name val] `(set-const! '~name ~val))
+
 (defmacro when [c & body] `(if ~c (begin ~@body) nil))
 
 ; (cond test1 expr1 test2 expr2...) is the expr of the first true test, or nil

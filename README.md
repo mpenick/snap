@@ -104,9 +104,14 @@ Built-in functions:
   (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
-`defn`, `when`, `cond`, `dotimes`, `(doseq [x coll] ...)`, `inc`, `dec`,
-`map`, `filter`, `reduce` and `(sort-by key coll)` (which take a vector or
-list and make a vector), and the struct macros below.
+`defn`, `defconst`, `when`, `cond`, `dotimes`, `(doseq [x coll] ...)`, `inc`,
+`dec`, `map`, `filter`, `reduce` and `(sort-by key coll)` (which take a
+vector or list and make a vector), and the struct macros below.
+
+`(defconst name expr)` defines a global that can't change: `def`, `set!` or
+another `defconst` of it is an error. Code compiled after it uses the value
+itself in place of the global, so `(* x SCALE)` is as fast as `(* x 3)`.
+It's built on `(set-const! 'name val)`.
 
 ```clojure
 (defn sum [v] (reduce (fn [a b] (+ a b)) 0 v))

@@ -1,0 +1,11 @@
+10 5 25 15.000000 9
+8 3
+[[1 2] []] [[1 2] []] [1 2] []
+49 [1 4 9]
+<err :snap_compile_error "N is a constant">
+<err :snap_compile_error "N is a constant">
+<err :snap_compile_error "N is a constant">
+<err :snap_type_error "N is already a constant">
+<err :snap_type_error "Expected (set-const! <name> <value>)">
+3 <err :snap_type_error "x is a constant"> 3
+10
