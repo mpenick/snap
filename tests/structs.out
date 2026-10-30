@@ -1,0 +1,33 @@
+#Rect{:w 3 :h 4} 3 4
+#Rect{:w 10 :h 4} 10
+Rect Rect true
+true false false
+:found
+#Empty{} true
+Int Float Str Sym Key Nil Bool
+Vector Map List List Err Type
+Fn Fn Fn
+6 12
+<method area> Fn
+#Rect{:w 3 :h 6} 15 [2 4 6]
+:replaced
+[1 4]
+25
+100000
+[area scale]
+true false false
+false nil nil
+4999950000
+3 2 0
+2 nil
+3 nil
+[0 1 2]
+[2 3 4] [2 3] [2 3] 6
+<err :snap_arity_error "Rect has 2 fields">
+<err :snap_key_error "Rect has no field :z">
+<err :snap_key_error "Rect has no field :z">
+<err :snap_type_error "No method area for Int">
+<err :snap_arity_error "Method area needs an argument">
+<err :snap_type_error "Int isn't a struct type">
+<err :snap_type_error "println is already defined and isn't a method">
+<err :snap_type_error "Expected fields to be symbols or keywords">

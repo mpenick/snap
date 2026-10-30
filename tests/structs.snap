@@ -1,0 +1,75 @@
+; Structs
+(defstruct Rect [w h])
+(defstruct Circle [r])
+(def a (Rect 3 4))
+(println a (get a :w) (get a :h))
+(println (put! a :w 10) (get a :w))
+(println Rect (type a) (= (type a) Rect))
+(println (= (Rect 1 2) (Rect 1 2)) (= (Rect 1 2) (Rect 1 3)) (= (Rect 1 2) (Circle 1)))
+(println (get {(Rect 1 2) :found} (Rect 1 2)))
+(defstruct Empty [])
+(println (Empty) (= (Empty) (Empty)))
+
+; Built-in types
+(println (type 1) (type 1.5) (type "s") (type 'a) (type :k) (type nil) (type true))
+(println (type []) (type {}) (type '(1)) (type '()) (type (err :e "m")) (type Rect))
+(println (type println) (type (fn [] 1)) (type (let [x 1] (fn [] x))))
+
+; Methods
+(defmethod area [r Rect] (* (get r :w) (get r :h)))
+(defmethod area [c Circle] (* 3 (get c :r) (get c :r)))
+(println (area (Rect 2 3)) (area (Circle 2)))
+(println area (type area))
+
+; Methods with more parameters, and on built-in types
+(defmethod scale [r Rect k] (Rect (* k (get r :w)) (* k (get r :h))))
+(defmethod scale [n Int k] (* n k))
+(defmethod scale [v Vector k] (map (fn [x] (scale x k)) v))
+(println (scale (Rect 1 2) 3) (scale 5 3) (scale [1 2 3] 2))
+
+; Redefining replaces it
+(defmethod area [c Circle] :replaced)
+(println (area (Circle 1)))
+
+; Methods are values, and can be called from C (map calls them with snap_call)
+(println (map area [(Rect 1 1) (Rect 2 2)]))
+(def f area)
+(println (f (Rect 5 5)))
+
+; Methods recur within their own function
+(defstruct Counter [n])
+(defmethod count-down [c Counter acc]
+  (if (= (get c :n) 0) acc (begin (put! c :n (- (get c :n) 1)) (recur c (+ acc 1)))))
+(println (count-down (Counter 100000) 0))
+
+; Interfaces
+(definterface Shape area scale)
+(println Shape)
+(println (satisfies? Shape (Rect 1 1)) (satisfies? Shape (Circle 1)) (satisfies? Shape 5))
+(println (nil? (find-method area Rect)) (find-method 'area Int) (find-method 'nothing Int))
+
+; Structs in a GC'd heap
+(defstruct Node [val next])
+(def build (fn [n] (loop [i 0 l nil] (if (< i n) (recur (+ i 1) (Node i l)) l))))
+(def total (fn [l] (loop [l l t 0] (if (nil? l) t (recur (get l :next) (+ t (get l :val)))))))
+(println (total (build 100000)))
+
+; The rest of the stdlib
+(defn add [a b] (+ a b))
+(println (add 1 2) (inc 1) (dec 1))
+(println (when true 1 2) (when false 1))
+(println (cond false 1 nil 2 :else 3) (cond false 1))
+(def seen [])
+(dotimes [i 3] (push! seen i))
+(println seen)
+(println (map inc [1 2 3]) (map inc '(1 2)) (filter (fn [x] (> x 1)) [1 2 3]) (reduce add 0 [1 2 3]))
+
+; Errors
+(println (recover (fn [] (Rect 1))))
+(println (recover (fn [] (get a :z))))
+(println (recover (fn [] (put! a :z 1))))
+(println (recover (fn [] (area 5))))
+(println (recover (fn [] (area))))
+(println (recover (fn [] (Int))))
+(println (recover (fn [] (defmethod println [x Int] x))))
+(println (recover (fn [] (make-type 'X [1]))))

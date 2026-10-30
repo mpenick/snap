@@ -8,6 +8,7 @@ are fast, small and simple.
 
 * Closures
 * Macros (`defmacro` with quasiquote)
+* Structs, methods and interfaces, in the style of Go
 * Tail recursion (`recur` and `loop`)
 * Byte code compiler and stack-based interpreter
 * Incremental mark-and-sweep GC with short pauses
@@ -52,6 +53,11 @@ Special forms: `def`, `defmacro`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `b
 `quote`, `and`, `or`, `not`, `try`, `panic`, `recover`, and the operators
 `+ - * / %` and `< <= > >= =`.
 
+The operators and `not` can be used as values too, as in `(reduce + 0 v)` or
+`(map not v)`: there they're C functions that do the same thing (a call like
+`(+ a b)` still compiles to an instruction). The others can't, and none of
+the special forms can be rebound.
+
 A function's last parameter can take the rest of its arguments, as a list:
 `(fn [a & more] ...)` called with `1 2 3` gets `a` = 1 and `more` = `(2 3)`.
 
@@ -59,7 +65,7 @@ A function's last parameter can take the rest of its arguments, as a list:
 so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
-vectors, maps, lists, `nil`, `true`, `false`, functions and
+vectors, maps, lists, structs, types, `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
 arithmetic wraps on overflow, and mixing integers with floats gives a float.
 Strings can contain the escapes `\n`, `\t`, `\r`, `\\` and `\"`.
@@ -70,12 +76,14 @@ Built-in functions:
   returns `nil` at the end of input. On a terminal it uses readline and shows
   the prompt. It's defined in `main.c`, so programs that embed snap don't need
   readline.
-* Types: `nil?`, `vector?`, `map?`, `list?` and `sym?`
+* Predicates: `nil?`, `vector?`, `map?`, `list?` and `sym?`
 * Errors: `err`, `err?`, `err-kind` and `err-msg`
 * Lists: `list`, `cons`, `first`, `rest`, `concat` (of lists and vectors)
   and `vec` (a list to a vector). `count` and `nth` work on lists too. `nil`
   counts as an empty list.
 * Macros: `gensym` and `macroexpand` (see below)
+* Types: `type`, `make-type`, `add-method!` and `find-method` (see Structs
+  below)
 * Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`
 * Strings: `(str s...)` joins strings
@@ -85,6 +93,17 @@ Built-in functions:
 * GC: `(gc-step work)` does about `work` units of collection (marking a value
   or sweeping an object is one), starting a collection if none is running,
   and returns `true` when a collection finishes. `(gc-step 0)` just starts one.
+
+The standard library, `stdlib.snap`, is written in snap and built in. It has
+`defn`, `when`, `cond`, `dotimes`, `inc`, `dec`, `map`, `filter` and
+`reduce` (which take a vector or list and make a vector), and the struct
+macros below.
+
+```clojure
+(defn sum [v] (reduce (fn [a b] (+ a b)) 0 v))
+(dotimes [i 3] (println i))
+(cond (< x 0) :neg (= x 0) :zero true :pos)
+```
 
 ## Vectors
 
@@ -124,6 +143,51 @@ change one after using it as a key.
 
 Vectors and maps inside a quoted value, like `'[1 2]`, are read-only. A quoted
 value is a single constant shared by every evaluation, so changing one panics.
+
+## Structs, methods and interfaces
+
+A struct has a fixed set of fields. Methods are defined outside it, and an
+interface is a set of methods that any type with all of them satisfies,
+without saying so, like Go.
+
+```clojure
+(defstruct Rect [w h])
+(defstruct Circle [r])
+
+(def a (Rect 3 4))      ; A value for each field, in order
+(get a :w)              ; => 3
+(put! a :w 10)          ; => #Rect{:w 10 :h 4}
+(type a)                ; => Rect
+(= (Rect 1 2) (Rect 1 2)) ; => true, compared by contents
+
+; The first parameter is the receiver, with its type
+(defmethod area [r Rect] (* (get r :w) (get r :h)))
+(defmethod area [c Circle] (* 3.14159 (get c :r) (get c :r)))
+(area a)                ; => 40, picked by the type of the first argument
+
+(definterface Shape area)
+(satisfies? Shape a)    ; => true
+(satisfies? Shape 5)    ; => false
+```
+
+`get` or `put!` with a field the struct doesn't have panics, as does calling
+a method on a type it has no implementation for. A method can have more
+parameters after the receiver, and defining it again for a type replaces it.
+A method is a value like a function, so `(map area shapes)` works.
+
+Every value has a type, and the built-in ones can have methods too: `Nil`,
+`Bool`, `Int`, `Float`, `Str`, `Sym`, `Key`, `Err`, `List`, `Vector`, `Map`,
+`Type` and `Fn`.
+
+```clojure
+(defmethod area [v Vector] (reduce (fn [t s] (+ t (area s))) 0 v))
+(area [(Rect 1 2) (Circle 1)]) ; => 5.14159
+```
+
+Underneath, `defstruct` calls `(make-type 'Rect '[w h])`, `defmethod` calls
+`(add-method! 'area Rect (fn [r] ...))`, which defines the method if the name
+isn't defined yet, and `(find-method area Rect)` is the function a type runs,
+or `nil`. An interface is just a vector of method names.
 
 ## Macros
 
@@ -221,6 +285,8 @@ Everything is in `snap.c`. The lexer is in `snap_lex.rh`, and `main.c` runs a
 file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
 string in `repl.h`: it reads lines until `compile` stops returning
 `:snap_eof_error`, then calls the result with `recover` and prints it.
+`stdlib.snap` is built in the same way, as `stdlib.h`, and `snap_init()` runs
+it.
 
 * **Values** are 8 bytes. The low bits tag integers, floats, objects,
   `nil`/booleans and C functions, so integers and most floats need no
@@ -234,6 +300,11 @@ string in `repl.h`: it reads lines until `compile` stops returning
   compiles the result. Quasiquote is expanded by the reader into calls to
   `list` and `concat`, which go in the code as the functions themselves
   rather than their names.
+* **Structs** are a pointer to their type and a value for each field.
+  Fields are found by comparing the keyword with the type's fields, which is
+  fast for structs of normal size. Types are never freed, like symbols. A
+  method holds a map from types to functions, and calling one looks up the
+  first argument's type and calls what it finds in its place.
 * **The compiler** turns each form straight into byte code, one 32-bit
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a

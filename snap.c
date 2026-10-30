@@ -73,7 +73,7 @@ enum {
   GC_SWEEP
 };
 
-// Mark value of objects that are never freed (symbols and keywords). Others
+// Mark value of objects that are never freed (symbols, keywords and types). Others
 // are 0 or 1, see gc_unmarked.
 #define GC_FIXED 2
 
@@ -239,8 +239,8 @@ int snap_hash(const SValue* val) {
       return hash_chars(((SKeyword*)obj)->data, ((SKeyword*)obj)->len);
     case STYPE_TEMPSTR:
       return hash_chars(((STempStr*)obj)->data, ((STempStr*)obj)->len);
-    // The rest match snap_compare(): errors by kind, lists, vectors and maps
-    // by contents
+    // The rest match snap_compare(): errors by kind, lists, vectors, maps and
+    // structs by contents
     case STYPE_ERR:
       return snap_hash(&((SErr*)obj)->err);
     case STYPE_CONS: {
@@ -265,6 +265,13 @@ int snap_hash(const SValue* val) {
         // Added, so the order doesn't matter
         if (e->bits != SV_DELETED) h += (unsigned)snap_hash(e) * 31 ^ snap_hash(e + 1);
       }
+      return (int)h;
+    }
+    case STYPE_STRUCT: {
+      SStruct* st = (SStruct*)obj;
+      unsigned h = hash_pointer(st->stype);
+      int i;
+      for (i = 0; i < st->stype->num_fields; ++i) h = h * 31 + snap_hash(&st->vals[i]);
       return (int)h;
     }
     default:
@@ -323,6 +330,16 @@ int snap_compare(const SValue* val1, const SValue* val2) {
         if (!v2 || snap_compare(e + 1, v2) != 0) {
           return compare((uintptr_t)m1, (uintptr_t)m2);
         }
+      }
+      return 0;
+    }
+    case STYPE_STRUCT: {
+      // By type, then field by field
+      SStruct* s1 = as_struct(*val1), * s2 = as_struct(*val2);
+      int i, c;
+      if (s1->stype != s2->stype) return compare((uintptr_t)s1->stype, (uintptr_t)s2->stype);
+      for (i = 0; i < s1->stype->num_fields; ++i) {
+        if ((c = snap_compare(&s1->vals[i], &s2->vals[i])) != 0) return c;
       }
       return 0;
     }
@@ -440,6 +457,15 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_UPVAL:
       snap->num_bytes_alloced -= sizeof(SUpval);
       break;
+    case STYPE_TYPE:
+      snap->num_bytes_alloced -= sizeof(SType) + ((SType*)obj)->num_fields * sizeof(SValue);
+      break;
+    case STYPE_STRUCT:
+      snap->num_bytes_alloced -= sizeof(SStruct) + ((SStruct*)obj)->num_vals * sizeof(SValue);
+      break;
+    case STYPE_METHOD:
+      snap->num_bytes_alloced -= sizeof(SMethod);
+      break;
     default:
       assert(0 && "Not a GC object");
       break;
@@ -486,7 +512,8 @@ static SObject* gc_alloc(Snap* snap, size_t size) {
   return obj;
 }
 
-// Symbols and keywords are GC_FIXED, so they never get past the first line
+// Symbols, keywords and types are GC_FIXED, so they never get past the first
+// line
 static void gc_mark(Snap* snap, SObject* obj) {
   if (!obj || obj->mark != snap->gc_unmarked) return;
   obj->mark = snap->gc_unmarked ^ 1;
@@ -500,7 +527,9 @@ static void gc_mark(Snap* snap, SObject* obj) {
     case STYPE_MAP:
     case STYPE_CODE:
     case STYPE_CLOSURE:
-    case STYPE_UPVAL: {
+    case STYPE_UPVAL:
+    case STYPE_STRUCT:
+    case STYPE_METHOD: {
       SnapGray* gray = mvec_push(&snap->gray, SnapGray);
       gray->obj = obj;
       gray->pos = 0;
@@ -593,6 +622,11 @@ static int gc_scan(Snap* snap, SnapGray* gray) {
       return i + 1;
     case STYPE_UPVAL:
       gc_mark_val(snap, *((SUpval*)obj)->value);
+      break;
+    case STYPE_STRUCT: // Its type is never freed
+      return gc_scan_vals(snap, gray, ((SStruct*)obj)->vals, ((SStruct*)obj)->stype->num_fields);
+    case STYPE_METHOD:
+      gc_mark(snap, (SObject*)((SMethod*)obj)->table);
       break;
     default:
       assert(0 && "Not a valid gray object");
@@ -1007,6 +1041,64 @@ SClosure* snap_closure_new(Snap* snap, SCode* code) {
     cl->upvals[i] = NULL;
   }
   return cl;
+}
+
+// fields is a vector of keywords, or NULL for a built-in type
+static SType* type_new(Snap* snap, const char* name, SVec* fields) {
+  int i, n = fields ? fields->len : 0;
+  SType* t = (SType*)gc_new(snap, STYPE_TYPE, sizeof(SType) + n * sizeof(SValue));
+  t->mark = GC_FIXED;
+  t->is_struct = fields != NULL;
+  t->num_fields = n;
+  t->name = snap_sym_new(snap, name); // Interned, so it can't be collected
+  for (i = 0; i < n; ++i) t->fields[i] = *snap_vec_at(fields, i);
+  return t;
+}
+
+SType* snap_type_of(Snap* snap, SValue val) {
+  return is_struct(val) ? as_struct(val)->stype : snap->types[snap_type(val)];
+}
+
+// Makes an instance of a struct type with the values of its fields in order.
+// Doesn't run any code, so the type and values only need to be rooted.
+static bool struct_new(Snap* snap, SType* type, const SValue* args, int num_args, SValue* result) {
+  SStruct* st;
+  if (!type->is_struct) {
+    *result = create_obj(snap_err_new_format(snap, "snap_type_error", "%s isn't a struct type", type->name->data));
+    return false;
+  }
+  if (num_args != type->num_fields) {
+    *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "%s has %d fields",
+                                             type->name->data, type->num_fields));
+    return false;
+  }
+  st = (SStruct*)gc_new(snap, STYPE_STRUCT, sizeof(SStruct) + num_args * sizeof(SValue));
+  st->stype = type;
+  st->num_vals = num_args;
+  if (num_args > 0) memcpy(st->vals, args, num_args * sizeof(SValue));
+  *result = create_obj(st);
+  return true;
+}
+
+// The slot of a struct's field, or NULL if it doesn't have it
+static SValue* struct_field(SStruct* st, SValue key) {
+  int i;
+  for (i = 0; i < st->stype->num_fields; ++i) {
+    if (st->stype->fields[i].bits == key.bits) return &st->vals[i];
+  }
+  return NULL;
+}
+
+// The function a method call runs, picked by its first argument's type, or
+// NULL if it doesn't have one
+static SValue* method_find(Snap* snap, SMethod* m, const SValue* args, int num_args) {
+  return num_args > 0 ? snap_map_get(m->table, create_obj(snap_type_of(snap, args[0]))) : NULL;
+}
+
+static SErr* method_error(Snap* snap, SMethod* m, const SValue* args, int num_args) {
+  if (num_args == 0) return snap_err_new_format(snap, "snap_arity_error", "Method %s needs an argument", m->name->data);
+  return snap_err_new_format(snap, "snap_type_error", "No method %s for %s", m->name->data,
+                             snap_type_of(snap, args[0])->name->data);
 }
 
 SObject* snap_anchor(Snap* snap, SObject* obj) {
@@ -1443,6 +1535,7 @@ new_frame:
       }
       OP(CALL) {
         a = --stack; // Pop callable
+      call:
         if (is_cfunc(*a)) {
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
@@ -1452,11 +1545,7 @@ new_frame:
           frame = &mvec_back(&snap->frames);
           locals = frame->stack_base;
           stack = frame->stack_top - arg; // Pop arguments
-          if (!ok) {
-            *stack++ = as_err(temp)->msg;
-            *stack++ = as_err(temp)->err;
-            goto panic;
-          }
+          if (!ok) goto call_failed;
           *stack++ = temp;
         } else if (is_code(*a) || is_closure(*a)) {
           SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
@@ -1473,10 +1562,29 @@ new_frame:
           frame->stack_top = stack - arg; // Pop arguments
           push_frame(snap, c, frame->stack_top, cl);
           goto new_frame;
+        } else if (is_method(*a)) {
+          SValue* fn = method_find(snap, as_method(*a), stack - arg, arg);
+          if (!fn) {
+            frame->stack_top = stack;
+            temp = create_obj(method_error(snap, as_method(*a), stack - arg, arg));
+            goto call_failed;
+          }
+          *a = *fn;
+          goto call;
+        } else if (is_type(*a)) {
+          frame->stack_top = stack; // Keeps the arguments rooted (types are never freed)
+          ok = struct_new(snap, as_type(*a), stack - arg, arg, &temp);
+          stack -= arg;
+          if (!ok) goto call_failed;
+          *stack++ = temp;
         } else {
           RUNTIME_ERROR("snap_type_error", "Value is not callable");
         }
         DISPATCH();
+      call_failed:
+        *stack++ = as_err(temp)->msg;
+        *stack++ = as_err(temp)->err;
+        goto panic;
       }
       OP(CLOSURE) {
         int i;
@@ -2883,8 +2991,12 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
 }
 
 // `tail` is whether expr is in tail position relative to its recur target
+static bool op_value(int token, SValue* val);
+static const char* form_name(int token);
+
 static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   int stack = fs->stack;
+  SValue val;
   switch (snap_type(expr)) {
     case STYPE_INT:
     case STYPE_FLOAT:
@@ -2912,6 +3024,14 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
       } else {
         compile_sexpr(snap, fs, as_cons(expr), tail);
       }
+      break;
+    case STYPE_FORM:
+      // An operator that isn't called, like the + in (reduce + 0 v), is a C
+      // function that does the same. Calls still compile to instructions.
+      if (!op_value(as_form(expr), &val)) {
+        raise(snap, "snap_compile_error", "%s can't be used as a value", form_name(as_form(expr)));
+      }
+      load_constant(snap, fs, val);
       break;
     default:
       raise(snap, "snap_compile_error", "Unexpected type");
@@ -3001,9 +3121,16 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
   ptrdiff_t offset;
   int i, n = num_args;
 
-  if (is_cfunc(fn)) {
+  if (is_method(fn)) {
+    SValue* found = method_find(snap, as_method(fn), args, num_args);
+    if (!found) return create_obj(method_error(snap, as_method(fn), args, num_args));
+    fn = *found;
+  }
+  if (is_cfunc(fn) || is_type(fn)) {
     SValue result = create_nil();
-    as_cfunc(fn)(snap, args, num_args, &result); // On failure result is the error
+    // On failure result is the error
+    if (is_cfunc(fn)) as_cfunc(fn)(snap, args, num_args, &result);
+    else struct_new(snap, as_type(fn), args, num_args, &result);
     return result;
   }
   if (!is_code(fn) && !is_closure(fn)) {
@@ -3196,6 +3323,24 @@ static void print_val(SValue val) {
       break;
     case STYPE_CLOSURE:
       printf("<closure %p>", (void*)as_obj(val));
+      break;
+    case STYPE_TYPE:
+      printf("%s", as_type(val)->name->data);
+      break;
+    case STYPE_STRUCT: {
+      SStruct* st = as_struct(val);
+      printf("#%s{", st->stype->name->data);
+      for (i = 0; i < st->stype->num_fields; ++i) {
+        if (i > 0) printf(" ");
+        print_val(st->stype->fields[i]);
+        printf(" ");
+        print_val(st->vals[i]);
+      }
+      printf("}");
+      break;
+    }
+    case STYPE_METHOD:
+      printf("<method %s>", as_method(val)->name->data);
       break;
   }
 }
@@ -3397,9 +3542,24 @@ bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return true;
 }
 
-// (put! <vec> <index> <val>) or (put! <map> <key> <val>) returns the vector or map
+static bool field_error(Snap* snap, const SValue* args, SValue* result) {
+  *result = create_obj(snap_err_new_format(snap, "snap_key_error", "%s has no field :%s",
+                                           as_struct(args[0])->stype->name->data,
+                                           is_key(args[1]) ? as_key(args[1])->data : "(not a keyword)"));
+  return false;
+}
+
+// (put! <vec> <index> <val>), (put! <map> <key> <val>) or
+// (put! <struct> <field> <val>) returns the vector, map or struct
 bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
   SValue* val;
+  if (num_args == 3 && is_struct(args[0])) {
+    if (!(val = struct_field(as_struct(args[0]), args[1]))) return field_error(snap, args, result);
+    gc_barrier(snap, *val);
+    *val = args[2];
+    *result = args[0];
+    return true;
+  }
   if (num_args == 3 && is_map(args[0])) {
     if (as_obj(args[0])->read_only) return read_only_error(snap, result);
     snap_map_put(snap, as_map(args[0]), args[1], args[2]);
@@ -3442,9 +3602,15 @@ bool builtin_pop(Snap* snap, const SValue* args, int num_args, SValue* result) {
 }
 
 // (get <map> <key>) or (get <map> <key> <default>). The default is nil.
+// (get <struct> <field>) panics if the struct doesn't have the field.
 bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result) {
   SValue* val;
   if (num_args != 2 && num_args != 3) return arity_error(snap, result);
+  if (is_struct(args[0])) {
+    if (!(val = struct_field(as_struct(args[0]), args[1]))) return field_error(snap, args, result);
+    *result = *val;
+    return true;
+  }
   if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map");
   val = snap_map_get(as_map(args[0]), args[1]);
   *result = val ? *val : (num_args == 3 ? args[2] : create_nil());
@@ -3666,6 +3832,178 @@ bool builtin_macroexpand(Snap* snap, const SValue* args, int num_args, SValue* r
   return true;
 }
 
+/* Operators as values */
+
+// What the arithmetic instructions do, folding left over two or more numbers
+static bool arith(Snap* snap, int op, const SValue* args, int num_args, SValue* result) {
+  SValue acc;
+  int i;
+  if (num_args < 2) return arity_error(snap, result);
+  acc = args[0];
+  for (i = 1; i < num_args; ++i) {
+    const SValue* a = &acc, * b = &args[i];
+    if (!is_num_p(a) || !is_num_p(b)) return fail(snap, result, "snap_type_error", "Expected numbers");
+    if ((op == TK_DIV || op == TK_MOD) && int_zero_divisor()) {
+      return fail(snap, result, "snap_arith_error", "Division by zero");
+    }
+    if (is_int_p(a) && is_int_p(b)) {
+      switch (op) {
+        case TK_ADD: acc.bits = add_iop(a->bits, b->bits); break;
+        case TK_SUB: acc.bits = sub_iop(a->bits, b->bits); break;
+        case TK_MUL: acc.bits = mul_iop(a->bits, b->bits); break;
+        case TK_DIV: acc.bits = div_iop(a->bits, b->bits); break;
+        default: acc.bits = mod_iop(a->bits, b->bits); break;
+      }
+    } else {
+      SnapFloat x = num_p(a), y = num_p(b), f;
+      switch (op) {
+        case TK_ADD: f = add_fop(x, y); break;
+        case TK_SUB: f = sub_fop(x, y); break;
+        case TK_MUL: f = mul_fop(x, y); break;
+        case TK_DIV: f = div_fop(x, y); break;
+        default: f = mod_fop(x, y); break;
+      }
+      acc = create_float(snap, f); // Only used by the next step, before anything else allocates
+    }
+  }
+  *result = acc;
+  return true;
+}
+
+#define compare_vals(op) \
+  (is_int_p(a) && is_int_p(b) ? (SnapInt)a->bits op (SnapInt)b->bits \
+   : is_num_p(a) && is_num_p(b) ? num_p(a) op num_p(b) : snap_compare(a, b) op 0)
+
+// What the compare instructions do: true if each pair of values in a row is
+static bool compare_args(Snap* snap, int op, const SValue* args, int num_args, SValue* result) {
+  bool cond = true;
+  int i;
+  if (num_args < 2) return arity_error(snap, result);
+  for (i = 1; i < num_args && cond; ++i) {
+    const SValue* a = &args[i - 1], * b = &args[i];
+    switch (op) {
+      case TK_LT: cond = compare_vals(<); break;
+      case TK_LE: cond = compare_vals(<=); break;
+      case TK_GT: cond = compare_vals(>); break;
+      case TK_GE: cond = compare_vals(>=); break;
+      default: cond = compare_vals(==); break;
+    }
+  }
+  *result = create_bool(cond);
+  return true;
+}
+
+bool builtin_not(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  *result = create_bool(is_falsy(args[0]));
+  return true;
+}
+
+#define XX(name, fn, token) \
+  static bool name(Snap* snap, const SValue* args, int num_args, SValue* result) { \
+    return fn(snap, token, args, num_args, result); \
+  }
+XX(builtin_add, arith, TK_ADD) XX(builtin_sub, arith, TK_SUB) XX(builtin_mul, arith, TK_MUL)
+XX(builtin_div, arith, TK_DIV) XX(builtin_mod, arith, TK_MOD)
+XX(builtin_lt, compare_args, TK_LT) XX(builtin_le, compare_args, TK_LE)
+XX(builtin_gt, compare_args, TK_GT) XX(builtin_ge, compare_args, TK_GE)
+XX(builtin_eq, compare_args, TK_EQ)
+#undef XX
+
+// Sets *val to the C function for an operator. Returns false if the form
+// isn't one.
+static bool op_value(int token, SValue* val) {
+  static const SCFunc ops[] = {
+    builtin_add, builtin_sub, builtin_mul, builtin_div, builtin_mod,
+    builtin_lt, builtin_le, builtin_gt, builtin_ge, builtin_eq
+  };
+  if (token == TK_NOT) {
+    *val = create_cfunc(builtin_not);
+  } else if (token >= TK_ADD && token <= TK_EQ) {
+    *val = create_cfunc(ops[token - TK_ADD]);
+  } else {
+    return false;
+  }
+  return true;
+}
+
+/* Types and methods */
+
+bool builtin_type(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  *result = create_obj(snap_type_of(snap, args[0]));
+  return true;
+}
+
+// (make-type 'Name [field...]) makes a struct type (see defstruct). The fields
+// can be symbols or keywords; they're keywords in the type.
+bool builtin_make_type(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SVec* fields;
+  int i;
+  if (num_args != 2 || !is_sym(args[0]) || !is_vec(args[1])) {
+    return fail(snap, result, "snap_type_error", "Expected (make-type <name> [<field>...])");
+  }
+  fields = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, as_vec(args[1])->len));
+  for (i = 0; i < as_vec(args[1])->len; ++i) {
+    SValue f = *snap_vec_at(as_vec(args[1]), i);
+    if (is_sym(f)) f = create_obj(snap_key_new(snap, as_sym(f)->data));
+    if (!is_key(f)) {
+      snap_release(snap);
+      return fail(snap, result, "snap_type_error", "Expected fields to be symbols or keywords");
+    }
+    snap_vec_push(snap, fields, f);
+  }
+  *result = create_obj(type_new(snap, as_sym(args[0])->data, fields));
+  snap_release(snap);
+  return true;
+}
+
+// (add-method! 'name Type fn) makes fn the implementation of method name for
+// Type, defining the method if it isn't yet (see defmethod)
+bool builtin_add_method(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SSym* name;
+  SMethod* m;
+  if (num_args != 3 || !is_sym(args[0]) || !is_type(args[1])) {
+    return fail(snap, result, "snap_type_error", "Expected (add-method! <name> <type> <fn>)");
+  }
+  name = as_sym(args[0]);
+  if (is_method(name->value)) {
+    m = as_method(name->value);
+  } else if (is_undef(name->value)) {
+    SMap* table = (SMap*)snap_anchor(snap, (SObject*)snap_map_new(snap));
+    m = (SMethod*)gc_new(snap, STYPE_METHOD, sizeof(SMethod));
+    m->name = name;
+    m->table = table;
+    name->value = create_obj(m);
+    snap_release(snap);
+  } else {
+    *result = create_obj(snap_err_new_format(snap, "snap_type_error",
+                                             "%s is already defined and isn't a method", name->data));
+    return false;
+  }
+  snap_map_put(snap, m->table, args[1], args[2]);
+  *result = create_obj(m);
+  return true;
+}
+
+// (find-method m Type) is the function method m (or the method named by the
+// symbol m) runs for Type, or nil if there isn't one
+bool builtin_find_method(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SValue m, * fn = NULL;
+  if (num_args != 2 || !is_type(args[1])) {
+    return fail(snap, result, "snap_type_error", "Expected (find-method <method> <type>)");
+  }
+  m = is_sym(args[0]) ? as_sym(args[0])->value : args[0];
+  if (is_method(m)) fn = snap_map_get(as_method(m)->table, args[1]);
+  *result = fn ? *fn : create_nil();
+  return true;
+}
+
+// stdlib.snap as a string, generated by the Makefile
+static const char stdlib_src[] =
+#include "stdlib.h"
+;
+
 void snap_init(Snap* snap) {
   snap->stack_size = 64;
   snap->stack = (SValue*)malloc(snap->stack_size * sizeof(SValue));
@@ -3724,6 +4062,30 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "sym?", builtin_issym);
   snap_def_cfunc(snap, "gensym", builtin_gensym);
   snap_def_cfunc(snap, "macroexpand", builtin_macroexpand);
+  snap_def_cfunc(snap, "type", builtin_type);
+  snap_def_cfunc(snap, "make-type", builtin_make_type);
+  snap_def_cfunc(snap, "add-method!", builtin_add_method);
+  snap_def_cfunc(snap, "find-method", builtin_find_method);
+
+  {
+    // The built-in types, which methods can be added to like struct types
+    static const struct { const char* name; int types[4]; } builtin_types[] = {
+      { "Nil", { STYPE_NIL } }, { "Bool", { STYPE_BOOL } }, { "Int", { STYPE_INT } },
+      { "Float", { STYPE_FLOAT } }, { "Str", { STYPE_STR } }, { "Sym", { STYPE_SYM, STYPE_FORM } },
+      { "Key", { STYPE_KEY } }, { "Err", { STYPE_ERR } }, { "List", { STYPE_CONS } },
+      { "Vector", { STYPE_VEC } }, { "Map", { STYPE_MAP } }, { "Type", { STYPE_TYPE } },
+      { "Fn", { STYPE_CFUNC, STYPE_CODE, STYPE_CLOSURE, STYPE_METHOD } },
+    };
+    size_t i, j;
+    memset(snap->types, 0, sizeof(snap->types));
+    for (i = 0; i < sizeof(builtin_types) / sizeof(builtin_types[0]); ++i) {
+      SType* t = type_new(snap, builtin_types[i].name, NULL);
+      for (j = 0; j < 4 && builtin_types[i].types[j]; ++j) snap->types[builtin_types[i].types[j]] = t;
+      snap_def(snap, builtin_types[i].name, create_obj(t));
+    }
+  }
+
+  if (is_err(snap_exec(snap, stdlib_src))) assert(0 && "stdlib.snap failed");
 }
 
 void snap_destroy(Snap* snap) {

@@ -18,7 +18,7 @@ ifneq ($(MAKECMDGOALS),clean)
 endif
 
 # The generated headers must exist before the dependencies can be found
-.depends/%.d: %.c snap_lex.h repl.h | .depends
+.depends/%.d: %.c snap_lex.h repl.h stdlib.h | .depends
 	$(CC) $(CFLAGS) -MM -c $< -o $@
 
 .depends:
@@ -27,9 +27,10 @@ endif
 snap_lex.h: snap_lex.rh
 	ragel snap_lex.rh
 
-# The REPL is written in snap and built in as a C string
-repl.h: repl.snap
-	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' repl.snap > repl.h
+# The REPL and the standard library are written in snap and built in as C
+# strings
+%.h: %.snap
+	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
 
 test: $(TARGET)
 	@tests/run.sh ./$(TARGET)
@@ -38,7 +39,7 @@ test: $(TARGET)
 # shake out missing GC roots and barriers. Each object gets its own malloc()
 # so that ASan sees it freed; then the tests run again with the slot pools.
 STRESS_FLAGS=-g -O0 -fsanitize=address,undefined -DGC_HEAP_GROWTH=1 -DGC_MIN_STEP=256 -DGC_STEP_SIZE=1 -DGC_STEP_MUL=1
-stress: snap_lex.h repl.h
+stress: snap_lex.h repl.h stdlib.h
 	$(CC) $(STRESS_FLAGS) -DGC_POOL=0 -o snap_stress $(SOURCES) $(LDFLAGS)
 	$(CC) $(STRESS_FLAGS) -o snap_stress_pool $(SOURCES) $(LDFLAGS)
 	@for f in test.snap closure.snap loop.snap new.snap; do \
@@ -50,4 +51,4 @@ stress: snap_lex.h repl.h
 .PHONY: clean test stress
 clean:
 	rm -rf $(TARGET).dSYM .depends
-	rm -f $(TARGET) snap_stress snap_stress_pool snap_lex.h repl.h *.o a.out
+	rm -f $(TARGET) snap_stress snap_stress_pool snap_lex.h repl.h stdlib.h *.o a.out

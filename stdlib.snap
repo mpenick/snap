@@ -1,0 +1,66 @@
+; The standard library. The Makefile builds it into snap as a string, and
+; snap_init() runs it.
+
+; (defn name [param...] body...) defines a function
+(defmacro defn [name params & body]
+  `(def ~name (fn ~params ~@body)))
+
+(defmacro when [c & body] `(if ~c (begin ~@body) nil))
+
+; (cond test1 expr1 test2 expr2...) is the expr of the first true test, or nil
+(defmacro cond [& clauses]
+  (if (= (count clauses) 0) nil
+    `(if ~(first clauses) ~(nth clauses 1) (cond ~@(rest (rest clauses))))))
+
+; (dotimes [i n] body...) runs body with i from 0 to n - 1
+(defmacro dotimes [binding & body]
+  (let [i (nth binding 0) n (gensym)]
+    `(let [~n ~(nth binding 1)]
+       (loop [~i 0] (if (< ~i ~n) (begin ~@body (recur (+ ~i 1))) nil)))))
+
+(defn inc [x] (+ x 1))
+(defn dec [x] (- x 1))
+
+; map, filter and reduce take a vector or list and make a vector
+(defn map [f coll]
+  (let [v (if (vector? coll) coll (vec coll)) n (count v) out []]
+    (loop [i 0] (if (< i n) (begin (push! out (f (nth v i))) (recur (+ i 1))) out))))
+
+(defn filter [f coll]
+  (let [v (if (vector? coll) coll (vec coll)) n (count v) out []]
+    (loop [i 0]
+      (if (< i n)
+        (let [x (nth v i)] (if (f x) (push! out x) nil) (recur (+ i 1)))
+        out))))
+
+(defn reduce [f init coll]
+  (let [v (if (vector? coll) coll (vec coll)) n (count v)]
+    (loop [acc init i 0] (if (< i n) (recur (f acc (nth v i)) (+ i 1)) acc))))
+
+; Structs, methods and interfaces
+
+; (defstruct Name [field...]) defines a struct type. (Name val...) makes one,
+; with a value for each field in order. (get s :field) and (put! s :field val)
+; read and change its fields.
+(defmacro defstruct [name fields]
+  `(def ~name (make-type '~name '~fields)))
+
+; (defmethod name [receiver Type param...] body...) is name's implementation
+; for values of Type, picked by the type of the first argument when name is
+; called. Any type can have methods, including the built-in ones (Int, Vector,
+; ...).
+(defmacro defmethod [name params & body]
+  (let [ps (concat params)]
+    `(add-method! '~name ~(nth ps 1) (fn [~(first ps) ~@(rest (rest ps))] ~@body))))
+
+; (definterface Name method...) names a set of methods. A value satisfies an
+; interface when its type has all of them, without having to say so.
+(defmacro definterface [name & methods]
+  `(def ~name '~(vec methods)))
+
+(defn satisfies? [iface x]
+  (let [t (type x) n (count iface)]
+    (loop [i 0]
+      (if (< i n)
+        (if (find-method (nth iface i) t) (recur (+ i 1)) false)
+        true))))

@@ -31,7 +31,10 @@
   XX(STYPE_CODE, 15, "code") \
   XX(STYPE_CLOSURE, 16, "closure") \
   XX(STYPE_UPVAL, 17, "upval") \
-  XX(STYPE_TEMPSTR, 18, "tempstr")
+  XX(STYPE_TEMPSTR, 18, "tempstr") \
+  XX(STYPE_TYPE, 19, "type") \
+  XX(STYPE_STRUCT, 20, "struct") \
+  XX(STYPE_METHOD, 21, "method")
 
 enum {
 #define XX(type, id, name) type,
@@ -189,6 +192,31 @@ typedef struct SMap_ {
   int32_t* index;
 } SMap;
 
+// A type, from defstruct or built in (Int, Vector...). Types are never freed.
+// Calling a struct type makes an instance, with values for its fields in order.
+typedef struct SType_ {
+  SOBJECT_FIELDS
+  bool is_struct;
+  int num_fields;
+  SSym* name;
+  SValue fields[0]; // Keywords
+} SType;
+
+typedef struct SStruct_ {
+  SOBJECT_FIELDS
+  uint32_t num_vals; // Its type's num_fields, for freeing it after its type in snap_destroy()
+  SType* stype;
+  SValue vals[0];
+} SStruct;
+
+// A function with an implementation for each type, picked by the type of its
+// first argument (see defmethod)
+typedef struct SMethod_ {
+  SOBJECT_FIELDS
+  SSym* name;
+  SMap* table; // Type to function
+} SMethod;
+
 typedef struct SUpval_ {
   SOBJECT_FIELDS
   SValue* value; // Points into the stack while open, at `closed` once closed
@@ -271,6 +299,7 @@ struct Snap_ {
   SErr* cause;
   jmp_buf jmp;
   int num_gensyms;
+  SType* types[STYPE_METHOD + 1]; // The built-in type of each kind of value
   bool dump_code; // Print the bytecode from snap_compile() and snap_exec()
 };
 
@@ -296,6 +325,9 @@ struct Snap_ {
 #define is_map(v) is_obj_type(v, STYPE_MAP)
 #define is_code(v) is_obj_type(v, STYPE_CODE)
 #define is_closure(v) is_obj_type(v, STYPE_CLOSURE)
+#define is_type(v) is_obj_type(v, STYPE_TYPE)
+#define is_struct(v) is_obj_type(v, STYPE_STRUCT)
+#define is_method(v) is_obj_type(v, STYPE_METHOD)
 #define is_cons(v) (is_empty(v) || is_obj_type(v, STYPE_CONS))
 
 #define as_obj(v) ((SObject*)(uintptr_t)(v).bits)
@@ -311,6 +343,9 @@ struct Snap_ {
 #define as_map(v) check(is_map(v), (SMap*)as_obj(v))
 #define as_code(v) check(is_code(v), (SCode*)as_obj(v))
 #define as_closure(v) check(is_closure(v), (SClosure*)as_obj(v))
+#define as_type(v) check(is_type(v), (SType*)as_obj(v))
+#define as_struct(v) check(is_struct(v), (SStruct*)as_obj(v))
+#define as_method(v) check(is_method(v), (SMethod*)as_obj(v))
 #define as_cons(v) check(is_cons(v), is_empty(v) ? NULL : (SCons*)as_obj(v)) // NULL for ()
 
 static inline SValue snap_val(uint64_t bits) {
@@ -385,6 +420,7 @@ static inline SValue* snap_vec_at(SVec* vec, int i) {
   return &vec->segs[k][t - ((uint64_t)SNAP_VEC_SEG << k)];
 }
 SMap* snap_map_new(Snap* snap);
+SType* snap_type_of(Snap* snap, SValue val);
 SValue* snap_map_get(SMap* map, SValue key);
 void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val);
 bool snap_map_del(Snap* snap, SMap* map, SValue key);

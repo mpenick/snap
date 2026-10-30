@@ -10,3 +10,4 @@ gc
 snap_stress
 snap_stress_pool
 repl.h
+stdlib.h
