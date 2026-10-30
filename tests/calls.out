@@ -27,3 +27,4 @@ inf inf
 :my-int
 2
 <err :snap_arith_error "Number is too big for an integer"> <err :snap_arith_error "Number is too big for an integer"> <err :snap_arith_error "Number is too big for an integer"> 4000000000000000000 -4000000000000000000 true <err :snap_arith_error "Number is too big for an integer">
+1 2 3 20000 20000

@@ -1658,11 +1658,15 @@ new_frame:
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
           ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
-          // It can run snap code (like a macro), which can move the frames
-          // and the stack
-          frame = &mvec_back(&snap->frames);
-          locals = frame->stack_base;
-          stack = frame->stack_top - arg; // Pop arguments
+          stack -= arg; // Pop arguments
+          if (snap->reentered) {
+            // It ran snap code (like a macro), which can move the frames and
+            // the stack
+            snap->reentered = false;
+            frame = &mvec_back(&snap->frames);
+            locals = frame->stack_base;
+            stack = frame->stack_top - arg;
+          }
           if (!ok) goto call_failed;
           *stack++ = temp;
         } else if (is_code(*a) || is_closure(*a)) {
@@ -3320,7 +3324,7 @@ SValue snap_run(Snap* snap, SValue fn) {
 
 SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
   SValue* base = snap->frames.vsize > 0 ? mvec_back(&snap->frames).stack_top : snap->stack;
-  SValue rest = create_empty();
+  SValue rest = create_empty(), result;
   SnapList list = { NULL, NULL };
   SnapFrame* frame;
   SClosure* cl;
@@ -3334,7 +3338,7 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
     fn = *found;
   }
   if (is_cfunc(fn) || is_type(fn)) {
-    SValue result = create_nil();
+    result = create_nil();
     // On failure result is the error
     if (is_cfunc(fn)) as_cfunc(fn)(snap, args, num_args, &result);
     else struct_new(snap, as_type(fn), args, num_args, &result);
@@ -3362,7 +3366,9 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
   if (n > 0) memmove(frame->stack_base, args, n * sizeof(SValue));
   if (c->arity < 0) frame->stack_base[n] = rest;
   frame->stop = true;
-  return exec(snap);
+  result = exec(snap);
+  snap->reentered = true; // For a VM that called this through a C function
+  return result;
 }
 
 // Runs each form as soon as it's compiled, so that a macro can be used by
@@ -4367,6 +4373,7 @@ void snap_init(Snap* snap) {
   snap->cause = NULL;
   snap->num_gensyms = 0;
   snap->dump_code = false;
+  snap->reentered = false;
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
 

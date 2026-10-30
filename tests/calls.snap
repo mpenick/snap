@@ -78,3 +78,13 @@
 (set! int orig-int)
 (println (ints 2.7))
 (println (recover (fn [] (int 1e30))) (recover (fn [] (floor -1e300))) (recover (fn [] (int (/ 0.0 0.0)))) (int 4e18) (floor -4e18) (= (int -4.611686018427387904e18) (- -4611686018427387903 1)) (recover (fn [] (int 4.611686018427387904e18))))
+; A C function that runs snap code (compile and macroexpand expanding a
+; macro) can grow the stack under the caller, whose locals must still work
+(defn deep [n] (if (= n 0) 0 (+ 1 (deep (- n 1)))))
+(defmacro big [] (deep 20000))
+(defn expands [a b]
+  (let [x (+ a b)
+        code (compile "(big)")
+        y (macroexpand '(big))]
+    (println a b x (code) y)))
+(expands 1 2)

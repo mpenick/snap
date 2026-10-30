@@ -288,6 +288,7 @@ struct Snap_ {
   SValue* stack_end;
   int stack_size;
   struct { MVEC_FIELDS(SnapFrame); } frames;
+  bool reentered; // Set by snap_call(), which can move the stack and the frames
   struct { MVEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
   size_t next_gc; // Start a collection when num_bytes_alloced reaches this
