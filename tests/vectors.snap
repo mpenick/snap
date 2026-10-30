@@ -60,3 +60,31 @@
 
 ; Script arguments are a vector
 (println args (count args))
+
+; Growing: values past the vector's first array go in segments of 8, 16, 32...
+(def upto (fn [v n] (loop [i (count v)] (if (< i n) (begin (push! v i) (recur (+ i 1))) v))))
+(def sum (fn [v] (loop [i 0 s 0] (if (< i (count v)) (recur (+ i 1) (+ s (nth v i))) s))))
+(def big (upto [] 5000))
+(println (count big) (nth big 0) (nth big 7) (nth big 8) (nth big 23) (nth big 24) (nth big 4999) (sum big))
+(def lit (upto [0 1 2] 100)) ; A literal's array, then segments
+(println (count lit) (nth lit 2) (nth lit 3) (nth lit 99) (sum lit))
+
+; Popping down past segments and pushing back up
+(loop [i 0] (if (< i 4990) (begin (pop! big) (recur (+ i 1))) nil))
+(println (count big) (sum big) big)
+(upto big 3000)
+(println (count big) (nth big 2999) (sum big))
+(loop [i 0] (if (< i 3000) (begin (pop! big) (recur (+ i 1))) nil))
+(println (count big) big)
+(upto big 40)
+(println (count big) (sum big))
+
+; put! in every segment
+(def v (upto [] 100))
+(loop [i 0] (if (< i 100) (begin (put! v i (* i 2)) (recur (+ i 1))) nil))
+(println (sum v) (nth v 99))
+
+; Compared and hashed by contents however the values are stored
+(println (= (upto [] 10) [0 1 2 3 4 5 6 7 8 9]) (= (upto [0 1] 10) (upto [] 10)) (= (upto [] 10) (upto [] 11)))
+(def m {[0 1 2 3 4 5 6 7 8 9] :found})
+(println (get m (upto [] 10)) (get m (upto [0 1 2] 10)))

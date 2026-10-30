@@ -13,3 +13,12 @@ true true true
 [a (b c) 1] :true
 true true false false false
 [] 0
+5000 0 7 8 23 24 4999 12497500
+100 2 3 99 4950
+10 45 [0 1 2 3 4 5 6 7 8 9]
+3000 2999 4498500
+0 []
+40 780
+9900 198
+true true false
+:found :found

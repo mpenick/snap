@@ -246,7 +246,7 @@ int snap_hash(const SValue* val) {
       SVec* v = (SVec*)obj;
       unsigned h = 1;
       int i;
-      for (i = 0; i < v->len; ++i) h = h * 31 + snap_hash(&v->data[i]);
+      for (i = 0; i < v->len; ++i) h = h * 31 + snap_hash(snap_vec_at(v, i));
       return (int)h;
     }
     case STYPE_MAP: {
@@ -290,7 +290,7 @@ int snap_compare(const SValue* val1, const SValue* val2) {
       SVec* v1 = as_vec(*val1), * v2 = as_vec(*val2);
       int i, c;
       for (i = 0; i < v1->len && i < v2->len; ++i) {
-        if ((c = snap_compare(&v1->data[i], &v2->data[i])) != 0) return c;
+        if ((c = snap_compare(snap_vec_at(v1, i), snap_vec_at(v2, i))) != 0) return c;
       }
       return compare(v1->len, v2->len);
     }
@@ -396,10 +396,17 @@ static void gc_free(Snap* snap, SObject* obj) {
     case STYPE_CONS:
       snap->num_bytes_alloced -= sizeof(SCons);
       break;
-    case STYPE_VEC:
-      snap->num_bytes_alloced -= (sizeof(SVec) + ((SVec*)obj)->cap * sizeof(SValue));
-      free(((SVec*)obj)->data);
+    case STYPE_VEC: {
+      SVec* vec = (SVec*)obj;
+      int k;
+      snap->num_bytes_alloced -= sizeof(SVec) + snap_vec_cap(vec) * sizeof(SValue);
+      free(vec->data);
+      if (vec->segs) {
+        for (k = 0; k < vec->num_segs; ++k) free(vec->segs[k]);
+        free(vec->segs);
+      }
       break;
+    }
     case STYPE_MAP:
       snap->num_bytes_alloced -= sizeof(SMap) + map_bytes(((SMap*)obj)->cap);
       free(((SMap*)obj)->entries);
@@ -508,18 +515,26 @@ static void gc_mark_vals(Snap* snap, SValue* vals, int count) {
 #define gc_barrier(snap, old) \
   do { if ((snap)->gc_phase == GC_MARK && is_obj(old)) gc_mark(snap, as_obj(old)); } while (0)
 
-// Marks up to GC_CHUNK of vals[gray->pos, count) and moves gray->pos past them,
-// or sets it to -1 when they're all marked. Returns the work done.
+// Picks the next chunk [*start, *end) of up to GC_CHUNK of count children,
+// from gray->pos, and moves gray->pos past it (or to -1 when it's the last)
+static void gc_chunk(SnapGray* gray, int count, int* start, int* end) {
+  *start = gray->pos < count ? gray->pos : count; // A vector can shrink
+  *end = count - *start > GC_CHUNK ? *start + GC_CHUNK : count;
+  gray->pos = *end < count ? *end : -1;
+}
+
+// Marks the next chunk of vals. Returns the work done.
 static int gc_scan_vals(Snap* snap, SnapGray* gray, SValue* vals, int count) {
-  int start = gray->pos, end;
-  if (start >= count) { // The vector shrank
-    gray->pos = -1;
-    return 1;
-  }
-  end = count - start > GC_CHUNK ? start + GC_CHUNK : count;
+  int start, end;
+  gc_chunk(gray, count, &start, &end);
   gc_mark_vals(snap, vals + start, end - start);
-  gray->pos = end < count ? end : -1;
   return end - start + 1;
+}
+
+// The index after the end of the segment holding vector index i
+static int vec_seg_end(SVec* vec, int i) {
+  int k = 63 - __builtin_clzll((uint64_t)(i - vec->cap0) + SNAP_VEC_SEG) - SNAP_VEC_SEG_BITS;
+  return vec->cap0 + (SNAP_VEC_SEG << (k + 1)) - SNAP_VEC_SEG;
 }
 
 // Marks the children of a gray object, a chunk at a time for the ones that
@@ -530,8 +545,17 @@ static int gc_scan(Snap* snap, SnapGray* gray) {
   SObject* obj = gray->obj;
   int i;
   switch (obj->type) {
-    case STYPE_VEC:
-      return gc_scan_vals(snap, gray, ((SVec*)obj)->data, ((SVec*)obj)->len);
+    case STYPE_VEC: {
+      SVec* vec = (SVec*)obj;
+      int start, end, run;
+      gc_chunk(gray, vec->len, &start, &end);
+      for (i = start; i < end; i = run) { // A run of values in one array at a time
+        run = i < vec->cap0 ? vec->cap0 : vec_seg_end(vec, i);
+        if (run > end) run = end;
+        gc_mark_vals(snap, snap_vec_at(vec, i), run - i);
+      }
+      return end - start + 1;
+    }
     case STYPE_MAP:
       return gc_scan_vals(snap, gray, ((SMap*)obj)->entries, 2 * ((SMap*)obj)->used); // Deleted keys aren't objects
     case STYPE_CODE:
@@ -796,22 +820,38 @@ SCons* snap_cons_new(Snap* snap) {
 
 SVec* snap_vec_new(Snap* snap, int cap) {
   SVec* v = (SVec*)gc_new(snap, STYPE_VEC, sizeof(SVec));
+  v->num_segs = 0;
   v->len = 0;
-  v->cap = cap;
+  v->cap0 = cap;
   v->data = cap > 0 ? (SValue*)malloc(cap * sizeof(SValue)) : NULL;
+  v->segs = NULL;
   snap->num_bytes_alloced += cap * sizeof(SValue);
   return v;
 }
 
-// Doesn't allocate GC objects, so it never collects
+// Adds a segment when it's full: it never copies values, and the segment
+// pointers it copies are at most about 30. Doesn't allocate GC objects, so it
+// never collects.
 void snap_vec_push(Snap* snap, SVec* vec, SValue val) {
-  if (vec->len == vec->cap) {
-    int cap = vec->cap > 0 ? vec->cap * 2 : 4;
-    vec->data = (SValue*)realloc(vec->data, cap * sizeof(SValue));
-    snap->num_bytes_alloced += (cap - vec->cap) * sizeof(SValue);
-    vec->cap = cap;
+  if (vec->len == snap_vec_cap(vec)) {
+    int k = vec->num_segs++;
+    size_t size = ((size_t)SNAP_VEC_SEG << k) * sizeof(SValue);
+    vec->segs = (SValue**)realloc(vec->segs, vec->num_segs * sizeof(SValue*));
+    vec->segs[k] = (SValue*)malloc(size);
+    snap->num_bytes_alloced += size;
   }
-  vec->data[vec->len++] = val;
+  *snap_vec_at(vec, vec->len++) = val;
+}
+
+// Frees the last segment once the one before it is empty too, so that pushing
+// and popping across a segment boundary doesn't allocate every time
+static void vec_shrink(Snap* snap, SVec* vec) {
+  int n = vec->num_segs;
+  if (n >= 2 && vec->len <= vec->cap0 + (SNAP_VEC_SEG << (n - 2)) - SNAP_VEC_SEG) {
+    free(vec->segs[n - 1]);
+    vec->num_segs--;
+    snap->num_bytes_alloced -= ((size_t)SNAP_VEC_SEG << (n - 1)) * sizeof(SValue);
+  }
 }
 
 SMap* snap_map_new(Snap* snap) {
@@ -2030,7 +2070,7 @@ static bool contains_form(SValue expr, int form) {
     }
   } else if (is_vec(expr)) {
     for (i = 0; i < as_vec(expr)->len; ++i) {
-      if (contains_form(as_vec(expr)->data[i], form)) return true;
+      if (contains_form(*snap_vec_at(as_vec(expr), i), form)) return true;
     }
   } else if (is_map(expr)) {
     for (i = 0; i < 2 * as_map(expr)->used; ++i) {
@@ -2052,7 +2092,7 @@ static bool references(SValue expr, SSym* name) {
     }
   } else if (is_vec(expr)) {
     for (i = 0; i < as_vec(expr)->len; ++i) {
-      if (references(as_vec(expr)->data[i], name)) return true;
+      if (references(*snap_vec_at(as_vec(expr), i), name)) return true;
     }
   } else if (is_map(expr)) {
     for (i = 0; i < 2 * as_map(expr)->used; ++i) {
@@ -2071,7 +2111,7 @@ static void make_read_only(SValue expr) {
     for (curr = as_cons(expr); curr; curr = as_cons(curr->rest)) make_read_only(curr->first);
   } else if (is_vec(expr)) {
     as_obj(expr)->read_only = true;
-    for (i = 0; i < as_vec(expr)->len; ++i) make_read_only(as_vec(expr)->data[i]);
+    for (i = 0; i < as_vec(expr)->len; ++i) make_read_only(*snap_vec_at(as_vec(expr), i));
   } else if (is_map(expr)) {
     as_obj(expr)->read_only = true;
     for (i = 0; i < 2 * as_map(expr)->used; ++i) make_read_only(as_map(expr)->entries[i]);
@@ -2190,10 +2230,10 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   fs->depth = 1; // def inside a fn makes locals
 
   for (i = 0; i < params->len; ++i) {
-    if (!is_sym(params->data[i])) {
+    if (!is_sym(*snap_vec_at(params, i))) {
       raise(snap, "snap_compile_error", "Expected symbol");
     }
-    add_local(snap, fs, as_sym(params->data[i]), false);
+    add_local(snap, fs, as_sym(*snap_vec_at(params, i)), false);
   }
   fs->num_args = params->len;
 
@@ -2233,7 +2273,7 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
     raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
   }
   for (i = 0; i < count; ++i) {
-    if (!is_sym(bindings->data[2 * i])) {
+    if (!is_sym(*snap_vec_at(bindings, 2 * i))) {
       raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
     }
   }
@@ -2244,8 +2284,8 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
   begin_scope(fs);
   base = fs->num_locals;
   for (i = 0; i < count; ++i) {
-    compile(snap, fs, bindings->data[2 * i + 1], false);
-    emit(fs, STORE_LOCAL, add_local(snap, fs, as_sym(bindings->data[2 * i]), true));
+    compile(snap, fs, *snap_vec_at(bindings, 2 * i + 1), false);
+    emit(fs, STORE_LOCAL, add_local(snap, fs, as_sym(*snap_vec_at(bindings, 2 * i)), true));
   }
   assert(fs->num_locals == base + count);
 
@@ -2387,7 +2427,7 @@ bool builtin_map(Snap* snap, const SValue* args, int num_args, SValue* result);
 static void compile_vec(Snap* snap, SnapFnState* fs, SVec* vec) {
   int i;
   for (i = 0; i < vec->len; ++i) {
-    compile(snap, fs, vec->data[i], false);
+    compile(snap, fs, *snap_vec_at(vec, i), false);
   }
   load_constant(snap, fs, create_cfunc(builtin_vector));
   emit(fs, CALL, vec->len);
@@ -2771,7 +2811,7 @@ static void print_val(SValue val) {
       printf("[");
       for (i = 0; i < as_vec(val)->len; ++i) {
         if (i > 0) printf(" ");
-        print_val(as_vec(val)->data[i]);
+        print_val(*snap_vec_at(as_vec(val), i));
       }
       printf("]");
       break;
@@ -2997,12 +3037,13 @@ bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result)
 // (nth <vec> <index>)
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (!vec_args(snap, args, num_args, 2, result)) return false;
-  *result = as_vec(args[0])->data[as_int(args[1])];
+  *result = *snap_vec_at(as_vec(args[0]), as_int(args[1]));
   return true;
 }
 
 // (put! <vec> <index> <val>) or (put! <map> <key> <val>) returns the vector or map
 bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SValue* val;
   if (num_args == 3 && is_map(args[0])) {
     if (as_obj(args[0])->read_only) return read_only_error(snap, result);
     snap_map_put(snap, as_map(args[0]), args[1], args[2]);
@@ -3011,8 +3052,9 @@ bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
   }
   if (!vec_args(snap, args, num_args, 3, result)) return false;
   if (as_obj(args[0])->read_only) return read_only_error(snap, result);
-  gc_barrier(snap, as_vec(args[0])->data[as_int(args[1])]);
-  as_vec(args[0])->data[as_int(args[1])] = args[2];
+  val = snap_vec_at(as_vec(args[0]), as_int(args[1]));
+  gc_barrier(snap, *val);
+  *val = args[2];
   *result = args[0];
   return true;
 }
@@ -3037,8 +3079,9 @@ bool builtin_pop(Snap* snap, const SValue* args, int num_args, SValue* result) {
   vec = as_vec(args[0]);
   if (vec->read_only) return read_only_error(snap, result);
   if (vec->len == 0) return fail(snap, result, "snap_index_error", "Vector is empty");
-  *result = vec->data[--vec->len];
+  *result = *snap_vec_at(vec, --vec->len);
   gc_barrier(snap, *result);
+  vec_shrink(snap, vec);
   return true;
 }
 

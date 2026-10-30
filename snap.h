@@ -159,12 +159,21 @@ typedef struct SCons_ {
 } SCons;
 
 // Mutable and growable
+// A vector's values are in the array it was made with, then in segments that
+// double in size (8, 16, 32...) as it grows, so growing never copies them
+#define SNAP_VEC_SEG_BITS 3
+#define SNAP_VEC_SEG (1 << SNAP_VEC_SEG_BITS)
+
 typedef struct SVec_ {
   SOBJECT_FIELDS
+  uint8_t num_segs;
   int len;
-  int cap;
+  int cap0;       // Size of data
   SValue* data;
+  SValue** segs;  // Segment k holds SNAP_VEC_SEG << k values
 } SVec;
+
+#define snap_vec_cap(v) ((v)->cap0 + (SNAP_VEC_SEG << (v)->num_segs) - SNAP_VEC_SEG)
 
 // Mutable hash map that keeps insertion order. Entries are key/value pairs in
 // the order they were added; a deleted entry's key is SV_DELETED until the
@@ -362,6 +371,15 @@ SErr* snap_err_new_format(Snap* snap, const char* err, const char* format, ...);
 SCons* snap_cons_new(Snap* snap);
 SVec* snap_vec_new(Snap* snap, int cap);
 void snap_vec_push(Snap* snap, SVec* vec, SValue val);
+
+static inline SValue* snap_vec_at(SVec* vec, int i) {
+  uint64_t t;
+  int k;
+  if (i < vec->cap0) return &vec->data[i];
+  t = (uint64_t)(i - vec->cap0) + SNAP_VEC_SEG; // Segment k starts at t = SNAP_VEC_SEG << k
+  k = 63 - __builtin_clzll(t) - SNAP_VEC_SEG_BITS;
+  return &vec->segs[k][t - ((uint64_t)SNAP_VEC_SEG << k)];
+}
 SMap* snap_map_new(Snap* snap);
 SValue* snap_map_get(SMap* map, SValue key);
 void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val);

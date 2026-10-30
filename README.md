@@ -209,11 +209,15 @@ string in `repl.h`: it reads lines until `compile` stops returning
   Sweeping walks the pages slot by slot, so objects need no list pointer and
   their header is 8 bytes. Big objects (such as long strings) and the arrays
   inside vectors and maps still come from `malloc`.
+* **Vectors** never copy their values to grow. A vector keeps the array it
+  was made with (a literal's is exactly its size), and values pushed past it
+  go in segments of 8, 16, 32 and so on. `nth` finds the segment with a
+  count-leading-zeros instruction. `pop!` frees the last segment once the one
+  before it is empty too. In C, use `snap_vec_at()` rather than `data`.
 * **Real-time programs** can set `gc_manual` in the `Snap` struct so that
   allocation never collects, and call `snap_gc_step()` (or `gc-step`) in
   their idle time, such as the end of each frame.
 
 ## TODO
 
-* Growing a vector or map copies it, which takes time in proportion to its
-  size
+* Growing a map copies it, which takes time in proportion to its size
