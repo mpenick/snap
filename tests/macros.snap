@@ -1,0 +1,105 @@
+; Lists
+(println (list 1 2 3))
+(println (list))
+(println (cons 0 (list 1 2)) (cons 0 nil))
+(println (first (list 1 2)) (first nil) (first '()))
+(println (rest (list 1 2)) (rest (list 1)) (rest nil))
+(println (concat (list 1 2) [3 4] nil '(5)))
+(println (vec (list 1 2 3)) (vec nil))
+(println (count '(1 2 3)) (count '()) (nth '(a b c) 1))
+(println (list? '(1)) (list? '()) (list? [1]) (list? nil))
+(println (sym? 'a) (sym? :a) (sym? "a"))
+(println (= (list 1 2) '(1 2)) (= (list 1 2) '(1 3)) (= (list 1) '(1 2)) (= (list) '()))
+(println (get {'(1 2) :found} (list 1 2)))
+
+; Rest parameters
+(def f (fn [a & more] (list a more)))
+(println (f 1) (f 1 2 3))
+(def g (fn [& all] all))
+(println (g) (g 1 2))
+(println (recover (fn [] (f))))
+(def sum (fn [total & xs]
+  (if (= (count xs) 0) total (recur (+ total (first xs)) (rest xs)))))
+(println (sum 0 1 2 3 4))
+
+; Quasiquote
+(def x 3)
+(def ys (list 4 5))
+(println `(a ~x ~@ys b))
+(println `(a (b ~(+ x 1)) ~@nil))
+(println `[1 ~x ~@ys])
+(println `{:a ~x})
+(println `(if ~x 1 2))
+(println `())
+(def list 42) ; Quasiquote doesn't use the global names
+(println `(~x ~@ys))
+(set! list (fn [& xs] xs))
+
+; defmacro
+(defmacro unless [c & body] `(if ~c nil (begin ~@body)))
+(println (unless false 1 2))
+(println (unless true 1 2))
+
+(defmacro swap! [a b]
+  (let [t (gensym)]
+    `(let [~t ~a] (set! ~a ~b) (set! ~b ~t))))
+(def p 1)
+(def q 2)
+(swap! p q)
+(println p q)
+(def swap-locals (fn [a b] (swap! a b) [a b]))
+(println (swap-locals :a :b))
+
+; Macros can use the functions defined before them
+(def wrap (fn [form] `(list :wrapped ~form)))
+(defmacro wrapped [form] (wrap form))
+(println (wrapped (+ 1 2)))
+
+; Recursive macros
+(defmacro my-and [& xs]
+  (if (= (count xs) 0) true
+    (if (= (count xs) 1) (first xs)
+      `(if ~(first xs) (my-and ~@(rest xs)) false))))
+(println (my-and) (my-and 1) (my-and 1 2 3) (my-and 1 false 3))
+
+(defmacro cond [& clauses]
+  (if (= (count clauses) 0) nil
+    `(if ~(first clauses) ~(nth clauses 1) (cond ~@(rest (rest clauses))))))
+(def sign (fn [n] (cond (< n 0) :neg (= n 0) :zero true :pos)))
+(println (sign -5) (sign 0) (sign 5))
+
+; A macro call in tail position keeps the recur in tail position
+(defmacro while-less [i n & body]
+  `(loop [~i 0] (if (< ~i ~n) (begin ~@body (recur (+ ~i 1))) nil)))
+(def seen [])
+(while-less i 3 (push! seen i))
+(println seen)
+
+; Locals hide macros
+(def h (fn [unless] (unless 1 2)))
+(println (h (fn [a b] (+ a b))))
+(println (let [unless (fn [a b] (* a b))] (unless 3 4)))
+
+; macroexpand
+(println (macroexpand '(unless c a b)))
+(println (macroexpand '(my-and a b)))
+(println (macroexpand '(+ 1 2)))
+(println (macroexpand 5))
+
+; Code compiled at run time can use macros
+(println ((compile "(unless false :compiled)")))
+
+; A macro can compile and run code while it's expanding
+(defmacro at-compile-time [src] ((compile src)))
+(println (at-compile-time "(my-and 1 2 :ran)"))
+
+; Errors
+(defmacro bad [] (panic :bad "bad macro"))
+(println (compile "(bad)"))
+(defmacro bad-err [] (err :syntax "bad syntax"))
+(println (compile "(bad-err)"))
+(println (compile "(fn [] (defmacro m [] 1))"))
+(println (compile "~x"))
+(println (compile "`~@x"))
+(println (compile "(fn [a &] a)"))
+(println (recover (fn [] (macroexpand '(bad)))))

@@ -239,9 +239,16 @@ int snap_hash(const SValue* val) {
       return hash_chars(((SKeyword*)obj)->data, ((SKeyword*)obj)->len);
     case STYPE_TEMPSTR:
       return hash_chars(((STempStr*)obj)->data, ((STempStr*)obj)->len);
-    // The rest match snap_compare(): errors by kind, vectors and maps by contents
+    // The rest match snap_compare(): errors by kind, lists, vectors and maps
+    // by contents
     case STYPE_ERR:
       return snap_hash(&((SErr*)obj)->err);
+    case STYPE_CONS: {
+      SCons* l;
+      unsigned h = 1;
+      for (l = (SCons*)obj; l; l = as_cons(l->rest)) h = h * 31 + snap_hash(&l->first);
+      return (int)h;
+    }
     case STYPE_VEC: {
       SVec* v = (SVec*)obj;
       unsigned h = 1;
@@ -285,6 +292,15 @@ int snap_compare(const SValue* val1, const SValue* val2) {
                            as_str(*val2)->data, as_str(*val2)->len);
     case STYPE_ERR:
       return snap_compare(&as_err(*val1)->err, &as_err(*val2)->err);
+    case STYPE_CONS: {
+      // By contents, element by element
+      SCons* l1 = as_cons(*val1), * l2 = as_cons(*val2);
+      int c;
+      for (; l1 && l2; l1 = as_cons(l1->rest), l2 = as_cons(l2->rest)) {
+        if ((c = snap_compare(&l1->first, &l2->first)) != 0) return c;
+      }
+      return compare(l1 != NULL, l2 != NULL);
+    }
     case STYPE_VEC: {
       // By contents, element by element
       SVec* v1 = as_vec(*val1), * v2 = as_vec(*val2);
@@ -712,6 +728,7 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   obj->type = type;
   obj->mark = snap->gc_unmarked ^ 1; // New objects survive the collection they're made in
   obj->read_only = false;
+  obj->macro = false;
   snap->num_bytes_alloced += size;
   return obj;
 }
@@ -816,6 +833,43 @@ SCons* snap_cons_new(Snap* snap) {
   c->first = create_undef();
   c->rest = create_empty();
   return c;
+}
+
+// Appends a cell to a list being built and returns the slot for its value.
+// The list is anchored from its first cell until list_done(), so the caller
+// can allocate (even to make the value) before filling the slot.
+typedef struct {
+  SCons* head;
+  SCons* tail;
+} SnapList;
+
+static SValue* list_add(Snap* snap, SnapList* list) {
+  SCons* cell = snap_cons_new(snap);
+  if (list->head) {
+    list->tail->rest = create_obj(cell);
+  } else {
+    list->head = (SCons*)snap_anchor(snap, (SObject*)cell);
+  }
+  list->tail = cell;
+  return &cell->first;
+}
+
+static SValue list_done(Snap* snap, SnapList* list) {
+  if (!list->head) return create_empty();
+  snap_release(snap);
+  return create_obj(list->head);
+}
+
+static int list_length(SCons* list) {
+  int count = 0;
+  for (; list; list = as_cons(list->rest)) count++;
+  return count;
+}
+
+// The nth element; the list must have more than n elements
+static SValue nth(SCons* list, int n) {
+  while (n-- > 0) list = as_cons(list->rest);
+  return list->first;
 }
 
 SVec* snap_vec_new(Snap* snap, int cap) {
@@ -1021,6 +1075,7 @@ static void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* cl
   frame->pc = code->insts;
   frame->stack_base = stack_base;
   frame->recover = false;
+  frame->stop = false;
   frame->stack_top = stack_base + code->num_locals;
 
   // Non-argument locals must not be garbage when the GC scans the stack
@@ -1241,10 +1296,10 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
 #endif
 
 // Unwinds a panic to the innermost frame called by recover and pushes the
-// error as its result. Returns false, with every frame gone, when there isn't
-// one. Kept out of exec(), where it slows down the other handlers.
+// error as its result. Returns false, with this exec()'s frames gone, when
+// there isn't one. Kept out of exec(), where it slows down the other handlers.
 static bool unwind(Snap* snap, SValue err) {
-  while (snap->frames.vsize > 0) {
+  for (;;) {
     SnapFrame* frame = &mvec_back(&snap->frames);
     mvec_pop(&snap->frames);
     if (frame->recover) {
@@ -1252,9 +1307,28 @@ static bool unwind(Snap* snap, SValue err) {
       *mvec_back(&snap->frames).stack_top++ = err;
       return true;
     }
+    if (frame->stop) {
+      close_upvals(snap, frame->stack_base);
+      return false;
+    }
   }
-  close_upvals(snap, snap->stack);
-  return false;
+}
+
+// Replaces the last `count` values on the stack with a list of them, for a
+// function whose last parameter takes the rest of its arguments. Returns the
+// new top. The list is built from the end, each cell going in the slot of the
+// value it took, so the GC sees all of it.
+static SValue* pack_rest(Snap* snap, SValue* top, int count) {
+  SValue* slot;
+  *top = create_empty(); // The callable's slot, which is free
+  mvec_back(&snap->frames).stack_top = top + 1;
+  for (slot = top - 1; slot >= top - count; --slot) {
+    SCons* cell = snap_cons_new(snap);
+    cell->first = *slot;
+    cell->rest = slot[1];
+    *slot = create_obj(cell);
+  }
+  return (count > 0 ? top - count : top) + 1;
 }
 
 static SValue exec(Snap* snap) {
@@ -1373,7 +1447,11 @@ new_frame:
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
           ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
-          stack -= arg; // Pop arguments
+          // It can run snap code (like a macro), which can move the frames
+          // and the stack
+          frame = &mvec_back(&snap->frames);
+          locals = frame->stack_base;
+          stack = frame->stack_top - arg; // Pop arguments
           if (!ok) {
             *stack++ = as_err(temp)->msg;
             *stack++ = as_err(temp)->err;
@@ -1383,8 +1461,13 @@ new_frame:
         } else if (is_code(*a) || is_closure(*a)) {
           SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
           SCode* c = cl ? cl->code : as_code(*a);
-          if (arg != c->num_args) {
-            RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
+          if (arg != c->arity) {
+            if (c->arity >= 0 || arg < c->num_args - 1) {
+              RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
+            }
+            frame->stack_top = stack;
+            stack = pack_rest(snap, stack, arg - (c->num_args - 1));
+            arg = c->num_args;
           }
           frame->pc = pc;
           frame->stack_top = stack - arg; // Pop arguments
@@ -1416,7 +1499,7 @@ new_frame:
       OP(RETURN) {
       do_return:
         close_upvals(snap, locals);
-        if (snap->frames.vsize > 1) {
+        if (!frame->stop) {
           SnapFrame* frame_prev = &mvec_back(&snap->frames) - 1;
           *frame_prev->stack_top++ = *--stack;
           mvec_pop(&snap->frames);
@@ -1463,11 +1546,14 @@ new_frame:
           temp = create_nil();
           frame->stack_top = stack;
           as_cfunc(*a)(snap, stack, 0, &temp); // On failure temp is the error
+          frame = &mvec_back(&snap->frames);
+          locals = frame->stack_base;
+          stack = frame->stack_top;
           *stack++ = temp;
         } else if (is_code(*a) || is_closure(*a)) {
           SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
           SCode* c = cl ? cl->code : as_code(*a);
-          if (c->num_args != 0) {
+          if (c->arity != 0) {
             RUNTIME_ERROR("snap_arity_error", "recover expects a function without arguments");
           }
           frame->pc = pc;
@@ -1623,13 +1709,119 @@ static SValue parse_map(Snap* snap, SnapLex* lex) {
   return create_obj(map);
 }
 
-static SValue parse_quote(Snap* snap, SnapLex* lex) {
+// 'x, ~x and ~@x read as (quote x), (unquote x) and (splice x)
+static SValue parse_wrap(Snap* snap, SnapLex* lex, int form) {
   SCons* sexpr = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
-  sexpr->first = create_form(TK_QUOTE);
+  sexpr->first = create_form(form);
   sexpr->rest = create_obj(snap_cons_new(snap));
   as_cons(sexpr->rest)->first = parse_expr(snap, lex, snap_lex_next_token(lex));
   snap_release(snap);
   return create_obj(sexpr);
+}
+
+bool builtin_list(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_concat(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_vec(Snap* snap, const SValue* args, int num_args, SValue* result);
+
+// Whether expr is (form x)
+static bool is_wrapped(SValue expr, int form) {
+  return is_cons(expr) && !is_empty(expr) && is_form(as_cons(expr)->first) &&
+         as_form(as_cons(expr)->first) == form;
+}
+
+static SValue quasi(Snap* snap, SValue expr);
+
+// Code that makes a list of the quasiquoted elements: (list a b) or, if
+// some are spliced in, (concat (list a) b). The functions themselves go in
+// the code rather than their names, so locals can't hide them.
+static SValue quasi_list(Snap* snap, SCons* elems) {
+  SnapList code = { NULL, NULL };
+  SCons* curr;
+  SValue* slot;
+  bool splice = false;
+  for (curr = elems; curr; curr = as_cons(curr->rest)) {
+    if (is_wrapped(curr->first, TK_SPLICE)) splice = true;
+  }
+  *list_add(snap, &code) = create_cfunc(splice ? builtin_concat : builtin_list);
+  for (curr = elems; curr; curr = as_cons(curr->rest)) {
+    slot = list_add(snap, &code);
+    if (is_wrapped(curr->first, TK_SPLICE)) {
+      *slot = nth(as_cons(curr->first), 1);
+    } else if (splice) {
+      SnapList part = { NULL, NULL };
+      *list_add(snap, &part) = create_cfunc(builtin_list);
+      *list_add(snap, &part) = create_nil();
+      part.tail->first = quasi(snap, curr->first);
+      *slot = list_done(snap, &part);
+    } else {
+      *slot = quasi(snap, curr->first);
+    }
+  }
+  return list_done(snap, &code);
+}
+
+// Expands `expr into code that builds it, with ~x replaced by the value of x
+// and ~@x by the elements of x. Symbols and special forms are quoted, and
+// other atoms are their own value.
+static SValue quasi(Snap* snap, SValue expr) {
+  int i;
+  SnapList code = { NULL, NULL };
+  switch (snap_type(expr)) {
+    case STYPE_CONS:
+      if (is_empty(expr)) return expr;
+      if (is_wrapped(expr, TK_UNQUOTE)) return nth(as_cons(expr), 1);
+      if (is_wrapped(expr, TK_SPLICE)) {
+        raise(snap, "snap_parse_error", "~@ must be in a list or vector");
+      }
+      return quasi_list(snap, as_cons(expr));
+    case STYPE_VEC: {
+      SVec* vec = as_vec(expr);
+      SVec* out;
+      for (i = 0; i < vec->len; ++i) {
+        if (is_wrapped(*snap_vec_at(vec, i), TK_SPLICE)) break;
+      }
+      if (i < vec->len) { // A splice: (vec (concat ...)) of the elements as a list
+        SValue elems;
+        for (i = 0; i < vec->len; ++i) *list_add(snap, &code) = *snap_vec_at(vec, i);
+        elems = list_done(snap, &code);
+        snap_anchor(snap, as_obj(elems));
+        code.head = NULL;
+        *list_add(snap, &code) = create_cfunc(builtin_vec);
+        *list_add(snap, &code) = create_nil();
+        code.tail->first = quasi_list(snap, as_cons(elems));
+        expr = list_done(snap, &code);
+        snap_release(snap);
+        return expr;
+      }
+      out = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, vec->len));
+      for (i = 0; i < vec->len; ++i) {
+        SValue val = quasi(snap, *snap_vec_at(vec, i));
+        snap_vec_push(snap, out, val);
+      }
+      snap_release(snap);
+      return create_obj(out);
+    }
+    case STYPE_MAP: {
+      SMap* map = as_map(expr);
+      SMap* out = (SMap*)snap_anchor(snap, (SObject*)snap_map_new(snap));
+      for (i = 0; i < map->used; ++i) { // A literal has no deleted entries
+        SValue key = quasi(snap, map->entries[2 * i]), val;
+        if (is_obj(key)) snap_anchor(snap, as_obj(key));
+        val = quasi(snap, map->entries[2 * i + 1]);
+        snap_map_put(snap, out, key, val);
+        if (is_obj(key)) snap_release(snap);
+      }
+      snap_release(snap);
+      return create_obj(out);
+    }
+    case STYPE_SYM:
+    case STYPE_FORM:
+      *list_add(snap, &code) = create_form(TK_QUOTE);
+      *list_add(snap, &code) = expr;
+      return list_done(snap, &code);
+    default:
+      return expr;
+  }
 }
 
 static SValue parse_int(Snap* snap, SnapLex* lex) {
@@ -1672,7 +1864,18 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case '{':
       return parse_map(snap, lex);
     case '\'':
-      return parse_quote(snap, lex);
+      return parse_wrap(snap, lex, TK_QUOTE);
+    case '~':
+      return parse_wrap(snap, lex, TK_UNQUOTE);
+    case TK_SPLICE:
+      return parse_wrap(snap, lex, TK_SPLICE);
+    case '`': {
+      SValue expr = parse_expr(snap, lex, snap_lex_next_token(lex)), code;
+      if (is_obj(expr)) snap_anchor(snap, as_obj(expr));
+      code = quasi(snap, expr);
+      if (is_obj(expr)) snap_release(snap);
+      return code;
+    }
     case TK_INT:
       return parse_int(snap, lex);
     case TK_FLOAT:
@@ -1691,6 +1894,7 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
       return create_nil();
     case TK_BEGIN:
     case TK_DEF:
+    case TK_DEFMACRO:
     case TK_ELLIPSIS:
     case TK_IF:
     case TK_FN:
@@ -1758,6 +1962,9 @@ typedef struct SnapFnState_ {
   uint32_t upvals[MAX_UPVALS]; // (index << 1) | islocal
   int num_upvals;
   int num_args;
+  bool variadic;   // The last parameter takes the rest of the arguments
+  bool top;        // Code from snap_compile(), which can't see the locals of
+                   // the function whose macro is compiling it
   int depth;       // Scope depth; 0 is top-level, where def makes globals
   int stack;       // Operand stack depth at this point in the code
   int max_stack;
@@ -1813,6 +2020,7 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   memcpy(c->upvals, fs->upvals, fs->num_upvals * sizeof(uint32_t));
   c->num_upvals = fs->num_upvals;
   c->num_args = fs->num_args;
+  c->arity = fs->variadic ? -1 : fs->num_args;
   c->num_locals = fs->max_locals;
   c->max_stack_size = fs->max_stack + 2; /* Add enough room for raising errors */
   snap->num_bytes_alloced += code_extra_bytes(c);
@@ -2021,7 +2229,7 @@ static int add_upval(Snap* snap, SnapFnState* fs, int index, bool islocal) {
 
 static int resolve_upval(Snap* snap, SnapFnState* fs, SSym* name) {
   int index;
-  if (!fs->up) return -1;
+  if (fs->top) return -1;
   index = resolve_local(fs->up, name);
   if (index >= 0) {
     fs->up->locals[index].captured = true;
@@ -2118,18 +2326,6 @@ static void make_read_only(SValue expr) {
   }
 }
 
-static int list_length(SCons* list) {
-  int count = 0;
-  for (; list; list = as_cons(list->rest)) count++;
-  return count;
-}
-
-// The nth element; the list must have more than n elements
-static SValue nth(SCons* list, int n) {
-  while (n-- > 0) list = as_cons(list->rest);
-  return list->first;
-}
-
 static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail);
 
 // A local or literal as a binary op operand, emitting nothing; 0 otherwise
@@ -2185,6 +2381,51 @@ static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
   emit(fs, LOAD_NIL, 0); /* TODO: Hack */
 }
 
+bool builtin_make_macro(Snap* snap, const SValue* args, int num_args, SValue* result);
+static void compile_fn(Snap* snap, SnapFnState* up, SCons* args);
+
+// (defmacro name [params] body...) compiles like (def name (fn [params]
+// body...)), with the function marked as a macro
+static void compile_defmacro(Snap* snap, SnapFnState* fs, SCons* args) {
+  if (!args || !is_sym(args->first)) {
+    raise(snap, "snap_compile_error", "Expected (defmacro <id> [<params>] <expr>...)");
+  }
+  if (fs->depth > 0 || !fs->top) {
+    raise(snap, "snap_compile_error", "defmacro must be at the top level");
+  }
+  compile_fn(snap, fs, as_cons(args->rest));
+  load_constant(snap, fs, create_cfunc(builtin_make_macro));
+  emit(fs, CALL, 1);
+  emit(fs, STORE_GLOBAL, add_constant(snap, fs, args->first));
+  emit(fs, LOAD_NIL, 0); /* TODO: Hack */
+}
+
+// The macro that (name args...) calls: the value of the global `name`, if
+// it's a macro and no local or closed over variable has the name
+static bool find_macro(SnapFnState* fs, SValue name, SValue* macro) {
+  SValue val;
+  for (; fs; fs = fs->up) {
+    if (resolve_local(fs, as_sym(name)) >= 0) return false;
+    if (fs->top) break;
+  }
+  val = as_sym(name)->value;
+  if (!is_obj(val) || !as_obj(val)->macro) return false;
+  *macro = val;
+  return true;
+}
+
+// Calls a macro with the forms it was given, unevaluated, and returns the
+// form it makes: an error if it panics or returns one
+static SValue expand(Snap* snap, SValue macro, SCons* args) {
+  int i, n = list_length(args);
+  SValue* argv = (SValue*)malloc((n + 1) * sizeof(SValue));
+  SValue form;
+  for (i = 0; i < n; ++i, args = as_cons(args->rest)) argv[i] = args->first;
+  form = snap_call(snap, macro, argv, n); // The arguments are rooted by the call
+  free(argv);
+  return form;
+}
+
 static void compile_set(Snap* snap, SnapFnState* fs, SCons* args) {
   if (list_length(args) != 2 || !is_sym(args->first)) {
     raise(snap, "snap_compile_error", "Expected (set! <id> <expr>)");
@@ -2214,6 +2455,7 @@ static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
 
 static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   int i;
+  SSym* amp;
   SVec* params;
   SnapFnState* fs;
   SCode* code;
@@ -2229,17 +2471,27 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   fs = fn_state_new(snap);
   fs->depth = 1; // def inside a fn makes locals
 
+  // [a b & more] puts the arguments after the first two in a list, `more`
+  amp = snap_sym_new(snap, "&");
   for (i = 0; i < params->len; ++i) {
-    if (!is_sym(*snap_vec_at(params, i))) {
+    SValue param = *snap_vec_at(params, i);
+    if (!is_sym(param)) {
       raise(snap, "snap_compile_error", "Expected symbol");
     }
-    add_local(snap, fs, as_sym(*snap_vec_at(params, i)), false);
+    if (as_sym(param) == amp) {
+      if (i != params->len - 2) {
+        raise(snap, "snap_compile_error", "Expected one parameter after &");
+      }
+      fs->variadic = true;
+      continue;
+    }
+    add_local(snap, fs, as_sym(param), false);
   }
-  fs->num_args = params->len;
+  fs->num_args = fs->num_locals;
 
   fs->fn_loop.top = 0;
   fs->fn_loop.base = 0;
-  fs->fn_loop.count = params->len;
+  fs->fn_loop.count = fs->num_args;
   fs->fn_loop.closes = contains_form(args->rest, TK_FN);
   fs->loop = &fs->fn_loop;
 
@@ -2525,9 +2777,24 @@ static void compile_call(Snap* snap, SnapFnState* fs, SCons* sexpr) {
 
 static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   SCons* args = as_cons(sexpr->rest);
+  SValue macro, form;
   switch (snap_type(sexpr->first)) {
     case STYPE_SYM:
+      if (find_macro(fs, sexpr->first, &macro)) {
+        form = expand(snap, macro, args);
+        if (is_err(form)) {
+          snap->cause = as_err(form);
+          longjmp(snap->jmp, 1);
+        }
+        if (is_obj(form)) snap_anchor(snap, as_obj(form));
+        compile(snap, fs, form, tail);
+        if (is_obj(form)) snap_release(snap);
+        break;
+      }
+      compile_call(snap, fs, sexpr);
+      break;
     case STYPE_CONS:
+    case STYPE_CFUNC: // From quasiquote
       compile_call(snap, fs, sexpr);
       break;
     case STYPE_FORM:
@@ -2540,6 +2807,13 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
           break;
         case TK_DEF:
           compile_def(snap, fs, args);
+          break;
+        case TK_DEFMACRO:
+          compile_defmacro(snap, fs, args);
+          break;
+        case TK_UNQUOTE:
+        case TK_SPLICE:
+          raise(snap, "snap_compile_error", "~ and ~@ must be in a quasiquote (`)");
           break;
         case TK_IF:
           compile_if(snap, fs, args, tail);
@@ -2617,6 +2891,7 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
     case STYPE_STR:
     case STYPE_BOOL:
     case STYPE_KEY:
+    case STYPE_CFUNC: // From quasiquote
       load_constant(snap, fs, expr);
       break;
     case STYPE_NIL:
@@ -2648,27 +2923,29 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   adjust_stack(fs, 1);
 }
 
-SValue snap_compile(Snap* snap, const char* str) {
-  SnapLex lex;
+// Compiles the forms from lex into a function without arguments: all of
+// them, or just the next one. A macro can compile code (with the compile
+// built-in) while its caller is being compiled, so this saves and restores the
+// compiler's state.
+static SValue compile_forms(Snap* snap, SnapLex* lex, bool all) {
   SValue expr, result;
   SnapFnState* fs;
+  SnapFnState* up = snap->fn_state;
   SCode* code;
   bool first = true;
   int num_anchors = snap->anchors.vsize;
+  jmp_buf jmp;
 
-  lex.buf = str;
-  lex.buf_size = strlen(lex.buf);
-  lex.p = lex.buf;
-  lex.line = 1;
-
+  memcpy(jmp, snap->jmp, sizeof(jmp_buf));
   if (setjmp(snap->jmp) > 0) {
-    while (snap->fn_state) fn_state_free(snap);
+    while (snap->fn_state != up) fn_state_free(snap);
     result = create_obj(snap->cause);
     goto done;
   }
 
   fs = fn_state_new(snap);
-  while (parse(snap, &lex, &expr)) {
+  fs->top = true;
+  while ((all || first) && parse(snap, lex, &expr)) {
     if (is_obj(expr)) snap_anchor(snap, as_obj(expr));
 #ifdef SNAP_DEBUG
     snap_print(expr);
@@ -2692,18 +2969,85 @@ SValue snap_compile(Snap* snap, const char* str) {
   result = create_obj(code);
 
 done:
+  memcpy(snap->jmp, jmp, sizeof(jmp_buf));
   snap->anchors.vsize = num_anchors; // Also unwinds anchors left by a longjmp
   return result;
 }
 
+static void lex_init(SnapLex* lex, const char* str) {
+  lex->buf = str;
+  lex->buf_size = strlen(lex->buf);
+  lex->p = lex->buf;
+  lex->line = 1;
+}
+
+SValue snap_compile(Snap* snap, const char* str) {
+  SnapLex lex;
+  lex_init(&lex, str);
+  return compile_forms(snap, &lex, true);
+}
+
 SValue snap_run(Snap* snap, SValue fn) {
-  push_frame(snap, as_code(fn), snap->stack, NULL);
+  return snap_call(snap, fn, NULL, 0);
+}
+
+SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
+  SValue* base = snap->frames.vsize > 0 ? mvec_back(&snap->frames).stack_top : snap->stack;
+  SValue rest = create_empty();
+  SnapList list = { NULL, NULL };
+  SnapFrame* frame;
+  SClosure* cl;
+  SCode* c;
+  ptrdiff_t offset;
+  int i, n = num_args;
+
+  if (is_cfunc(fn)) {
+    SValue result = create_nil();
+    as_cfunc(fn)(snap, args, num_args, &result); // On failure result is the error
+    return result;
+  }
+  if (!is_code(fn) && !is_closure(fn)) {
+    return create_obj(snap_err_new_format(snap, "snap_type_error", "Value is not callable"));
+  }
+  cl = is_closure(fn) ? as_closure(fn) : NULL;
+  c = cl ? cl->code : as_code(fn);
+  if (num_args != c->arity) {
+    if (c->arity >= 0 || num_args < c->num_args - 1) {
+      return create_obj(snap_err_new_format(snap, "snap_arity_error", "Invalid number of arguments"));
+    }
+    n = c->num_args - 1;
+    for (i = n; i < num_args; ++i) *list_add(snap, &list) = args[i];
+    rest = list_done(snap, &list); // Rooted again by the frame before anything allocates
+  }
+
+  // The arguments can be in the stack, which push_frame() can move
+  offset = args >= snap->stack && args < snap->stack_end ? args - snap->stack : -1;
+  push_frame(snap, c, base, cl);
+  if (offset >= 0) args = snap->stack + offset;
+  frame = &mvec_back(&snap->frames);
+  if (n > 0) memmove(frame->stack_base, args, n * sizeof(SValue));
+  if (c->arity < 0) frame->stack_base[n] = rest;
+  frame->stop = true;
   return exec(snap);
 }
 
+// Runs each form as soon as it's compiled, so that a macro can be used by
+// the forms after it. Stops at an error.
 SValue snap_exec(Snap* snap, const char* str) {
-  SValue fn = snap_compile(snap, str);
-  return is_code(fn) ? snap_run(snap, fn) : fn; // nil or an error
+  SnapLex lex;
+  SValue fn, result = create_nil();
+  int num_anchors = snap->anchors.vsize;
+  lex_init(&lex, str);
+  for (;;) {
+    fn = compile_forms(snap, &lex, false);
+    if (!is_code(fn)) break;
+    snap->anchors.vsize = num_anchors; // Releases the last result
+    result = snap_run(snap, fn);
+    if (is_err(result)) break;
+    if (is_obj(result)) snap_anchor(snap, as_obj(result));
+  }
+  snap->anchors.vsize = num_anchors;
+  return is_err(fn) ? fn : result; // An error, or the last result
 }
 
 /* Printing */
@@ -2724,6 +3068,9 @@ static const char* form_name(int token) {
   switch (token) {
     case TK_BEGIN: return "begin";
     case TK_DEF: return "def";
+    case TK_DEFMACRO: return "defmacro";
+    case TK_UNQUOTE: return "unquote";
+    case TK_SPLICE: return "splice";
     case TK_ELLIPSIS: return "...";
     case TK_IF: return "if";
     case TK_FN: return "fn";
@@ -3024,18 +3371,27 @@ bool builtin_map(Snap* snap, const SValue* args, int num_args, SValue* result) {
 
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 1) return arity_error(snap, result);
-  if (is_vec(args[0])) {
+  if (is_cons(args[0])) {
+    *result = create_int(list_length(as_cons(args[0])));
+  } else if (is_vec(args[0])) {
     *result = create_int(as_vec(args[0])->len);
   } else if (is_map(args[0])) {
     *result = create_int(as_map(args[0])->len);
   } else {
-    return fail(snap, result, "snap_type_error", "Expected a vector or map");
+    return fail(snap, result, "snap_type_error", "Expected a vector, map or list");
   }
   return true;
 }
 
-// (nth <vec> <index>)
+// (nth <vec> <index>) or (nth <list> <index>)
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args == 2 && is_cons(args[0]) && is_int(args[1])) {
+    if (as_int(args[1]) < 0 || as_int(args[1]) >= list_length(as_cons(args[0]))) {
+      return fail(snap, result, "snap_index_error", "Index out of range");
+    }
+    *result = nth(as_cons(args[0]), as_int(args[1]));
+    return true;
+  }
   if (!vec_args(snap, args, num_args, 2, result)) return false;
   *result = *snap_vec_at(as_vec(args[0]), as_int(args[1]));
   return true;
@@ -3167,6 +3523,149 @@ bool builtin_vals(Snap* snap, const SValue* args, int num_args, SValue* result) 
   return map_entries(snap, args, num_args, 1, result);
 }
 
+/* Lists, mostly for macros. nil counts as an empty list. */
+
+static bool list_arg(Snap* snap, SValue val, SCons** list, SValue* result) {
+  if (is_nil(val)) {
+    *list = NULL;
+    return true;
+  }
+  if (!is_cons(val)) return fail(snap, result, "snap_type_error", "Expected a list");
+  *list = as_cons(val);
+  return true;
+}
+
+bool builtin_list(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i;
+  SnapList list = { NULL, NULL };
+  for (i = 0; i < num_args; ++i) *list_add(snap, &list) = args[i];
+  *result = list_done(snap, &list);
+  return true;
+}
+
+// (cons x list) is list with x in front
+bool builtin_cons(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SCons* list;
+  SCons* cell;
+  if (num_args != 2) return arity_error(snap, result);
+  if (!list_arg(snap, args[1], &list, result)) return false;
+  cell = snap_cons_new(snap);
+  cell->first = args[0];
+  cell->rest = list ? args[1] : create_empty();
+  *result = create_obj(cell);
+  return true;
+}
+
+// The first value of a list, or nil if it's empty
+bool builtin_first(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SCons* list;
+  if (num_args != 1) return arity_error(snap, result);
+  if (!list_arg(snap, args[0], &list, result)) return false;
+  *result = list ? list->first : create_nil();
+  return true;
+}
+
+// A list without its first value: () if it's empty
+bool builtin_rest(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SCons* list;
+  if (num_args != 1) return arity_error(snap, result);
+  if (!list_arg(snap, args[0], &list, result)) return false;
+  *result = list ? list->rest : create_empty();
+  return true;
+}
+
+// (concat a b...) is a new list of the values in the lists or vectors
+bool builtin_concat(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i, j;
+  SnapList list = { NULL, NULL };
+  SCons* curr;
+  for (i = 0; i < num_args; ++i) {
+    if (!is_vec(args[i]) && !list_arg(snap, args[i], &curr, result)) return false;
+  }
+  for (i = 0; i < num_args; ++i) {
+    if (is_vec(args[i])) {
+      for (j = 0; j < as_vec(args[i])->len; ++j) {
+        *list_add(snap, &list) = *snap_vec_at(as_vec(args[i]), j);
+      }
+    } else {
+      for (curr = is_nil(args[i]) ? NULL : as_cons(args[i]); curr; curr = as_cons(curr->rest)) {
+        *list_add(snap, &list) = curr->first;
+      }
+    }
+  }
+  *result = list_done(snap, &list);
+  return true;
+}
+
+// (vec list) is a new vector of the values in a list
+bool builtin_vec(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SCons* list;
+  SVec* vec;
+  if (num_args != 1) return arity_error(snap, result);
+  if (!list_arg(snap, args[0], &list, result)) return false;
+  vec = snap_vec_new(snap, list_length(list)); // The only allocation
+  for (; list; list = as_cons(list->rest)) snap_vec_push(snap, vec, list->first);
+  *result = create_obj(vec);
+  return true;
+}
+
+bool builtin_islist(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  *result = create_bool(is_cons(args[0]));
+  return true;
+}
+
+bool builtin_issym(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  *result = create_bool(is_sym(args[0]));
+  return true;
+}
+
+/* Macros */
+
+// Marks the function from defmacro (see compile_defmacro())
+bool builtin_make_macro(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  as_obj(args[0])->macro = true;
+  *result = args[0];
+  return true;
+}
+
+// (gensym) or (gensym <prefix>) makes a new symbol, #g1, #g2..., that can't
+// be the same as any in the code, for a macro's own variables
+bool builtin_gensym(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  char name[128];
+  if (num_args > 1 || (num_args == 1 && !is_str(args[0]))) {
+    return fail(snap, result, "snap_type_error", "Expected (gensym <prefix>)");
+  }
+  snprintf(name, sizeof(name), "#%.100s%d", num_args == 1 ? as_str(args[0])->data : "g",
+           ++snap->num_gensyms);
+  *result = create_obj(snap_sym_new(snap, name)); // Interned, so it lives forever
+  return true;
+}
+
+// (macroexpand form) expands form while it's a macro call (but not the forms
+// inside it), to show what a macro makes
+bool builtin_macroexpand(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int num_anchors = snap->anchors.vsize;
+  SValue form, macro;
+  if (num_args != 1) return arity_error(snap, result);
+  form = args[0];
+  while (is_cons(form) && !is_empty(form) && is_sym(as_cons(form)->first)) {
+    macro = as_sym(as_cons(form)->first)->value;
+    if (!is_obj(macro) || !as_obj(macro)->macro) break;
+    form = expand(snap, macro, as_cons(as_cons(form)->rest));
+    snap->anchors.vsize = num_anchors; // Releases the last expansion
+    if (is_err(form)) {
+      *result = form;
+      return false;
+    }
+    if (is_obj(form)) snap_anchor(snap, as_obj(form));
+  }
+  snap->anchors.vsize = num_anchors;
+  *result = form;
+  return true;
+}
+
 void snap_init(Snap* snap) {
   snap->stack_size = 64;
   snap->stack = (SValue*)malloc(snap->stack_size * sizeof(SValue));
@@ -3189,6 +3688,7 @@ void snap_init(Snap* snap) {
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
   snap->cause = NULL;
+  snap->num_gensyms = 0;
   snap->dump_code = false;
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
@@ -3214,6 +3714,16 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "str", builtin_str);
   snap_def_cfunc(snap, "compile", builtin_compile);
   snap_def_cfunc(snap, "gc-step", builtin_gc_step);
+  snap_def_cfunc(snap, "list", builtin_list);
+  snap_def_cfunc(snap, "cons", builtin_cons);
+  snap_def_cfunc(snap, "first", builtin_first);
+  snap_def_cfunc(snap, "rest", builtin_rest);
+  snap_def_cfunc(snap, "concat", builtin_concat);
+  snap_def_cfunc(snap, "vec", builtin_vec);
+  snap_def_cfunc(snap, "list?", builtin_islist);
+  snap_def_cfunc(snap, "sym?", builtin_issym);
+  snap_def_cfunc(snap, "gensym", builtin_gensym);
+  snap_def_cfunc(snap, "macroexpand", builtin_macroexpand);
 }
 
 void snap_destroy(Snap* snap) {

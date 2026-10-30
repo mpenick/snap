@@ -7,6 +7,7 @@ are fast, small and simple.
 ## Features
 
 * Closures
+* Macros (`defmacro` with quasiquote)
 * Tail recursion (`recur` and `loop`)
 * Byte code compiler and stack-based interpreter
 * Incremental mark-and-sweep GC with short pauses
@@ -47,15 +48,18 @@ make stress   # The same under ASan/UBSan, collecting all the time
 (println (fib 50))
 ```
 
-Special forms: `def`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
+Special forms: `def`, `defmacro`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
 `quote`, `and`, `or`, `not`, `try`, `panic`, `recover`, and the operators
 `+ - * / %` and `< <= > >= =`.
+
+A function's last parameter can take the rest of its arguments, as a list:
+`(fn [a & more] ...)` called with `1 2 3` gets `a` = 1 and `more` = `(2 3)`.
 
 `let` and `loop` bindings alternate names and values, and are bound in order,
 so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
-vectors, maps, lists (only from `quote`), `nil`, `true`, `false`, functions and
+vectors, maps, lists, `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
 arithmetic wraps on overflow, and mixing integers with floats gives a float.
 Strings can contain the escapes `\n`, `\t`, `\r`, `\\` and `\"`.
@@ -66,8 +70,12 @@ Built-in functions:
   returns `nil` at the end of input. On a terminal it uses readline and shows
   the prompt. It's defined in `main.c`, so programs that embed snap don't need
   readline.
-* Types: `nil?`, `vector?` and `map?`
+* Types: `nil?`, `vector?`, `map?`, `list?` and `sym?`
 * Errors: `err`, `err?`, `err-kind` and `err-msg`
+* Lists: `list`, `cons`, `first`, `rest`, `concat` (of lists and vectors)
+  and `vec` (a list to a vector). `count` and `nth` work on lists too. `nil`
+  counts as an empty list.
+* Macros: `gensym` and `macroexpand` (see below)
 * Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`
 * Strings: `(str s...)` joins strings
@@ -117,6 +125,46 @@ change one after using it as a key.
 Vectors and maps inside a quoted value, like `'[1 2]`, are read-only. A quoted
 value is a single constant shared by every evaluation, so changing one panics.
 
+## Macros
+
+A macro is a function that runs while the code is being compiled. It's given
+the forms it's called with, unevaluated, and returns a form that's compiled in
+place of the call.
+
+```clojure
+(defmacro unless [c & body] `(if ~c nil (begin ~@body)))
+(unless (= x 0) (println "not zero") x)
+; is compiled as
+(if (= x 0) nil (begin (println "not zero") x))
+```
+
+Quasiquote (`` ` ``) is like `quote` but makes a new form each time, with
+`~x` replaced by the value of `x` and `~@x` by the values in the list (or
+vector) `x`. Symbols and special forms in it are quoted.
+
+`(gensym)` makes a new symbol (`#g1`, `#g2`...) that can't clash with any in
+the code, for the macro's own variables:
+
+```clojure
+(defmacro swap! [a b]
+  (let [t (gensym)] `(let [~t ~a] (set! ~a ~b) (set! ~b ~t))))
+```
+
+`(macroexpand form)` shows what a macro call becomes:
+`(macroexpand '(unless c a))` gives `(if c nil (begin a))`.
+
+Macros are global, and `defmacro` can only be used at the top level. A local
+variable with a macro's name hides it. A file runs one top-level form at a
+time, so a macro can be used by the forms after it, and its code can call the
+functions defined before it. (Code given to `compile` is compiled all at once,
+so a macro it defines can only be used by later code.) A macro that panics,
+or returns an error, makes the code that calls it fail to compile.
+
+Macros aren't hygienic: a macro's code refers to functions by name, so a local
+with the same name at the call would be used instead. Special forms can't be
+hidden, so `if`, `let`, `fn` and the rest are safe, as are the functions that
+quasiquote uses.
+
 ## Errors
 
 There are no exceptions. An error is an ordinary value that's returned and
@@ -152,8 +200,8 @@ can come out of is marked in the source.
 ```
 
 `(panic kind msg)` is for bugs. It stops the program, as do type errors,
-division by zero and calls with the wrong number of arguments. An error that
-`try` returns from the top level of a script also stops it.
+division by zero and calls with the wrong number of arguments. A top-level
+form whose value is an error (such as from `try`) also stops a script.
 
 `(recover f)` is the one place a panic stops. It calls `f` without arguments,
 and if `f` panics, the panic's error is the result instead. It's meant for
@@ -180,6 +228,12 @@ string in `repl.h`: it reads lines until `compile` stops returning
   magnitude is between about 1e-38 and 6e38, or it's zero: its bits are
   rotated and its exponent offset to make room for the tag, keeping the whole
   mantissa, so it's exact. Other floats (and infinities and NaN) are boxed.
+* **Macros** are functions with a flag set by `defmacro`. When the compiler
+  sees a call to a global that's a macro, it calls it (with `snap_call()`,
+  which can run snap code from C, even from inside a C function) and
+  compiles the result. Quasiquote is expanded by the reader into calls to
+  `list` and `concat`, which go in the code as the functions themselves
+  rather than their names.
 * **The compiler** turns each form straight into byte code, one 32-bit
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a

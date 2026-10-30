@@ -1,8 +1,9 @@
 #include <string.h>
 #include <stdio.h>
 
+// Above 127, since characters like '(' are their own tokens
 enum {
-  TK_INVALID,
+  TK_INVALID = 128,
   TK_TOO_BIG,
   TK_INT,
   TK_FLOAT,
@@ -14,6 +15,7 @@ enum {
   TK_NIL,
   TK_BEGIN,
   TK_DEF,
+  TK_DEFMACRO,
   TK_ELLIPSIS,
   TK_IF,
   TK_FN,
@@ -28,6 +30,8 @@ enum {
   TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
   TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ,
   TK_AND, TK_OR, TK_NOT,
+  TK_UNQUOTE, // ~x, never lexed
+  TK_SPLICE,  // ~@x
   TK_EOF
 };
 
@@ -80,9 +84,9 @@ int snap_lex_next_token(SnapLex* lex) {
     ws = [ \t];
     comment = ";" [^\r\n]*;
     nl = '\r\n' | '\n';
-    id = (alnum | [_\+\-\*\?/=,<>!])+;
+    id = (alnum | [_\+\-\*\?/=,<>!&])+;
     key = ':' id ;
-    chars = '\'' | '(' | ')' | '[' | ']' | '{' | '}';
+    chars = '\'' | '`' | '~' | '(' | ')' | '[' | ']' | '{' | '}';
     integer = [\+\-]? digit+;
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
     string = "\"" ([^\r\n\"\\] | "\\" [^\r\n])* "\"";
@@ -90,6 +94,8 @@ int snap_lex_next_token(SnapLex* lex) {
     main := |*
       'begin' => { token = TK_BEGIN; fbreak; };
       'def' | 'define' => { token = TK_DEF; fbreak; };
+      'defmacro' => { token = TK_DEFMACRO; fbreak; };
+      '~@' => { token = TK_SPLICE; fbreak; };
       'if' => { token = TK_IF; fbreak; };
       'fn' => { token = TK_FN; fbreak; };
       'let' => { token = TK_LET; fbreak; };

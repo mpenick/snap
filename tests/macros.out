@@ -1,0 +1,46 @@
+(1 2 3)
+()
+(0 1 2) (0)
+1 nil nil
+(2) () ()
+(1 2 3 4 5)
+[1 2 3] []
+3 0 b
+true true false false
+true false false
+true false false true
+:found
+(1 ()) (1 (2 3))
+() (1 2)
+<err :snap_arity_error "Invalid number of arguments">
+10
+(a 3 4 5 b)
+(a (b 4))
+[1 3 4 5]
+{:a 3}
+(if 3 1 2)
+()
+(3 4 5)
+2
+nil
+2 1
+[:b :a]
+(:wrapped 3)
+true 1 3 false
+:neg :zero :pos
+[0 1 2]
+3
+12
+(if c nil (begin a b))
+(if a (my-and b) false)
+(+ 1 2)
+5
+:compiled
+:ran
+<err :bad "bad macro">
+<err :syntax "bad syntax">
+<err :snap_compile_error "defmacro must be at the top level">
+<err :snap_compile_error "~ and ~@ must be in a quasiquote (`)">
+<err :snap_parse_error "~@ must be in a list or vector">
+<err :snap_compile_error "Expected one parameter after &">
+<err :bad "bad macro">

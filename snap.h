@@ -108,7 +108,8 @@ typedef struct {
 #define SOBJECT_FIELDS          \
   uint8_t type;                 \
   uint8_t mark;                 \
-  uint8_t read_only; /* Vectors and maps from quote */
+  uint8_t read_only; /* Vectors and maps from quote */ \
+  uint8_t macro;     /* Functions from defmacro */
 
 struct SObject_ {
   SOBJECT_FIELDS
@@ -211,6 +212,7 @@ struct SCode_ {
   int num_constants;
   int num_upvals;
   int num_args;
+  int arity; // num_args, or -1 if the last parameter takes the rest (a list)
   int num_locals;
   int max_stack_size;
 };
@@ -222,6 +224,7 @@ typedef struct SnapFrame_ {
   SValue* stack_base;
   SValue* stack_top;
   bool recover; // Called by recover: a panic unwinds to here
+  bool stop;    // Called from C: exec() returns when it returns or panics
 } SnapFrame;
 
 // Objects live in pages of slots of one size, or a page of their own if
@@ -267,7 +270,8 @@ struct Snap_ {
   struct SnapFnState_* fn_state; // Innermost function being compiled
   SErr* cause;
   jmp_buf jmp;
-  bool dump_code; // Print the bytecode from snap_exec() before running it
+  int num_gensyms;
+  bool dump_code; // Print the bytecode from snap_compile() and snap_exec()
 };
 
 #define is_int(v) ((v).bits & 1)
@@ -395,6 +399,12 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
 SValue snap_compile(Snap* snap, const char* str);
 // Runs a function from snap_compile()
 SValue snap_run(Snap* snap, SValue fn);
+// Calls a function. Returns an error value if it panics. The arguments must be
+// rooted.
+SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args);
+// Compiles and runs the forms in str one at a time. Returns the last one's
+// value, or the first error (one that doesn't compile, or a panic or error
+// value from running one).
 SValue snap_exec(Snap* snap, const char* str);
 void snap_print(SValue value);
 
