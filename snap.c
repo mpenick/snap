@@ -93,6 +93,9 @@ enum {
   XX(ROT3) \
   XX(CALL) \
   XX(CALL_GLOBAL) \
+  XX(NTH) \
+  XX(COUNT) \
+  XX(GET) \
   XX(CLOSURE) \
   XX(CLOSE_UPVALS) \
   XX(RETURN) \
@@ -1422,6 +1425,11 @@ static inline bool num_val(const SValue* v, SnapFloat* f) {
 #define DISPATCH() continue
 #endif
 
+// Built-ins that the NTH, COUNT and GET instructions compare globals with
+bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result);
+
 // Unwinds a panic to the innermost frame called by recover and pushes the
 // error as its result. Returns false, with this exec()'s frames gone, when
 // there isn't one. Kept out of exec(), where it slows down the other handlers.
@@ -1569,8 +1577,53 @@ new_frame:
         *(stack - 2) = temp;
         DISPATCH();
       }
+      // (nth v i), (count x) and (get m k) are calls to globals, as with
+      // CALL_GLOBAL, that do the common cases themselves while the global is
+      // still the built-in
+#define builtin_global(fn) (as_sym(constants[arg >> 8])->value.bits == create_cfunc(fn).bits)
+      OP(NTH) {
+        a = stack - 2;
+        b = stack - 1;
+        if (builtin_global(builtin_nth) && is_vec(*a) && is_int(*b) &&
+            (uint64_t)as_int(*b) < (uint64_t)as_vec(*a)->len) {
+          *a = *snap_vec_at(as_vec(*a), (int)as_int(*b));
+          stack--;
+          DISPATCH();
+        }
+        goto call_global;
+      }
+      OP(COUNT) {
+        a = stack - 1;
+        if (builtin_global(builtin_count) && (is_vec(*a) || is_map(*a))) {
+          *a = create_int(is_vec(*a) ? as_vec(*a)->len : as_map(*a)->len);
+          DISPATCH();
+        }
+        goto call_global;
+      }
+      OP(GET) {
+        SValue* val;
+        a = stack - 2;
+        b = stack - 1;
+        if (builtin_global(builtin_get)) {
+          if (is_struct(*a) && (val = struct_field(as_struct(*a), *b))) {
+            *a = *val;
+            stack--;
+            DISPATCH();
+          }
+          if (is_map(*a)) {
+            val = snap_map_get(as_map(*a), *b);
+            *a = val ? *val : create_nil();
+            stack--;
+            DISPATCH();
+          }
+        }
+        goto call_global;
+      }
+#undef builtin_global
       OP(CALL_GLOBAL) {
-        SSym* sym = as_sym(constants[arg >> 8]);
+        SSym* sym;
+      call_global:
+        sym = as_sym(constants[arg >> 8]);
         if (is_undef(sym->value)) {
           RUNTIME_ERROR("snap_name_error", "'%s' is not defined", sym->data);
         }
@@ -2237,6 +2290,16 @@ static int emit_binary(SnapFnState* fs, int op) {
   return emit_binary_operands(fs, op, left, right);
 }
 
+// The instruction for a call to a global: CALL_GLOBAL, or one of the
+// instructions for built-ins that do their common cases themselves
+static int call_op(SnapFnState* fs, int index, int num_args) {
+  const char* name = as_sym(fs->constants.vitems[index])->data;
+  if (num_args == 2 && strcmp(name, "nth") == 0) return NTH;
+  if (num_args == 1 && strcmp(name, "count") == 0) return COUNT;
+  if (num_args == 2 && strcmp(name, "get") == 0) return GET;
+  return CALL_GLOBAL;
+}
+
 static int emit(SnapFnState* fs, int op, int arg) {
   if (is_binary_op(op)) {
     return emit_binary(fs, op);
@@ -2256,7 +2319,7 @@ static int emit(SnapFnState* fs, int op, int arg) {
     if (op == CALL && last == LOAD_GLOBAL && arg < 256) {
       SnapInst* inst = &fs->insts.vitems[pc(fs) - 1];
       if (INST_ARG(*inst) < 32768) {
-        *inst = INST(CALL_GLOBAL, INST_ARG(*inst) << 8 | arg);
+        *inst = INST(call_op(fs, INST_ARG(*inst), arg), INST_ARG(*inst) << 8 | arg);
         adjust_stack(fs, -1 - arg); // Pops the arguments and the function, pushes the result
         return pc(fs) - 1;
       }
@@ -3485,7 +3548,7 @@ static void print_code(SCode* code, int indent) {
       case CALL: case CLOSE_UPVALS:
         printf(" %d", arg);
         break;
-      case CALL_GLOBAL:
+      case CALL_GLOBAL: case NTH: case COUNT: case GET:
         printf(" %-6d ", arg & 0xff);
         print_val(stdout, code->constants[arg >> 8]);
         break;

@@ -318,7 +318,10 @@ it.
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a
   local, so most of a tight loop doesn't touch the stack. A call to a global
-  is one instruction that carries the name. An expression whose value isn't
+  is one instruction that carries the name. Calls to `nth`, `count` and `get`
+  have instructions of their own that index vectors and look up maps and
+  struct fields themselves, as long as the globals still hold the built-ins
+  (otherwise, and for other arguments, they call the global). An expression whose value isn't
   used (all but the last in a body) is compiled without its value, so an `if`
   or `when` there doesn't push `nil` for a missing branch only to pop it.
 * **The VM** is a stack machine with computed-goto dispatch. Once a function

@@ -15,3 +15,11 @@
 inf inf
 3.500000 2.250000 true 0.500000
 <err :snap_type_error "Expected numbers"> false <err :snap_arith_error "Division by zero">
+:a :c 2 3 2 2 0
+1 2 nil :default 5 6
+<err :snap_index_error "Index out of range"> <err :snap_index_error "Index out of range"> <err :snap_type_error "Expected an integer index">
+<err :snap_type_error "Expected a vector, map or list"> <err :snap_key_error "P has no field :z"> <err :snap_type_error "Expected a map">
+[1 2 0] 3 7
+[:b 3 1]
+[[:my-nth 1] :my-count [:my-get :x]]
+[:b 3 1]
