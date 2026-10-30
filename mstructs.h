@@ -175,10 +175,10 @@ static inline void mvec_maybe_resize_(int size, int *capacity, size_t num_bytes,
 
 #define mvec_init(v, type, capacity)                                           \
   do {                                                                         \
-    if (capacity > 0) {                                                        \
-      (v)->vitems = (type *)mvec_realloc(NULL, capacity * sizeof(type));       \
+    if ((capacity) > 0) {                                                      \
+      (v)->vitems = (type *)mvec_realloc(NULL, (capacity) * sizeof(type));     \
     }                                                                          \
-    (v)->vcapacity = capacity;                                                 \
+    (v)->vcapacity = (capacity);                                               \
     (v)->vsize = 0;                                                            \
   } while (0)
 
