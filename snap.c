@@ -96,6 +96,7 @@ enum {
   XX(NTH) \
   XX(COUNT) \
   XX(GET) \
+  XX(INT) \
   XX(CLOSURE) \
   XX(CLOSE_UPVALS) \
   XX(RETURN) \
@@ -1263,6 +1264,9 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
   }
 }
 
+// Whether a float truncates to a 63-bit int (false for NaN)
+#define in_int_range(f) ((f) >= (SnapFloat)SNAP_INT_MIN && (f) < -(SnapFloat)SNAP_INT_MIN)
+
 // Sets *f to a number as a float, checking its kind once. Returns false if it
 // isn't a number.
 static inline bool num_val(const SValue* v, SnapFloat* f) {
@@ -1429,6 +1433,7 @@ static inline bool num_val(const SValue* v, SnapFloat* f) {
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result);
+static bool builtin_int(Snap* snap, const SValue* args, int num_args, SValue* result);
 
 // Unwinds a panic to the innermost frame called by recover and pushes the
 // error as its result. Returns false, with this exec()'s frames gone, when
@@ -1614,6 +1619,17 @@ new_frame:
             val = snap_map_get(as_map(*a), *b);
             *a = val ? *val : create_nil();
             stack--;
+            DISPATCH();
+          }
+        }
+        goto call_global;
+      }
+      OP(INT) {
+        a = stack - 1;
+        if (builtin_global(builtin_int) && is_imm_float(*a)) {
+          x = snap_imm_float_val(*a);
+          if (in_int_range(x)) {
+            *a = create_int((SnapInt)x);
             DISPATCH();
           }
         }
@@ -2297,6 +2313,7 @@ static int call_op(SnapFnState* fs, int index, int num_args) {
   if (num_args == 2 && strcmp(name, "nth") == 0) return NTH;
   if (num_args == 1 && strcmp(name, "count") == 0) return COUNT;
   if (num_args == 2 && strcmp(name, "get") == 0) return GET;
+  if (num_args == 1 && strcmp(name, "int") == 0) return INT;
   return CALL_GLOBAL;
 }
 
@@ -3548,7 +3565,7 @@ static void print_code(SCode* code, int indent) {
       case CALL: case CLOSE_UPVALS:
         printf(" %d", arg);
         break;
-      case CALL_GLOBAL: case NTH: case COUNT: case GET:
+      case CALL_GLOBAL: case NTH: case COUNT: case GET: case INT:
         printf(" %-6d ", arg & 0xff);
         print_val(stdout, code->constants[arg >> 8]);
         break;
@@ -4128,11 +4145,31 @@ static bool op_value(int token, SValue* val) {
   }
 XX(builtin_sqrt, create_float(snap, sqrt(x))) XX(builtin_sin, create_float(snap, sin(x)))
 XX(builtin_cos, create_float(snap, cos(x))) XX(builtin_float, create_float(snap, x))
-// (floor x) and (int x) (toward zero) are ints
-XX(builtin_floor, is_int(args[0]) ? args[0] : create_int((SnapInt)floor(x)))
-XX(builtin_int, is_int(args[0]) ? args[0] : create_int((SnapInt)x))
 XX(builtin_abs, is_int(args[0]) ? create_int(llabs(as_int(args[0]))) : create_float(snap, fabs(x)))
 #undef XX
+
+// (floor x) and (int x) (toward zero) are ints. Floats too big for one (or NaN)
+// are an error.
+static bool to_int(Snap* snap, const SValue* args, int num_args, bool round_down, SValue* result) {
+  SnapFloat x;
+  if (num_args != 1 || !num_val(&args[0], &x)) return fail(snap, result, "snap_type_error", "Expected a number");
+  if (is_int(args[0])) {
+    *result = args[0];
+    return true;
+  }
+  if (round_down) x = floor(x);
+  if (!in_int_range(x)) return fail(snap, result, "snap_arith_error", "Number is too big for an integer");
+  *result = create_int((SnapInt)x);
+  return true;
+}
+
+static bool builtin_floor(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return to_int(snap, args, num_args, true, result);
+}
+
+static bool builtin_int(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return to_int(snap, args, num_args, false, result);
+}
 
 bool builtin_atan2(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 2 || !is_num_p(&args[0]) || !is_num_p(&args[1])) {

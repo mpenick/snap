@@ -23,3 +23,7 @@ inf inf
 [:b 3 1]
 [[:my-nth 1] :my-count [:my-get :x]]
 [:b 3 1]
+2 -2 5 <err :snap_arith_error "Number is too big for an integer"> <err :snap_type_error "Expected a number">
+:my-int
+2
+<err :snap_arith_error "Number is too big for an integer"> <err :snap_arith_error "Number is too big for an integer"> <err :snap_arith_error "Number is too big for an integer"> 4000000000000000000 -4000000000000000000 true <err :snap_arith_error "Number is too big for an integer">
