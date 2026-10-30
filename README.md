@@ -177,8 +177,13 @@ string in `repl.h`: it reads lines until `compile` stops returning
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a
   local, so most of a tight loop doesn't touch the stack.
-* **The VM** is a stack machine with computed-goto dispatch. Closed-over
-  variables are shared between closures and closed when their frame returns.
+* **The VM** is a stack machine with computed-goto dispatch. Once a function
+  is compiled, each binary op is switched to a variant for its kinds of
+  operands (stack, local or constant), which handles ints without decoding
+  them and falls back to the general handler otherwise. Counting loops end in
+  a single `STEP` instruction that adds to the counter, compares it and jumps
+  back. Closed-over variables are shared between closures and closed when
+  their frame returns.
 * **The GC** is mark and sweep with an explicit mark stack. It collects once
   the heap has grown to twice what was live after the last collection.
 

@@ -68,7 +68,25 @@ enum {
   XX(STEP_LT) \
   XX(STEP_LE) \
   XX(STEP_GT) \
-  XX(STEP_GE)
+  XX(STEP_GE) \
+  BINARY_VARIANTS(XX, ADD) \
+  BINARY_VARIANTS(XX, SUB) \
+  BINARY_VARIANTS(XX, MUL) \
+  BINARY_VARIANTS(XX, DIV) \
+  BINARY_VARIANTS(XX, MOD) \
+  BINARY_VARIANTS(XX, LESS_THAN) \
+  BINARY_VARIANTS(XX, LESS_EQUALS) \
+  BINARY_VARIANTS(XX, GREATER_THAN) \
+  BINARY_VARIANTS(XX, GREATER_EQUALS) \
+  BINARY_VARIANTS(XX, EQUALS)
+
+// Each binary op has a variant for every kind of left and right operand:
+// S (stack), L (local) or K (constant), in this order. They have the same
+// encoding; specialize() picks them once a function is compiled.
+#define BINARY_VARIANTS(XX, op) \
+  XX(op##_SS) XX(op##_SL) XX(op##_SK) \
+  XX(op##_LS) XX(op##_LL) XX(op##_LK) \
+  XX(op##_KS) XX(op##_KL) XX(op##_KK)
 
 enum {
 #define XX(opcode) opcode,
@@ -95,6 +113,11 @@ enum {
   ((int)(((uint32_t)(dest) << 16) | (((uint32_t)(left) & 0xFF) << 8) | ((uint32_t)(right) & 0xFF)))
 #define MAX_OPERAND 127
 #define MAX_DEST 255
+
+#define operand_kind(n) ((n) == 0 ? 0 : (n) > 0 ? 1 : 2) // S, L or K
+#define variant(op, inst) \
+  (ADD_SS + ((op) - ADD) * 9 + operand_kind(OPERAND_LEFT(inst)) * 3 + operand_kind(OPERAND_RIGHT(inst)))
+#define variant_base(op) ((op) >= ADD_SS ? ADD + ((op) - ADD_SS) / 9 : (op))
 
 static const char* opcode_name(int op) {
   switch (op) {
@@ -899,6 +922,60 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
     RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
   }
 
+// Operand fetches for the variants. Right comes first, as in binary_operands().
+// A variant that falls back puts its stack operands back first.
+#define fetch_S(n) (--stack)
+#define fetch_L(n) (&locals[(n) - 1])
+#define fetch_K(n) (&constants[-(n) - 1])
+#define pops_S 1
+#define pops_L 0
+#define pops_K 0
+
+#define arith_variant(name, iop, ok, kl, kr) \
+  OP(name##_##kl##kr) { \
+    b = fetch_##kr(OPERAND_RIGHT(inst)); \
+    a = fetch_##kl(OPERAND_LEFT(inst)); \
+    if (is_int_p(a) && is_int_p(b) && (ok)) { \
+      uint64_t result = iop(a->bits, b->bits); \
+      if (OPERAND_DEST(inst)) { \
+        locals[OPERAND_DEST(inst) - 1].bits = result; \
+      } else { \
+        (stack++)->bits = result; \
+      } \
+      DISPATCH(); \
+    } \
+    stack += pops_##kl + pops_##kr; \
+    goto slow_##name; \
+  }
+
+#define compare_variant(name, op, kl, kr) \
+  OP(name##_##kl##kr) { \
+    b = fetch_##kr(OPERAND_RIGHT(inst)); \
+    a = fetch_##kl(OPERAND_LEFT(inst)); \
+    if (is_int_p(a) && is_int_p(b)) { \
+      cond = (SnapInt)a->bits op (SnapInt)b->bits; \
+      if (INST_OP(*pc) == JUMP_FALSE) { \
+        arg = INST_ARG(*pc++); \
+        if (!cond) pc += arg; \
+      } else { \
+        *stack++ = create_bool(cond); \
+      } \
+      DISPATCH(); \
+    } \
+    stack += pops_##kl + pops_##kr; \
+    goto slow_##name; \
+  }
+
+#define ARITH_VARIANTS(name, iop, ok) \
+  arith_variant(name, iop, ok, S, S) arith_variant(name, iop, ok, S, L) arith_variant(name, iop, ok, S, K) \
+  arith_variant(name, iop, ok, L, S) arith_variant(name, iop, ok, L, L) arith_variant(name, iop, ok, L, K) \
+  arith_variant(name, iop, ok, K, S) arith_variant(name, iop, ok, K, L) arith_variant(name, iop, ok, K, K)
+
+#define COMPARE_VARIANTS(name, op) \
+  compare_variant(name, op, S, S) compare_variant(name, op, S, L) compare_variant(name, op, S, K) \
+  compare_variant(name, op, L, S) compare_variant(name, op, L, L) compare_variant(name, op, L, K) \
+  compare_variant(name, op, K, S) compare_variant(name, op, K, L) compare_variant(name, op, K, K)
+
 // Integer ops on tagged words (2x + 1). They wrap on overflow, done unsigned
 // to avoid undefined behavior. 63-bit division can't overflow an int64_t.
 #define untag(x) ((SnapInt)(x) >> 1)
@@ -1175,10 +1252,13 @@ new_frame:
         *(stack - 1) = create_bool(is_falsy(*(stack - 1)));
         DISPATCH();
       }
-      OP(ADD) { binary_operands() arith_op(add_iop, add_fop) DISPATCH(); }
-      OP(SUB) { binary_operands() arith_op(sub_iop, sub_fop) DISPATCH(); }
-      OP(MUL) { binary_operands() arith_op(mul_iop, mul_fop) DISPATCH(); }
+      // The general handlers, which the variants fall back to for anything but
+      // ints (and division by zero)
+      OP(ADD) { slow_ADD: binary_operands() arith_op(add_iop, add_fop) DISPATCH(); }
+      OP(SUB) { slow_SUB: binary_operands() arith_op(sub_iop, sub_fop) DISPATCH(); }
+      OP(MUL) { slow_MUL: binary_operands() arith_op(mul_iop, mul_fop) DISPATCH(); }
       OP(DIV) {
+      slow_DIV:
         binary_operands()
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
@@ -1187,6 +1267,7 @@ new_frame:
         DISPATCH();
       }
       OP(MOD) {
+      slow_MOD:
         binary_operands()
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
@@ -1198,11 +1279,23 @@ new_frame:
       OP(STEP_LE) { step_op(<=) DISPATCH(); }
       OP(STEP_GT) { step_op(>) DISPATCH(); }
       OP(STEP_GE) { step_op(>=) DISPATCH(); }
-      OP(LESS_THAN)      { compare_op(<) DISPATCH();  }
-      OP(GREATER_THAN)   { compare_op(>) DISPATCH();  }
-      OP(LESS_EQUALS)    { compare_op(<=) DISPATCH(); }
-      OP(GREATER_EQUALS) { compare_op(>=) DISPATCH(); }
-      OP(EQUALS)         { compare_op(==) DISPATCH(); }
+      OP(LESS_THAN)      { slow_LESS_THAN: compare_op(<) DISPATCH();  }
+      OP(GREATER_THAN)   { slow_GREATER_THAN: compare_op(>) DISPATCH();  }
+      OP(LESS_EQUALS)    { slow_LESS_EQUALS: compare_op(<=) DISPATCH(); }
+      OP(GREATER_EQUALS) { slow_GREATER_EQUALS: compare_op(>=) DISPATCH(); }
+      OP(EQUALS)         { slow_EQUALS: compare_op(==) DISPATCH(); }
+
+      // The variants: operands fetched without decoding, ints only
+      ARITH_VARIANTS(ADD, add_iop, true)
+      ARITH_VARIANTS(SUB, sub_iop, true)
+      ARITH_VARIANTS(MUL, mul_iop, true)
+      ARITH_VARIANTS(DIV, div_iop, b->bits != 1) // Tagged 0 is 1
+      ARITH_VARIANTS(MOD, mod_iop, b->bits != 1)
+      COMPARE_VARIANTS(LESS_THAN, <)
+      COMPARE_VARIANTS(LESS_EQUALS, <=)
+      COMPARE_VARIANTS(GREATER_THAN, >)
+      COMPARE_VARIANTS(GREATER_EQUALS, >=)
+      COMPARE_VARIANTS(EQUALS, ==)
 #ifndef INDIRECT_DISPATCH
     }
   }
@@ -1463,8 +1556,20 @@ static void fn_state_free(Snap* snap) {
   free(fs);
 }
 
+// Switches binary ops to the variant for their operand kinds. Done last, so
+// the compiler only deals with the base ops.
+static void specialize(SnapFnState* fs) {
+  int i;
+  for (i = 0; i < fs->insts.vsize; ++i) {
+    SnapInst* inst = &fs->insts.vitems[i];
+    int op = INST_OP(*inst);
+    if (is_binary_op(op)) *inst = (*inst & ~0xFFu) | variant(op, *inst);
+  }
+}
+
 static SCode* code_new(Snap* snap, SnapFnState* fs) {
   SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
+  specialize(fs);
   c->insts = fs->insts.vitems;
   c->insts_count = fs->insts.vsize;
   c->constants = fs->constants.vitems;
@@ -2522,7 +2627,7 @@ static void print_code(SCode* code, int indent) {
             (code->upvals[i] & 1) ? "local" : "upval", code->upvals[i] >> 1);
   }
   for (i = 0; i < code->insts_count; ++i) {
-    int op = INST_OP(code->insts[i]);
+    int op = variant_base(INST_OP(code->insts[i]));
     int arg = INST_ARG(code->insts[i]);
     iprintf(indent, "%6d %-18s", i, opcode_name(op));
     if (is_binary_op(op)) {
