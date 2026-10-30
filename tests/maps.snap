@@ -37,18 +37,18 @@
 
 ; Many puts and deletes: rebuilds, deleted entries skipped, order kept
 (def big {})
-(loop [[i 0]] (if (< i 1000) (begin (put! big i (* i i)) (recur (+ i 1))) nil))
-(loop [[i 0]] (if (< i 1000) (begin (if (= (% i 3) 0) nil (del! big i)) (recur (+ i 1))) nil))
+(loop [i 0] (if (< i 1000) (begin (put! big i (* i i)) (recur (+ i 1))) nil))
+(loop [i 0] (if (< i 1000) (begin (if (= (% i 3) 0) nil (del! big i)) (recur (+ i 1))) nil))
 (println (count big) (get big 999) (get big 998) (nth (keys big) 0) (nth (keys big) 333))
-(loop [[i 0]] (if (< i 1000) (begin (del! big i) (put! big i i) (recur (+ i 1))) nil))
+(loop [i 0] (if (< i 1000) (begin (del! big i) (put! big i i) (recur (+ i 1))) nil))
 (println (count big) (get big 500) (nth (keys big) 0) (nth (keys big) 999))
-(loop [[i 0]] (if (< i 1000) (begin (del! big i) (recur (+ i 1))) nil))
+(loop [i 0] (if (< i 1000) (begin (del! big i) (recur (+ i 1))) nil))
 (println big (count big))
 (println (put! big :again 1))
 
 ; Maps of vectors kept alive while lots of garbage is made
 (def index {})
-(loop [[i 0]]
+(loop [i 0]
   (if (< i 200)
     (begin
       (put! index (% i 10) (push! (get index (% i 10) []) i))
@@ -67,4 +67,4 @@
 (println (map? {}) (map? '{:a 1}) (map? []) (map? nil) (map? (keys {:a 1})))
 
 ; Maps in loop bodies, read by recur
-(println (loop [[i 0] [m {}]] (if (< i 3) (recur (+ i 1) {:i i :prev m}) m)))
+(println (loop [i 0 m {}] (if (< i 3) (recur (+ i 1) {:i i :prev m}) m)))

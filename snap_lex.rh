@@ -24,6 +24,7 @@ enum {
   TK_SET,
   TK_PANIC,
   TK_TRY,
+  TK_RECOVER,
   TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
   TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ,
   TK_AND, TK_OR, TK_NOT,
@@ -84,7 +85,7 @@ int snap_lex_next_token(SnapLex* lex) {
     chars = '\'' | '(' | ')' | '[' | ']' | '{' | '}';
     integer = [\+\-]? digit+;
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
-    string = "\"" ([^\r\n\"] | "\\\"")* "\"";
+    string = "\"" ([^\r\n\"\\] | "\\" [^\r\n])* "\"";
 
     main := |*
       'begin' => { token = TK_BEGIN; fbreak; };
@@ -98,6 +99,7 @@ int snap_lex_next_token(SnapLex* lex) {
       'set!' => { token = TK_SET; fbreak; };
       'panic' => { token = TK_PANIC; fbreak; };
       'try' => { token = TK_TRY; fbreak; };
+      'recover' => { token = TK_RECOVER; fbreak; };
       'true' => { token = TK_TRUE; fbreak; };
       'false' => { token = TK_FALSE; fbreak; };
       'nil' => { token = TK_NIL; fbreak; };

@@ -1,0 +1,12 @@
+; vi: filetype=scheme
+
+; Escapes in string literals, printed back escaped so they read the same
+(println "a\nb" "tab\there" "q\"uote" "back\\slash" "ends in \\")
+(println (= "\n" (str "\n")) (= "a\\" (str "a" "\\")))
+
+; str joins strings
+(println (str) (str "a") (str "a" "" "b" "\n" "c"))
+(println (recover (fn [] (str "a" 1))))
+
+; read-line returns nil at the end of input (stdin is empty in tests)
+(println (read-line))

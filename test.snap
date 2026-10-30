@@ -17,8 +17,8 @@
 
 ; let
 (println "let:")
-(println (let [[a 1]
-               [b 2]]
+(println (let [a 1
+               b 2]
            (+ a b)))
 
 ; closure
@@ -38,9 +38,9 @@
 (println (inc1))
 
 (def counter (fn [n]
-                 (let [[s 0]]
+                 (let [s 0]
                    (fn []
-                       (let [[c s]]
+                       (let [c s]
                          (if (< s n)
                            (begin (set! s (+ s 1)) c)
                            nil
@@ -52,7 +52,7 @@
 
 (def a (counter 10))
 ((fn []
-     (let [[r (a)]]
+     (let [r (a)]
            (if (nil? r) nil (begin (println r) (recur)))
            )
      ))

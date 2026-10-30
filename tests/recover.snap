@@ -1,0 +1,41 @@
+; vi: filetype=scheme
+
+; (recover f) calls f without arguments. If it panics, the panic's error is
+; the result instead, so recover is the one place a panic stops.
+
+(println (recover (fn [] (+ 1 2))))
+(println (recover (fn [] (/ 1 0))))
+(println (recover (fn [] (panic :mine "message"))))
+
+; Panics unwind through any number of calls
+(def deep (fn [n] (if (= n 0) (panic :bottom n) (+ 1 (deep (- n 1))))))
+(println (recover (fn [] (deep 500))))
+
+; The innermost recover stops the panic
+(println (recover (fn [] (recover (fn [] (panic :inner 1))))))
+(println (recover (fn [] (begin (recover (fn [] (panic :inner 1))) (panic :outer 2)))))
+
+; Error values and try aren't panics; they're returned as usual
+(println (recover (fn [] (err :value "not a panic"))))
+(println (recover (fn [] (try (err :tried 1)) :not-reached)))
+
+; Closures over the unwound frames keep their values
+(def keep (fn [] (let [x 42] (recover (fn [] (panic :p x))))))
+(println (keep))
+(def mk (fn [] (let [v 7] (let [f (fn [] v)] (recover (fn [] (panic :p 1))) f))))
+(println ((mk)))
+
+; Execution continues after recover, many times over
+(println (loop [i 0 panics 0]
+  (if (< i 1000)
+    (recur (+ i 1) (if (err? (recover (fn [] (if (= (% i 2) 0) (panic :even i) i)))) (+ panics 1) panics))
+    panics)))
+
+; Built-in functions that panic are recovered too
+(println (recover (fn [] (nth [] 0))))
+
+; compile makes a function from code, or returns an error, or nil without code
+(def code (compile "(def from-compile 40) (+ from-compile 2)"))
+(println (recover code) from-compile)
+(println (compile "") (compile "; just a comment") (compile "(+ 1") (compile "(if)"))
+(println (recover (compile "(panic :in-compiled 1)")))

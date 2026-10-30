@@ -1,0 +1,21 @@
+; vi: filetype=scheme
+
+; The REPL, which snap runs when it's started without a file. It's built into
+; the binary (see the Makefile).
+;
+; Input is read until it compiles: an incomplete form fails with
+; :snap_eof_error, so another line is read. Each input is compiled into a
+; function and called by recover, so a panic prints its error instead of
+; ending the session. Definitions carry over because globals do.
+
+(loop [input ""]
+  (let [line (read-line (if (= input "") "snap> " "...   "))]
+    (if (nil? line)
+      (if (= input "") nil (println (compile input))) ; Show why the rest didn't parse
+      (let [src (str input line "\n")
+            code (compile src)]
+        (if (err? code :snap_eof_error)
+          (recur src)
+          (begin
+            (if (nil? code) nil (println (if (err? code) code (recover code))))
+            (recur "")))))))

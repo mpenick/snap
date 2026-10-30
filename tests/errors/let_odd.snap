@@ -1,0 +1,4 @@
+; vi: filetype=scheme
+
+; An odd number of forms
+(let [a 1 b] a)

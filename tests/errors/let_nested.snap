@@ -1,0 +1,4 @@
+; vi: filetype=scheme
+
+; The old nested form is an error: [a 1] is not a name
+(let [[a 1]] a)

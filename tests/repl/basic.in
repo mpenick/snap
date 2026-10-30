@@ -1,0 +1,20 @@
+; Globals carry over, input continues until brackets balance, and errors
+; and panics are printed without ending the session
+(def sq (fn [x] (* x x)))
+(sq 7)
+(def m {:a 1
+        :b [1 2
+            3]}) ; trailing comment
+m
+; a comment with an open ( bracket
+(get m :b) "a string with ) in it"
+(/ 1 0)
+(sq 3)
+(if)
+(err :oops "a value")
+
+(def counter (let [n 0] (fn [] (set! n (+ n 1)) n)))
+(counter)
+(counter)
+args
+[1 2

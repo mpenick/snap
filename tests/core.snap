@@ -23,10 +23,10 @@
 (println "forms:" (quote (/ % <= = >)))
 
 ; recur doesn't skip an argument that's shadowed by a let
-(loop [[a 0] [n 0]] (if (> n 0) (println "shadow:" a) (let [[a 5]] (recur a 1))))
+(loop [a 0 n 0] (if (> n 0) (println "shadow:" a) (let [a 5] (recur a 1))))
 
 ; a jump landing on a POP keeps the POP (stack would leak and overflow)
-(println "peephole:" (loop [[i 0]] (if (< i 100000) (begin (if true 1 2) 3 (recur (+ i 1))) i)))
+(println "peephole:" (loop [i 0] (if (< i 100000) (begin (if true 1 2) 3 (recur (+ i 1))) i)))
 
 ; the last operand of and/or is in tail position
-(println "and tail:" (loop [[i 0]] (and true (if (< i 5) (recur (+ i 1)) i))))
+(println "and tail:" (loop [i 0] (and true (if (< i 5) (recur (+ i 1)) i))))

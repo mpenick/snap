@@ -1,0 +1,15 @@
+3
+<err :snap_arith_error "Division by zero">
+<err :mine "message">
+<err :bottom 0>
+<err :inner 1>
+<err :outer 2>
+<err :value "not a panic">
+<err :tried 1>
+<err :p 42>
+7
+500
+<err :snap_index_error "Index out of range">
+42 40
+nil nil <err :snap_eof_error "Premature end of file on line 1"> <err :snap_compile_error "Expected (if <cond> <then> <else>)">
+<err :in-compiled 1>

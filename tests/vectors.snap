@@ -27,17 +27,17 @@
 
 ; Grow past several reallocations, then sum by index
 (def big [])
-(loop [[i 0]] (if (< i 1000) (begin (push! big i) (recur (+ i 1))) nil))
+(loop [i 0] (if (< i 1000) (begin (push! big i) (recur (+ i 1))) nil))
 (println (count big) (nth big 999)
-  (loop [[i 0] [sum 0]] (if (< i (count big)) (recur (+ i 1) (+ sum (nth big i))) sum)))
+  (loop [i 0 sum 0] (if (< i (count big)) (recur (+ i 1) (+ sum (nth big i))) sum)))
 
 ; Vectors of vectors, kept alive while lots of garbage is made
 (def grid [])
-(loop [[r 0]]
+(loop [r 0]
   (if (< r 100)
     (begin
       (push! grid [r (* r r) (* r r r)])
-      (loop [[g 0]] (if (< g 20) (begin [g g g g] (recur (+ g 1))) nil))
+      (loop [g 0] (if (< g 20) (begin [g g g g] (recur (+ g 1))) nil))
       (recur (+ r 1)))
     nil))
 (println (nth grid 0) (nth grid 99) (count grid))

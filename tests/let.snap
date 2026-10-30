@@ -1,0 +1,27 @@
+; vi: filetype=scheme
+
+; let and loop bind in order: each value can use the names before it, and a
+; name can be bound again to shadow the earlier one
+
+(println (let [a 1 b (+ a 1) c (* b 10)] [a b c]))
+(println (let [a 1 a (+ a 1) a (* a 10)] a))
+
+; A value sees the outer binding of its own name
+(def x 5)
+(println (let [x (+ x 1) y x] [x y]))
+(println ((fn [n] (let [n (* n 2) m n] (+ n m))) 3))
+
+; Closures in a value capture the bindings before it
+(println (let [a 1 f (fn [] a) a 2] [(f) a]))
+
+; Values with their own let, and closures over its variables, don't disturb
+; the slots of later bindings
+(println (let [a (let [t 10 u 20] (+ t u)) b (+ a 1)] [a b]))
+(println (let [f (let [t 7] (fn [] t)) b 3] [(f) b]))
+
+; loop binds in order too, and recur sets every binding
+(println (loop [i 0 j (+ i 10) acc []]
+  (if (< i 3) (recur (+ i 1) (+ j 1) (push! acc [i j])) acc)))
+(println (loop [i 0 i (+ i 5)] (if (< i 8) (recur 0 (+ i 1)) i)))
+(println (loop [a (let [t 2] (* t t)) n 0]
+  (if (< n 3) (recur (+ a 1) (+ n 1)) [a n])))

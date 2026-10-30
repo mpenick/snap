@@ -203,6 +203,7 @@ typedef struct SnapFrame_ {
   SClosure* closure;
   SValue* stack_base;
   SValue* stack_top;
+  bool recover; // Called by recover: a panic unwinds to here
 } SnapFrame;
 
 struct Snap_ {
@@ -295,6 +296,7 @@ static inline int snap_type(SValue val) {
 SStr* snap_str_new(Snap* snap, const char* str);
 SSym* snap_sym_new(Snap* snap, const char* name);
 SErr* snap_err_new(Snap* snap, SValue err, SValue msg);
+SErr* snap_err_new_format(Snap* snap, const char* err, const char* format, ...);
 SCons* snap_cons_new(Snap* snap);
 SVec* snap_vec_new(Snap* snap, int cap);
 void snap_vec_push(Snap* snap, SVec* vec, SValue val);
@@ -308,6 +310,11 @@ void snap_release(Snap* snap);
 
 void snap_def(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
+// Compiles the forms in str into a function without arguments. Returns an
+// error value if they don't parse or compile, or nil if there aren't any.
+SValue snap_compile(Snap* snap, const char* str);
+// Runs a function from snap_compile()
+SValue snap_run(Snap* snap, SValue fn);
 SValue snap_exec(Snap* snap, const char* str);
 void snap_print(SValue value);
 

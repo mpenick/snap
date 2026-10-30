@@ -1,0 +1,14 @@
+nil
+49
+nil
+{:a 1 :b [1 2 3]}
+"a string with ) in it"
+<err :snap_arith_error "Division by zero">
+9
+<err :snap_compile_error "Expected (if <cond> <then> <else>)">
+<err :oops "a value">
+nil
+1
+2
+[]
+<err :snap_eof_error "Premature end of file on line 2">

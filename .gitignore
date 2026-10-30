@@ -8,3 +8,4 @@ snap_lex.h
 *.user
 gc
 snap_stress
+repl.h

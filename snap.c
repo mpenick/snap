@@ -52,6 +52,7 @@ enum {
   XX(JUMP_FALSE_OR_POP) \
   XX(JUMP_TRUE_OR_POP) \
   XX(TRY) \
+  XX(RECOVER) \
   XX(PANIC) \
   XX(ADD) \
   XX(SUB) \
@@ -771,6 +772,7 @@ static void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* cl
   frame->closure = closure;
   frame->pc = code->insts;
   frame->stack_base = stack_base;
+  frame->recover = false;
   frame->stack_top = stack_base + code->num_locals;
 
   // Non-argument locals must not be garbage when the GC scans the stack
@@ -903,6 +905,23 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
 #define OP(name) case name:
 #define DISPATCH() continue
 #endif
+
+// Unwinds a panic to the innermost frame called by recover and pushes the
+// error as its result. Returns false, with every frame gone, when there isn't
+// one. Kept out of exec(), where it slows down the other handlers.
+static bool unwind(Snap* snap, SValue err) {
+  while (snap->frames.vsize > 0) {
+    SnapFrame* frame = &mvec_back(&snap->frames);
+    mvec_pop(&snap->frames);
+    if (frame->recover) {
+      close_upvals(snap, frame->stack_base);
+      *mvec_back(&snap->frames).stack_top++ = err;
+      return true;
+    }
+  }
+  close_upvals(snap, snap->stack);
+  return false;
+}
 
 static SValue exec(Snap* snap) {
   SnapFrame* frame;
@@ -1098,6 +1117,31 @@ new_frame:
         if (is_err(*(stack - 1))) goto do_return;
         DISPATCH();
       }
+      OP(RECOVER) {
+        // Calls a function without arguments. If it panics, the error is the
+        // result instead (see panic below).
+        a = --stack; // Pop callable
+        if (is_cfunc(*a)) {
+          temp = create_nil();
+          frame->stack_top = stack;
+          as_cfunc(*a)(snap, stack, 0, &temp); // On failure temp is the error
+          *stack++ = temp;
+        } else if (is_code(*a) || is_closure(*a)) {
+          SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
+          SCode* c = cl ? cl->code : as_code(*a);
+          if (c->num_args != 0) {
+            RUNTIME_ERROR("snap_arity_error", "recover expects a function without arguments");
+          }
+          frame->pc = pc;
+          frame->stack_top = stack;
+          push_frame(snap, c, stack, cl);
+          mvec_back(&snap->frames).recover = true;
+          goto new_frame;
+        } else {
+          RUNTIME_ERROR("snap_type_error", "Value is not callable");
+        }
+        DISPATCH();
+      }
       OP(PANIC) {
         goto panic;
       }
@@ -1140,8 +1184,7 @@ panic:
   // Stack: [... msg err]. Allocate the error while the stack is still rooted.
   frame->stack_top = stack;
   temp = create_obj(snap_err_new(snap, *(stack - 1), *(stack - 2)));
-  close_upvals(snap, snap->stack);
-  snap->frames.vsize = 0;
+  if (unwind(snap, temp)) goto new_frame;
   return temp;
 }
 
@@ -1242,6 +1285,26 @@ static SValue parse_int(Snap* snap, SnapLex* lex) {
   return create_int(i);
 }
 
+// Replaces \n, \t, \r, \\ and \" in a string literal, in place
+static void parse_escapes(Snap* snap, SnapLex* lex) {
+  char* in, * out;
+  for (in = out = lex->val; *in; ++in) {
+    if (*in != '\\') {
+      *out++ = *in;
+      continue;
+    }
+    switch (*++in) {
+      case 'n': *out++ = '\n'; break;
+      case 't': *out++ = '\t'; break;
+      case 'r': *out++ = '\r'; break;
+      case '\\': case '"': *out++ = *in; break;
+      default:
+        raise(snap, "snap_parse_error", "Unknown escape '\\%c' on line %d", *in, lex->line);
+    }
+  }
+  *out = '\0';
+}
+
 static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
   switch (token) {
     case '(':
@@ -1257,6 +1320,7 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case TK_FLOAT:
       return create_float(snap, atof(lex->val));
     case TK_STR:
+      parse_escapes(snap, lex);
       return create_obj(snap_str_new(snap, lex->val));
     case TK_ID:
       return create_obj(snap_sym_new(snap, lex->val));
@@ -1279,12 +1343,13 @@ static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
     case TK_SET:
     case TK_PANIC:
     case TK_TRY:
+    case TK_RECOVER:
     case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
     case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
     case TK_NOT: case TK_AND: case TK_OR:
       return create_form(token);
     case TK_EOF:
-      raise(snap, "snap_parse_error", "Premature end of file on line %d", lex->line);
+      raise(snap, "snap_eof_error", "Premature end of file on line %d", lex->line);
       break;
     case TK_TOO_BIG:
       raise(snap, "snap_parse_error", "Literal or identifier is too big on line %d", lex->line);
@@ -1541,10 +1606,11 @@ static void end_scope(SnapFnState* fs) {
   }
 }
 
-static int add_local(Snap* snap, SnapFnState* fs, SSym* name) {
+// let and loop bindings can shadow a name bound earlier in the same form
+static int add_local(Snap* snap, SnapFnState* fs, SSym* name, bool shadow) {
   int i;
   SnapLocal* local;
-  for (i = fs->num_locals - 1; i >= 0 && fs->locals[i].depth == fs->depth; --i) {
+  for (i = fs->num_locals - 1; !shadow && i >= 0 && fs->locals[i].depth == fs->depth; --i) {
     if (fs->locals[i].name == name) {
       raise(snap, "snap_compile_error", "Variable '%s' already defined in current scope", name->data);
     }
@@ -1741,7 +1807,7 @@ static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
   name = as_sym(args->first);
   compile(snap, fs, nth(args, 1), false);
   if (fs->depth > 0) {
-    emit(fs, STORE_LOCAL, add_local(snap, fs, name));
+    emit(fs, STORE_LOCAL, add_local(snap, fs, name, false));
   } else {
     emit(fs, STORE_GLOBAL, add_constant(snap, fs, create_obj(name)));
   }
@@ -1796,7 +1862,7 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
     if (!is_sym(params->data[i])) {
       raise(snap, "snap_compile_error", "Expected symbol");
     }
-    add_local(snap, fs, as_sym(params->data[i]));
+    add_local(snap, fs, as_sym(params->data[i]), false);
   }
   fs->num_args = params->len;
 
@@ -1817,8 +1883,9 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   }
 }
 
+// Bindings alternate names and values: (let [a 1 b 2] ...)
 static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail) {
-  int i, base;
+  int i, base, count;
   SVec* bindings;
   SnapLoop recur_target;
 
@@ -1830,31 +1897,31 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
   }
 
   bindings = as_vec(args->first);
-  for (i = 0; i < bindings->len; ++i) {
-    SValue binding = bindings->data[i];
-    if (!is_vec(binding) || as_vec(binding)->len != 2 || !is_sym(as_vec(binding)->data[0])) {
-      raise(snap, "snap_compile_error", "Expected binding pair [<id> <expr>]");
+  count = bindings->len / 2;
+  if (bindings->len % 2 != 0) {
+    raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
+  }
+  for (i = 0; i < count; ++i) {
+    if (!is_sym(bindings->data[2 * i])) {
+      raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
     }
   }
 
-  // Values are evaluated before any of the names are visible
-  for (i = 0; i < bindings->len; ++i) {
-    compile(snap, fs, as_vec(bindings->data[i])->data[1], false);
-  }
-
+  // In order, so each value can use the names before it. Scopes inside a
+  // value free their slots, so the bindings get consecutive slots (which
+  // recur relies on).
   begin_scope(fs);
   base = fs->num_locals;
-  for (i = 0; i < bindings->len; ++i) {
-    add_local(snap, fs, as_sym(as_vec(bindings->data[i])->data[0]));
+  for (i = 0; i < count; ++i) {
+    compile(snap, fs, bindings->data[2 * i + 1], false);
+    emit(fs, STORE_LOCAL, add_local(snap, fs, as_sym(bindings->data[2 * i]), true));
   }
-  for (i = bindings->len - 1; i >= 0; --i) {
-    emit(fs, STORE_LOCAL, base + i);
-  }
+  assert(fs->num_locals == base + count);
 
   if (loop) {
     recur_target.top = pc(fs);
     recur_target.base = base;
-    recur_target.count = bindings->len;
+    recur_target.count = count;
     recur_target.closes = contains_fn(args->rest);
     recur_target.up = fs->loop;
     fs->loop = &recur_target;
@@ -1950,6 +2017,14 @@ static void compile_map(Snap* snap, SnapFnState* fs, SMap* map) {
   }
   load_constant(snap, fs, create_cfunc(builtin_map));
   emit(fs, CALL, 2 * map->len);
+}
+
+static void compile_recover(Snap* snap, SnapFnState* fs, SCons* args) {
+  if (list_length(args) != 1) {
+    raise(snap, "snap_compile_error", "Expected (recover <fn>)");
+  }
+  compile(snap, fs, args->first, false);
+  emit(fs, RECOVER, 0);
 }
 
 static void compile_try(Snap* snap, SnapFnState* fs, SCons* args) {
@@ -2071,6 +2146,9 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
         case TK_TRY:
           compile_try(snap, fs, args);
           break;
+        case TK_RECOVER:
+          compile_recover(snap, fs, args);
+          break;
         case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
           compile_arith(snap, fs, (as_form(sexpr->first) - TK_ADD) + ADD, args);
           break;
@@ -2144,7 +2222,7 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   adjust_stack(fs, 1);
 }
 
-SValue snap_exec(Snap* snap, const char* str) {
+SValue snap_compile(Snap* snap, const char* str) {
   SnapLex lex;
   SValue expr, result;
   SnapFnState* fs;
@@ -2175,18 +2253,31 @@ SValue snap_exec(Snap* snap, const char* str) {
     compile(snap, fs, expr, false);
     if (is_obj(expr)) snap_release(snap);
   }
-  if (first) emit(fs, LOAD_NIL, 0);
+  if (first) {
+    fn_state_free(snap);
+    result = create_nil();
+    goto done;
+  }
   emit(fs, RETURN, 0);
 
-  code = (SCode*)snap_anchor(snap, (SObject*)code_new(snap, fs));
+  code = code_new(snap, fs);
   fn_state_free(snap);
   if (snap->dump_code) print_code(code, 0);
-  push_frame(snap, code, snap->stack, NULL);
-  result = exec(snap);
+  result = create_obj(code);
 
 done:
   snap->anchors.vsize = num_anchors; // Also unwinds anchors left by a longjmp
   return result;
+}
+
+SValue snap_run(Snap* snap, SValue fn) {
+  push_frame(snap, as_code(fn), snap->stack, NULL);
+  return exec(snap);
+}
+
+SValue snap_exec(Snap* snap, const char* str) {
+  SValue fn = snap_compile(snap, str);
+  return is_code(fn) ? snap_run(snap, fn) : fn; // nil or an error
 }
 
 /* Printing */
@@ -2217,6 +2308,7 @@ static const char* form_name(int token) {
     case TK_SET: return "set!";
     case TK_PANIC: return "panic";
     case TK_TRY: return "try";
+    case TK_RECOVER: return "recover";
     case TK_LT: return "<";
     case TK_LE: return "<=";
     case TK_GT: return ">";
@@ -2232,6 +2324,23 @@ static const char* form_name(int token) {
     case TK_MOD: return "%";
     default: return "<form>";
   }
+}
+
+// Quoted and escaped, so that it reads back as the same string
+static void print_str(SStr* s) {
+  size_t i;
+  putchar('"');
+  for (i = 0; i < s->len; ++i) {
+    switch (s->data[i]) {
+      case '\n': printf("\\n"); break;
+      case '\t': printf("\\t"); break;
+      case '\r': printf("\\r"); break;
+      case '\\': printf("\\\\"); break;
+      case '"': printf("\\\""); break;
+      default: putchar(s->data[i]); break;
+    }
+  }
+  putchar('"');
 }
 
 static void print_val(SValue val) {
@@ -2257,7 +2366,7 @@ static void print_val(SValue val) {
       printf("%s", form_name(as_form(val)));
       break;
     case STYPE_STR:
-      printf("\"%s\"", as_str(val)->data);
+      print_str(as_str(val));
       break;
     case STYPE_SYM:
       printf("%s", as_sym(val)->data);
@@ -2574,6 +2683,35 @@ static bool map_entries(Snap* snap, const SValue* args, int num_args, int offset
   return true;
 }
 
+// (str <str>...) joins strings
+bool builtin_str(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i;
+  size_t len = 0;
+  SStr* s;
+  for (i = 0; i < num_args; ++i) {
+    if (!is_str(args[i])) return fail(snap, result, "snap_type_error", "Expected strings");
+    len += as_str(args[i])->len;
+  }
+  s = (SStr*)gc_new(snap, STYPE_STR, sizeof(SStr) + len + 1);
+  s->len = 0;
+  for (i = 0; i < num_args; ++i) {
+    memcpy(s->data + s->len, as_str(args[i])->data, as_str(args[i])->len);
+    s->len += as_str(args[i])->len;
+  }
+  s->data[len] = '\0';
+  *result = create_obj(s);
+  return true;
+}
+
+// (compile <str>) compiles code into a function without arguments, or returns
+// an error if it doesn't parse or compile, or nil if there's no code
+bool builtin_compile(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  if (!is_str(args[0])) return fail(snap, result, "snap_type_error", "Expected a string");
+  *result = snap_compile(snap, as_str(args[0])->data);
+  return true;
+}
+
 bool builtin_keys(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return map_entries(snap, args, num_args, 0, result);
 }
@@ -2617,6 +2755,8 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "del!", builtin_del);
   snap_def_cfunc(snap, "keys", builtin_keys);
   snap_def_cfunc(snap, "vals", builtin_vals);
+  snap_def_cfunc(snap, "str", builtin_str);
+  snap_def_cfunc(snap, "compile", builtin_compile);
 }
 
 void snap_destroy(Snap* snap) {

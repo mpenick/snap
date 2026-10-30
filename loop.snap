@@ -13,7 +13,7 @@
 
 (def test (fn [s i m]
               (if (< i m) (recur
-                            (loop [[a i] [s s] [i 0] [m m]]
+                            (loop [a i s s i 0 m m]
                                   (if (< i m) (recur a (+ s (* a i)) (+ i 1) m) s))
 
                             (+ i 1) m) s)

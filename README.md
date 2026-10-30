@@ -15,13 +15,19 @@ are fast, small and simple.
 
 ## Building and running
 
-Building needs a C compiler and [Ragel](https://www.colm.net/open-source/ragel/)
-(for the lexer).
+Building needs a C compiler, [Ragel](https://www.colm.net/open-source/ragel/)
+(for the lexer) and GNU Readline (for the REPL, `libreadline-dev` on Debian and
+Ubuntu).
 
 ```
 make
-./snap [-d] <file> <arg_1>...<arg_n>
+./snap [-d] [<file> <arg_1>...<arg_n>]
 ```
+
+Without a file, `snap` starts a REPL. A form can span several lines, and
+definitions carry over. Errors and panics are printed without ending the
+session. Line editing and history come from readline. Ctrl-D exits. The REPL
+is written in snap, in `repl.snap` (see below).
 
 `-d` prints the byte code before running it. The script's arguments are a
 vector of strings in `args`.
@@ -35,24 +41,39 @@ make stress   # The same under ASan/UBSan, collecting every few bytes
 
 ```clojure
 (def fib (fn [n]
-  (loop [[a 0] [b 1] [i 0]]
+  (loop [a 0 b 1 i 0]
     (if (= i n) a (recur b (+ a b) (+ i 1))))))
 
 (println (fib 50))
 ```
 
 Special forms: `def`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
-`quote`, `and`, `or`, `not`, `try`, `panic`, and the operators `+ - * / %` and
-`< <= > >= =`.
+`quote`, `and`, `or`, `not`, `try`, `panic`, `recover`, and the operators
+`+ - * / %` and `< <= > >= =`.
+
+`let` and `loop` bindings alternate names and values, and are bound in order,
+so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
 vectors, maps, lists (only from `quote`), `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
 arithmetic wraps on overflow, and mixing integers with floats gives a float.
+Strings can contain the escapes `\n`, `\t`, `\r`, `\\` and `\"`.
 
-Built-in functions: `print`, `println`, `nil?`, `vector?`, `map?`, `err`,
-`err?`, `err-kind`, `err-msg`, `count`, `nth`, `push!`, `pop!`, `put!`, `get`,
-`del!`, `keys` and `vals`.
+Built-in functions:
+
+* Output and input: `print`, `println` and `(read-line prompt?)`, which
+  returns `nil` at the end of input. On a terminal it uses readline and shows
+  the prompt. It's defined in `main.c`, so programs that embed snap don't need
+  readline.
+* Types: `nil?`, `vector?` and `map?`
+* Errors: `err`, `err?`, `err-kind` and `err-msg`
+* Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
+  `keys` and `vals`
+* Strings: `(str s...)` joins strings
+* Code: `(compile src)` compiles a string into a function without arguments.
+  It returns an error if the code doesn't parse or compile (`:snap_eof_error`
+  when it ends early), and `nil` if there's no code.
 
 ## Vectors
 
@@ -115,7 +136,7 @@ can come out of is marked in the source.
 
 ```clojure
 (def calc (fn [a b c]
-  (let [[x (try (safe-div a b))]]
+  (let [x (try (safe-div a b))]
     (+ x (try (safe-div x c))))))
 
 (calc 100 10 5)   ; => 12
@@ -123,20 +144,32 @@ can come out of is marked in the source.
 
 ; Handle one kind and pass the rest up
 (def div-or-zero (fn [a b]
-  (let [[r (safe-div a b)]]
+  (let [r (safe-div a b)]
     (if (err? r :div-by-zero) 0 (try r)))))
 ```
 
-`(panic kind msg)` is for bugs. It can't be caught and stops the program, as
-do type errors, division by zero and calls with the wrong number of arguments.
-An error that `try` returns from the top level of a script also stops it.
+`(panic kind msg)` is for bugs. It stops the program, as do type errors,
+division by zero and calls with the wrong number of arguments. An error that
+`try` returns from the top level of a script also stops it.
+
+`(recover f)` is the one place a panic stops. It calls `f` without arguments,
+and if `f` panics, the panic's error is the result instead. It's meant for
+code that supervises other code, like the REPL:
+
+```clojure
+(recover (fn [] (/ 1 0)))   ; => <err :snap_arith_error "Division by zero">
+(recover (fn [] 42))        ; => 42
+```
 
 C functions return `false` to panic, with `*result` set to the error. To
 return an error as a value, set `*result` to it and return `true`.
 
 ## Implementation
 
-Everything is in `snap.c` (lexer in `snap_lex.rh`, `main.c` runs a file).
+Everything is in `snap.c`. The lexer is in `snap_lex.rh`, and `main.c` runs a
+file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
+string in `repl.h`: it reads lines until `compile` stops returning
+`:snap_eof_error`, then calls the result with `recover` and prints it.
 
 * **Values** are 8 bytes. The low bits tag integers, objects, `nil`/booleans
   and C functions, so integers need no allocation. Floats are heap objects.
