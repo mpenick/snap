@@ -255,6 +255,19 @@ typedef struct SnapFrame_ {
   bool stop;    // Called from C: exec() returns when it returns or panics
 } SnapFrame;
 
+// The most values the stack can hold (8 MB), as in Lua. Calls past it are a
+// stack overflow.
+#ifndef SNAP_MAX_STACK
+#define SNAP_MAX_STACK 1000000
+#endif
+
+// How deep C can recurse: through calls of snap code from C (a macro that
+// compiles code that uses a macro...), and nesting in the reader and compiler.
+// Past it is an error rather than a C stack overflow.
+#ifndef SNAP_MAX_C_DEPTH
+#define SNAP_MAX_C_DEPTH 1000
+#endif
+
 // Objects live in pages of slots of one size, or a page of their own if
 // they're big (see snap.c)
 #define SNAP_NUM_SLOT_SIZES 8
@@ -289,6 +302,7 @@ struct Snap_ {
   int stack_size;
   struct { MVEC_FIELDS(SnapFrame); } frames;
   bool reentered; // Set by snap_call(), which can move the stack and the frames
+  int c_depth; // Counted up to SNAP_MAX_C_DEPTH
   struct { MVEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
   size_t next_gc; // Start a collection when num_bytes_alloced reaches this

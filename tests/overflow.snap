@@ -1,0 +1,19 @@
+; vi: filetype=scheme
+
+; Recursing without end is a stack overflow, which recover catches
+(defn forever [n] (+ 1 (forever n)))
+(println (recover (fn [] (forever 0))))
+; Deep recursion below the cap still works
+(defn deep [n] (if (= n 0) 0 (+ 1 (deep (- n 1)))))
+(println (deep 100000))
+; So does the stack after an overflow
+(println (recover (fn [] (forever 0))) (deep 10))
+; Recursing through C, with a macro that compiles code that uses it, is
+; bounded too
+(defmacro again [] (compile-again))
+(defn compile-again [] (compile "(again)"))
+(println (recover (fn [] (compile-again))))
+; As is code nested too deeply for the reader
+(defn nested [n] (loop [s "" i 0] (if (< i n) (recur (str "[" s "]") (+ i 1)) s)))
+(println (compile (nested 2000)) (count ((compile (nested 500)))))
+(println "done")

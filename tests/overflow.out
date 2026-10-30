@@ -1,0 +1,6 @@
+<err :snap_stack_error "Stack overflow">
+100000
+<err :snap_stack_error "Stack overflow"> 10
+<err :snap_parse_error "Too deeply nested">
+<err :snap_parse_error "Too deeply nested"> 1
+"done"

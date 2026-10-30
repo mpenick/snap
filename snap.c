@@ -1161,7 +1161,8 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
 // 3) [args and locals][stack...][return value]
 
 // Grows the stack so that `needed` values fit above stack_base, and returns
-// where stack_base is now. Kept out of push_frame() so that it's inlined.
+// where stack_base is now, or NULL past SNAP_MAX_STACK. Kept out of
+// push_frame() so that it's inlined.
 static __attribute__((noinline)) SValue* grow_stack(Snap* snap, SValue* stack_base, int needed) {
   SnapFrame* frame;
   int offset = stack_base - snap->stack;
@@ -1170,9 +1171,11 @@ static __attribute__((noinline)) SValue* grow_stack(Snap* snap, SValue* stack_ba
   SValue* stack_new;
   SUpval* upval;
 
+  if (offset + needed >= SNAP_MAX_STACK) return NULL;
   while (offset + needed >= stack_size) {
     stack_size *= (stack_size < 4096 ? 4 : 2);
   }
+  if (stack_size > SNAP_MAX_STACK) stack_size = SNAP_MAX_STACK;
   stack_new = (SValue*)realloc(snap->stack, stack_size * sizeof(SValue));
   snap->stack_size = stack_size;
   snap->stack = stack_new;
@@ -1189,12 +1192,16 @@ static __attribute__((noinline)) SValue* grow_stack(Snap* snap, SValue* stack_ba
   return stack_new + offset;
 }
 
-static inline void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* closure) {
+// Returns false, without pushing it, on a stack overflow
+static inline bool push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* closure) {
   SnapFrame* frame;
   SValue* val;
   int needed = code->num_locals + code->max_stack_size;
 
-  if (stack_base + needed >= snap->stack_end) stack_base = grow_stack(snap, stack_base, needed);
+  if (stack_base + needed >= snap->stack_end) {
+    stack_base = grow_stack(snap, stack_base, needed);
+    if (!stack_base) return false;
+  }
 
   frame = mvec_push(&snap->frames, SnapFrame);
   frame->code = code;
@@ -1209,6 +1216,7 @@ static inline void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClos
   for (val = stack_base + code->num_args; val < frame->stack_top; ++val) {
     *val = create_nil();
   }
+  return true;
 }
 
 // Find or create the open upvalue for a stack slot. The open list is sorted by
@@ -1682,7 +1690,9 @@ new_frame:
           }
           frame->pc = pc;
           frame->stack_top = stack - arg; // Pop arguments
-          push_frame(snap, c, frame->stack_top, cl);
+          if (!push_frame(snap, c, frame->stack_top, cl)) {
+            RUNTIME_ERROR("snap_stack_error", "Stack overflow");
+          }
           goto new_frame;
         } else if (is_method(*a)) {
           SValue* fn = method_find(snap, as_method(*a), stack - arg, arg);
@@ -1788,7 +1798,9 @@ new_frame:
           }
           frame->pc = pc;
           frame->stack_top = stack;
-          push_frame(snap, c, stack, cl);
+          if (!push_frame(snap, c, stack, cl)) {
+            RUNTIME_ERROR("snap_stack_error", "Stack overflow");
+          }
           mvec_back(&snap->frames).recover = true;
           goto new_frame;
         } else {
@@ -2085,7 +2097,24 @@ static void parse_escapes(Snap* snap, SnapLex* lex) {
   *out = '\0';
 }
 
+// Counts a level of nesting in the reader or compiler toward SNAP_MAX_C_DEPTH.
+// The caller takes it back off when it's done, or compile_forms() does after
+// a raise.
+static void enter(Snap* snap, const char* err) {
+  if (++snap->c_depth > SNAP_MAX_C_DEPTH) raise(snap, err, "Too deeply nested");
+}
+
+static SValue parse_value(Snap* snap, SnapLex* lex, int token);
+
 static SValue parse_expr(Snap* snap, SnapLex* lex, int token) {
+  SValue val;
+  enter(snap, "snap_parse_error");
+  val = parse_value(snap, lex, token);
+  snap->c_depth--;
+  return val;
+}
+
+static SValue parse_value(Snap* snap, SnapLex* lex, int token) {
   switch (token) {
     case '(':
       return parse_sexpr(snap, lex);
@@ -3064,6 +3093,7 @@ static void compile_effect(Snap* snap, SnapFnState* fs, SValue expr) {
   SCons* sexpr = snap_type(expr) == STYPE_CONS ? as_cons(expr) : NULL;
   SCons* args = sexpr ? as_cons(sexpr->rest) : NULL;
   SValue macro, form;
+  enter(snap, "snap_compile_error");
   if (sexpr && is_sym(sexpr->first) && find_macro(fs, sexpr->first, &macro)) {
     form = expand(snap, macro, args);
     if (is_err(form)) {
@@ -3092,6 +3122,7 @@ static void compile_effect(Snap* snap, SnapFnState* fs, SValue expr) {
     compile(snap, fs, expr, false);
     emit(fs, POP, 0);
   }
+  snap->c_depth--;
 }
 
 static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
@@ -3208,6 +3239,7 @@ static const char* form_name(int token);
 static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   int stack = fs->stack;
   SValue val;
+  enter(snap, "snap_compile_error");
   switch (snap_type(expr)) {
     case STYPE_INT:
     case STYPE_FLOAT:
@@ -3252,6 +3284,7 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   // like recur, or never finishes, like panic)
   fs->stack = stack;
   adjust_stack(fs, 1);
+  snap->c_depth--;
 }
 
 // Compiles the forms from lex into a function without arguments: all of
@@ -3264,12 +3297,13 @@ static SValue compile_forms(Snap* snap, SnapLex* lex, bool all) {
   SnapFnState* up = snap->fn_state;
   SCode* code;
   bool first = true;
-  int num_anchors = snap->anchors.vsize;
+  int num_anchors = snap->anchors.vsize, c_depth = snap->c_depth;
   jmp_buf jmp;
 
   memcpy(jmp, snap->jmp, sizeof(jmp_buf));
   if (setjmp(snap->jmp) > 0) {
     while (snap->fn_state != up) fn_state_free(snap);
+    snap->c_depth = c_depth;
     result = create_obj(snap->cause);
     goto done;
   }
@@ -3360,13 +3394,17 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
 
   // The arguments can be in the stack, which push_frame() can move
   offset = args >= snap->stack && args < snap->stack_end ? args - snap->stack : -1;
-  push_frame(snap, c, base, cl);
+  if (snap->c_depth >= SNAP_MAX_C_DEPTH || !push_frame(snap, c, base, cl)) {
+    return create_obj(snap_err_new_format(snap, "snap_stack_error", "Stack overflow"));
+  }
   if (offset >= 0) args = snap->stack + offset;
   frame = &mvec_back(&snap->frames);
   if (n > 0) memmove(frame->stack_base, args, n * sizeof(SValue));
   if (c->arity < 0) frame->stack_base[n] = rest;
   frame->stop = true;
+  snap->c_depth++;
   result = exec(snap);
+  snap->c_depth--;
   snap->reentered = true; // For a VM that called this through a C function
   return result;
 }
@@ -4374,6 +4412,7 @@ void snap_init(Snap* snap) {
   snap->num_gensyms = 0;
   snap->dump_code = false;
   snap->reentered = false;
+  snap->c_depth = 0;
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
 
