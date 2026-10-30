@@ -1,0 +1,47 @@
+; if, when and cond whose values aren't used (compiled without pushing nil)
+(def log [])
+(defn note [x] (push! log x))
+(defn effects [n]
+  (if (> n 0) (note :pos) nil)
+  (if (< n 0) (note :neg) (note :not-neg))
+  (when (= n 0) (note :zero) (note :still-zero))
+  (cond (= n 1) (note :one) (= n 2) (note :two))
+  (if (> n 0) (if (> n 1) (note :big) nil) nil)
+  (begin (note :a) (when false (note :never)) (note :b))
+  n)
+(println (effects -1) (effects 0) (effects 1) (effects 2))
+(println log)
+; Loops whose body is a when, and statements in loops
+(def seen [])
+(loop [i 0] (when (< i 5) (when (= (% i 2) 0) (push! seen i)) (recur (+ i 1))))
+(println seen)
+(println (compile "(fn [] (when true (recur)) 1)"))
+
+; Calls to globals
+(defn three [a b c] [a b c])
+(println (three 1 2 3) (count [1 2]) (max 1 5 2))
+(defstruct P [x y])
+(defmethod sum [p P] (+ (get p :x) (get p :y)))
+(println (P 1 2) (sum (P 3 4)))
+(defn later [] (redefined 1))
+(defn redefined [x] (+ x 1))
+(println (later))
+(set! redefined (fn [x] (* x 10)))
+(println (later))
+(println (recover (fn [] (not-defined 1))))
+(println (recover (fn [] (count 1 2))))
+(println (recover (fn [] (three 1))))
+; More than 255 arguments
+(def many (fn [& xs] (count xs)))
+(def src "(many")
+(dotimes [i 300] (set! src (str src " " i)))
+(println ((compile (str src ")"))))
+
+; Float arithmetic and compares, with ints, immediate floats and boxed floats
+(def big 1e300) ; Boxed
+(defn fops [a b] [(+ a b) (- a b) (* a b) (/ a b) (< a b) (>= a b) (= a b)])
+(println (fops 1.5 2) (fops 2 1.5) (fops 0.5 0.25))
+(println (/ (+ big 2.0) big) (/ (* big 2) big) (/ (- 0.0 big) big) (- big big) (< big 1e301) (> big 2) (= big big))
+(println (* big big) (/ 1 0.0))
+(let [x 1.5 y 2] (println (+ x y) (* x x) (< x y) (- y x)))
+(println (recover (fn [] (+ 1.5 "a"))) (recover (fn [] (< "a" 1.5))) (recover (fn [] (/ 1 0))))

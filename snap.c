@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 // The collector is incremental mark and sweep. A collection starts once the
 // heap has grown to GC_HEAP_GROWTH times what the last one found live, and by
@@ -91,6 +92,7 @@ enum {
   XX(ROT2) \
   XX(ROT3) \
   XX(CALL) \
+  XX(CALL_GLOBAL) \
   XX(CLOSURE) \
   XX(CLOSE_UPVALS) \
   XX(RETURN) \
@@ -351,7 +353,7 @@ int snap_compare(const SValue* val1, const SValue* val2) {
 
 static SValue exec(Snap* snap);
 
-static void print_val(SValue val);
+static void print_val(FILE* out, SValue val);
 static void print_code(SCode* code, int indent);
 
 static inline MHASH_FUNC(SnapHashEntry, SValue) {
@@ -408,6 +410,12 @@ static size_t code_extra_bytes(SCode* code) {
 }
 
 #define map_bytes(cap) ((size_t)(cap) * 2 * (sizeof(SValue) + sizeof(int32_t)))
+
+// Counts memory that the heap took for objects or what's inside them
+static inline void heap_add(Snap* snap, size_t size) {
+  snap->num_bytes_alloced += size;
+  snap->gc_stats.allocated += size;
+}
 
 static void gc_free(Snap* snap, SObject* obj) {
   switch (obj->type) {
@@ -737,9 +745,26 @@ static bool gc_step(Snap* snap, size_t work) {
   return false;
 }
 
+// Starts a collection and/or does a step of one, timing it for the stats
+static bool gc_pause(Snap* snap, bool start, size_t work) {
+  SnapGCStats* stats = &snap->gc_stats;
+  struct timespec t0, t1;
+  bool done = false;
+  double t;
+  clock_gettime(CLOCK_MONOTONIC, &t0);
+  if (start) gc_start(snap);
+  if (work > 0) done = gc_step(snap, work);
+  clock_gettime(CLOCK_MONOTONIC, &t1);
+  t = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+  stats->steps++;
+  stats->pause_total += t;
+  if (t > stats->pause_max) stats->pause_max = t;
+  if (done) stats->collections++;
+  return done;
+}
+
 bool snap_gc_step(Snap* snap, size_t work) {
-  if (snap->gc_phase == GC_IDLE) gc_start(snap);
-  return gc_step(snap, work);
+  return gc_pause(snap, snap->gc_phase == GC_IDLE, work);
 }
 
 static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
@@ -752,18 +777,18 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
     // finishes before the heap grows much
     snap->gc_debt += size;
     if (snap->gc_debt >= GC_STEP_SIZE) {
-      gc_step(snap, snap->gc_debt * GC_STEP_MUL / sizeof(SValue));
+      gc_pause(snap, false, snap->gc_debt * GC_STEP_MUL / sizeof(SValue));
       snap->gc_debt = 0;
     }
   } else if (snap->num_bytes_alloced + size > snap->next_gc) {
-    gc_start(snap);
+    gc_pause(snap, true, 0);
   }
   obj = gc_alloc(snap, size);
   obj->type = type;
   obj->mark = snap->gc_unmarked ^ 1; // New objects survive the collection they're made in
   obj->read_only = false;
   obj->macro = false;
-  snap->num_bytes_alloced += size;
+  heap_add(snap, size);
   return obj;
 }
 
@@ -913,7 +938,7 @@ SVec* snap_vec_new(Snap* snap, int cap) {
   v->cap0 = cap;
   v->data = cap > 0 ? (SValue*)malloc(cap * sizeof(SValue)) : NULL;
   v->segs = NULL;
-  snap->num_bytes_alloced += cap * sizeof(SValue);
+  heap_add(snap, cap * sizeof(SValue));
   return v;
 }
 
@@ -926,7 +951,7 @@ void snap_vec_push(Snap* snap, SVec* vec, SValue val) {
     size_t size = ((size_t)SNAP_VEC_SEG << k) * sizeof(SValue);
     vec->segs = (SValue**)realloc(vec->segs, vec->num_segs * sizeof(SValue*));
     vec->segs[k] = (SValue*)malloc(size);
-    snap->num_bytes_alloced += size;
+    heap_add(snap, size);
   }
   *snap_vec_at(vec, vec->len++) = val;
 }
@@ -988,7 +1013,8 @@ static void map_rebuild(Snap* snap, SMap* map) {
   }
   free(map->entries);
   free(map->index);
-  snap->num_bytes_alloced = snap->num_bytes_alloced - map_bytes(map->cap) + map_bytes(cap);
+  snap->num_bytes_alloced -= map_bytes(map->cap);
+  heap_add(snap, map_bytes(cap));
   map->entries = entries;
   map->index = (int32_t*)malloc(2 * cap * sizeof(int32_t));
   memset(map->index, -1, 2 * cap * sizeof(int32_t));
@@ -1130,36 +1156,41 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
 // 2) [args and locals][stack...][args and locals][stack...]
 // 3) [args and locals][stack...][return value]
 
-static void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* closure) {
+// Grows the stack so that `needed` values fit above stack_base, and returns
+// where stack_base is now. Kept out of push_frame() so that it's inlined.
+static __attribute__((noinline)) SValue* grow_stack(Snap* snap, SValue* stack_base, int needed) {
+  SnapFrame* frame;
+  int offset = stack_base - snap->stack;
+  int stack_size = snap->stack_size;
+  SValue* stack_old = snap->stack;
+  SValue* stack_new;
+  SUpval* upval;
+
+  while (offset + needed >= stack_size) {
+    stack_size *= (stack_size < 4096 ? 4 : 2);
+  }
+  stack_new = (SValue*)realloc(snap->stack, stack_size * sizeof(SValue));
+  snap->stack_size = stack_size;
+  snap->stack = stack_new;
+  snap->stack_end = stack_new + stack_size;
+
+  // Update stack pointers to the new stack
+  mvec_foreach(&snap->frames, frame) {
+    relocate(stack_old, stack_new, frame->stack_base);
+    relocate(stack_old, stack_new, frame->stack_top);
+  }
+  for (upval = snap->open_upvals; upval; upval = upval->next) {
+    relocate(stack_old, stack_new, upval->value);
+  }
+  return stack_new + offset;
+}
+
+static inline void push_frame(Snap* snap, SCode* code, SValue* stack_base, SClosure* closure) {
   SnapFrame* frame;
   SValue* val;
   int needed = code->num_locals + code->max_stack_size;
 
-  if (stack_base + needed >= snap->stack_end) {
-    int offset = stack_base - snap->stack;
-    int stack_size = snap->stack_size;
-    SValue* stack_old = snap->stack;
-    SValue* stack_new;
-    SUpval* upval;
-
-    while (offset + needed >= stack_size) {
-      stack_size *= (stack_size < 4096 ? 4 : 2);
-    }
-    stack_new = (SValue*)realloc(snap->stack, stack_size * sizeof(SValue));
-    snap->stack_size = stack_size;
-    snap->stack = stack_new;
-    snap->stack_end = stack_new + stack_size;
-
-    // Update stack pointers to the new stack
-    mvec_foreach(&snap->frames, frame) {
-      relocate(stack_old, stack_new, frame->stack_base);
-      relocate(stack_old, stack_new, frame->stack_top);
-    }
-    for (upval = snap->open_upvals; upval; upval = upval->next) {
-      relocate(stack_old, stack_new, upval->value);
-    }
-    stack_base = stack_new + offset;
-  }
+  if (stack_base + needed >= snap->stack_end) stack_base = grow_stack(snap, stack_base, needed);
 
   frame = mvec_push(&snap->frames, SnapFrame);
   frame->code = code;
@@ -1229,6 +1260,16 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
   }
 }
 
+// Sets *f to a number as a float, checking its kind once. Returns false if it
+// isn't a number.
+static inline bool num_val(const SValue* v, SnapFloat* f) {
+  if (is_imm_float(*v)) *f = snap_imm_float_val(*v);
+  else if (is_int(*v)) *f = (SnapFloat)as_int(*v);
+  else if (is_obj_type(*v, STYPE_FLOAT)) *f = ((SFloat*)as_obj(*v))->f;
+  else return false;
+  return true;
+}
+
 // Pushes (a op b), or stores it in a local. Int ops work on the tagged words
 // directly. Mixed int/float operands promote to float.
 #define arith_op(iop, fop) \
@@ -1239,8 +1280,8 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
     } else { \
       (stack++)->bits = result; \
     } \
-  } else if (is_num_p(a) && is_num_p(b)) { \
-    SnapFloat f = fop(num_p(a), num_p(b)); \
+  } else if (num_val(a, &x) && num_val(b, &y)) { \
+    SnapFloat f = fop(x, y); \
     SValue val; \
     if (!snap_imm_float(f, &val)) { \
       frame->pc = pc; \
@@ -1261,11 +1302,10 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
 // branch itself rather than pushing a bool for the next instruction. Tagged
 // ints order the same as their values.
 #define compare_op(op) \
-  binary_operands() \
   if (is_int_p(a) && is_int_p(b)) { \
     cond = (SnapInt)a->bits op (SnapInt)b->bits; \
-  } else if (is_num_p(a) && is_num_p(b)) { \
-    cond = num_p(a) op num_p(b); \
+  } else if (num_val(a, &x) && num_val(b, &y)) { \
+    cond = x op y; \
   } else { \
     cond = snap_compare(a, b) op 0; \
   } \
@@ -1301,13 +1341,10 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
   }
 
 // Operand fetches for the variants. Right comes first, as in binary_operands().
-// A variant that falls back puts its stack operands back first.
+// A variant that falls back to the general handler skips its fetch.
 #define fetch_S(n) (--stack)
 #define fetch_L(n) (&locals[(n) - 1])
 #define fetch_K(n) (&constants[-(n) - 1])
-#define pops_S 1
-#define pops_L 0
-#define pops_K 0
 
 #define arith_variant(name, iop, ok, kl, kr) \
   OP(name##_##kl##kr) { \
@@ -1322,8 +1359,7 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
       } \
       DISPATCH(); \
     } \
-    stack += pops_##kl + pops_##kr; \
-    goto slow_##name; \
+    goto fetched_##name; \
   }
 
 #define compare_variant(name, op, kl, kr) \
@@ -1340,8 +1376,7 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
       } \
       DISPATCH(); \
     } \
-    stack += pops_##kl + pops_##kr; \
-    goto slow_##name; \
+    goto fetched_##name; \
   }
 
 #define ARITH_VARIANTS(name, iop, ok) \
@@ -1433,6 +1468,7 @@ static SValue exec(Snap* snap) {
   SValue* locals;
   SValue* stack;
   SValue* a, * b;
+  SnapFloat x, y; // Operands of float arithmetic and compares
   SValue temp;
   bool cond, ok;
   int arg;
@@ -1532,6 +1568,16 @@ new_frame:
         *(stack - 1) = *(stack - 2);
         *(stack - 2) = temp;
         DISPATCH();
+      }
+      OP(CALL_GLOBAL) {
+        SSym* sym = as_sym(constants[arg >> 8]);
+        if (is_undef(sym->value)) {
+          RUNTIME_ERROR("snap_name_error", "'%s' is not defined", sym->data);
+        }
+        a = stack; // Where CALL would have popped it from
+        *a = sym->value;
+        arg &= 0xff;
+        goto call;
       }
       OP(CALL) {
         a = --stack; // Pop callable
@@ -1683,12 +1729,12 @@ new_frame:
       }
       // The general handlers, which the variants fall back to for anything but
       // ints (and division by zero)
-      OP(ADD) { slow_ADD: binary_operands() arith_op(add_iop, add_fop) DISPATCH(); }
-      OP(SUB) { slow_SUB: binary_operands() arith_op(sub_iop, sub_fop) DISPATCH(); }
-      OP(MUL) { slow_MUL: binary_operands() arith_op(mul_iop, mul_fop) DISPATCH(); }
+      OP(ADD) { binary_operands() fetched_ADD: arith_op(add_iop, add_fop) DISPATCH(); }
+      OP(SUB) { binary_operands() fetched_SUB: arith_op(sub_iop, sub_fop) DISPATCH(); }
+      OP(MUL) { binary_operands() fetched_MUL: arith_op(mul_iop, mul_fop) DISPATCH(); }
       OP(DIV) {
-      slow_DIV:
         binary_operands()
+      fetched_DIV:
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
         }
@@ -1696,8 +1742,8 @@ new_frame:
         DISPATCH();
       }
       OP(MOD) {
-      slow_MOD:
         binary_operands()
+      fetched_MOD:
         if (int_zero_divisor()) {
           RUNTIME_ERROR("snap_arith_error", "Division by zero");
         }
@@ -1708,11 +1754,11 @@ new_frame:
       OP(STEP_LE) { step_op(<=) DISPATCH(); }
       OP(STEP_GT) { step_op(>) DISPATCH(); }
       OP(STEP_GE) { step_op(>=) DISPATCH(); }
-      OP(LESS_THAN)      { slow_LESS_THAN: compare_op(<) DISPATCH();  }
-      OP(GREATER_THAN)   { slow_GREATER_THAN: compare_op(>) DISPATCH();  }
-      OP(LESS_EQUALS)    { slow_LESS_EQUALS: compare_op(<=) DISPATCH(); }
-      OP(GREATER_EQUALS) { slow_GREATER_EQUALS: compare_op(>=) DISPATCH(); }
-      OP(EQUALS)         { slow_EQUALS: compare_op(==) DISPATCH(); }
+      OP(LESS_THAN)      { binary_operands() fetched_LESS_THAN: compare_op(<) DISPATCH();  }
+      OP(GREATER_THAN)   { binary_operands() fetched_GREATER_THAN: compare_op(>) DISPATCH();  }
+      OP(LESS_EQUALS)    { binary_operands() fetched_LESS_EQUALS: compare_op(<=) DISPATCH(); }
+      OP(GREATER_EQUALS) { binary_operands() fetched_GREATER_EQUALS: compare_op(>=) DISPATCH(); }
+      OP(EQUALS)         { binary_operands() fetched_EQUALS: compare_op(==) DISPATCH(); }
 
       // The variants: operands fetched without decoding, ints only
       ARITH_VARIANTS(ADD, add_iop, true)
@@ -1936,7 +1982,7 @@ static SValue parse_int(Snap* snap, SnapLex* lex) {
   char* end;
   long long i;
   errno = 0;
-  i = strtoll(lex->val, &end, 10);
+  i = strtoll(lex->val, &end, strchr(lex->val, 'x') ? 16 : 10);
   if (errno == ERANGE || i < SNAP_INT_MIN || i > SNAP_INT_MAX) {
     raise(snap, "snap_parse_error", "Integer literal is out of range on line %d", lex->line);
   }
@@ -2131,7 +2177,7 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   c->arity = fs->variadic ? -1 : fs->num_args;
   c->num_locals = fs->max_locals;
   c->max_stack_size = fs->max_stack + 2; /* Add enough room for raising errors */
-  snap->num_bytes_alloced += code_extra_bytes(c);
+  heap_add(snap, code_extra_bytes(c));
 
   // The code object owns the buffers now
   fs->insts.vitems = NULL;
@@ -2204,6 +2250,16 @@ static int emit(SnapFnState* fs, int op, int arg) {
       fs->insts.vsize--;
       adjust_stack(fs, -1);
       return pc(fs) - 1;
+    }
+    // Calls to a global take the function's name with them: the constant's
+    // index in the high 16 bits, the number of arguments in the low 8
+    if (op == CALL && last == LOAD_GLOBAL && arg < 256) {
+      SnapInst* inst = &fs->insts.vitems[pc(fs) - 1];
+      if (INST_ARG(*inst) < 32768) {
+        *inst = INST(CALL_GLOBAL, INST_ARG(*inst) << 8 | arg);
+        adjust_stack(fs, -1 - arg); // Pops the arguments and the function, pushes the result
+        return pc(fs) - 1;
+      }
     }
     if (op == RETURN && last == CLOSE_UPVALS) {
       fs->insts.vsize--; // RETURN closes all of the frame's upvalues anyway
@@ -2466,11 +2522,17 @@ static void compile_binary(Snap* snap, SnapFnState* fs, int op, SValue a, SValue
   }
 }
 
+static void compile_effect(Snap* snap, SnapFnState* fs, SValue expr);
+
+// All but the last expression are only run for their effects
 static void compile_body(Snap* snap, SnapFnState* fs, SCons* body, bool tail) {
   SCons* curr;
   for (curr = body; curr != NULL; curr = as_cons(curr->rest)) {
-    if (curr != body) emit(fs, POP, 0);
-    compile(snap, fs, curr->first, tail && is_empty(curr->rest));
+    if (is_empty(curr->rest)) {
+      compile(snap, fs, curr->first, tail);
+    } else {
+      compile_effect(snap, fs, curr->first);
+    }
   }
 }
 
@@ -2883,6 +2945,43 @@ static void compile_call(Snap* snap, SnapFnState* fs, SCons* sexpr) {
   emit(fs, CALL, count);
 }
 
+// Compiles an expression whose value isn't used, leaving nothing on the stack.
+// Then an if (or a when or cond, once expanded) doesn't need to push nil for
+// a missing branch, then pop it.
+static void compile_effect(Snap* snap, SnapFnState* fs, SValue expr) {
+  SCons* sexpr = snap_type(expr) == STYPE_CONS ? as_cons(expr) : NULL;
+  SCons* args = sexpr ? as_cons(sexpr->rest) : NULL;
+  SValue macro, form;
+  if (sexpr && is_sym(sexpr->first) && find_macro(fs, sexpr->first, &macro)) {
+    form = expand(snap, macro, args);
+    if (is_err(form)) {
+      snap->cause = as_err(form);
+      longjmp(snap->jmp, 1);
+    }
+    if (is_obj(form)) snap_anchor(snap, as_obj(form));
+    compile_effect(snap, fs, form);
+    if (is_obj(form)) snap_release(snap);
+  } else if (sexpr && is_form(sexpr->first) && as_form(sexpr->first) == TK_IF && list_length(args) == 3) {
+    int cond_jump, jump;
+    compile(snap, fs, args->first, false);
+    cond_jump = emit_jump(fs, JUMP_FALSE);
+    compile_effect(snap, fs, nth(args, 1));
+    if (is_nil(nth(args, 2))) {
+      patch_jump(snap, fs, cond_jump);
+    } else {
+      jump = emit_jump(fs, JUMP);
+      patch_jump(snap, fs, cond_jump);
+      compile_effect(snap, fs, nth(args, 2));
+      patch_jump(snap, fs, jump);
+    }
+  } else if (sexpr && is_form(sexpr->first) && as_form(sexpr->first) == TK_BEGIN && args) {
+    for (; args; args = as_cons(args->rest)) compile_effect(snap, fs, args->first);
+  } else {
+    compile(snap, fs, expr, false);
+    emit(fs, POP, 0);
+  }
+}
+
 static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   SCons* args = as_cons(sexpr->rest);
   SValue macro, form;
@@ -3180,7 +3279,7 @@ SValue snap_exec(Snap* snap, const char* str) {
 /* Printing */
 
 void snap_print(SValue val) {
-  print_val(val);
+  print_val(stdout, val);
 }
 
 static void iprintf(int indent, const char* format, ...) {
@@ -3227,120 +3326,120 @@ static const char* form_name(int token) {
 }
 
 // Quoted and escaped, so that it reads back as the same string
-static void print_str(SStr* s) {
+static void print_str(FILE* out, SStr* s) {
   size_t i;
-  putchar('"');
+  fputc('"', out);
   for (i = 0; i < s->len; ++i) {
     switch (s->data[i]) {
-      case '\n': printf("\\n"); break;
-      case '\t': printf("\\t"); break;
-      case '\r': printf("\\r"); break;
-      case '\\': printf("\\\\"); break;
-      case '"': printf("\\\""); break;
-      default: putchar(s->data[i]); break;
+      case '\n': fprintf(out, "\\n"); break;
+      case '\t': fprintf(out, "\\t"); break;
+      case '\r': fprintf(out, "\\r"); break;
+      case '\\': fprintf(out, "\\\\"); break;
+      case '"': fprintf(out, "\\\""); break;
+      default: fputc(s->data[i], out); break;
     }
   }
-  putchar('"');
+  fputc('"', out);
 }
 
-static void print_val(SValue val) {
+static void print_val(FILE* out, SValue val) {
   int i;
   SCons* cons;
   switch (snap_type(val)) {
     case STYPE_NIL:
-      printf("nil");
+      fprintf(out, "nil");
       break;
     case STYPE_BOOL:
-      printf("%s", is_false(val) ? "false" : "true");
+      fprintf(out, "%s", is_false(val) ? "false" : "true");
       break;
     case STYPE_INT:
-      printf("%ld", (long)as_int(val));
+      fprintf(out, "%ld", (long)as_int(val));
       break;
     case STYPE_FLOAT:
-      printf("%f", as_float(val));
+      fprintf(out, "%f", as_float(val));
       break;
     case STYPE_CFUNC:
-      printf("<cfunc %p>", (void*)as_cfunc(val));
+      fprintf(out, "<cfunc %p>", (void*)as_cfunc(val));
       break;
     case STYPE_FORM:
-      printf("%s", form_name(as_form(val)));
+      fprintf(out, "%s", form_name(as_form(val)));
       break;
     case STYPE_STR:
-      print_str(as_str(val));
+      print_str(out, as_str(val));
       break;
     case STYPE_SYM:
-      printf("%s", as_sym(val)->data);
+      fprintf(out, "%s", as_sym(val)->data);
       break;
     case STYPE_KEY:
-      printf(":%s", as_key(val)->data);
+      fprintf(out, ":%s", as_key(val)->data);
       break;
     case STYPE_ERR:
-      printf("<err ");
-      print_val(as_err(val)->err);
-      printf(" ");
-      print_val(as_err(val)->msg);
-      printf(">");
+      fprintf(out, "<err ");
+      print_val(out, as_err(val)->err);
+      fprintf(out, " ");
+      print_val(out, as_err(val)->msg);
+      fprintf(out, ">");
       break;
     case STYPE_VEC:
-      printf("[");
+      fprintf(out, "[");
       for (i = 0; i < as_vec(val)->len; ++i) {
-        if (i > 0) printf(" ");
-        print_val(*snap_vec_at(as_vec(val), i));
+        if (i > 0) fprintf(out, " ");
+        print_val(out, *snap_vec_at(as_vec(val), i));
       }
-      printf("]");
+      fprintf(out, "]");
       break;
     case STYPE_MAP: {
       SMap* m = as_map(val);
       bool first = true;
-      printf("{");
+      fprintf(out, "{");
       for (i = 0; i < m->used; ++i) {
         if (m->entries[2 * i].bits == SV_DELETED) continue;
-        if (!first) printf(" ");
+        if (!first) fprintf(out, " ");
         first = false;
-        print_val(m->entries[2 * i]);
-        printf(" ");
-        print_val(m->entries[2 * i + 1]);
+        print_val(out, m->entries[2 * i]);
+        fprintf(out, " ");
+        print_val(out, m->entries[2 * i + 1]);
       }
-      printf("}");
+      fprintf(out, "}");
       break;
     }
     case STYPE_CONS:
-      printf("(");
+      fprintf(out, "(");
       for (cons = as_cons(val); cons != NULL; ) {
-        print_val(cons->first);
+        print_val(out, cons->first);
         if (!is_cons(cons->rest)) {
-          printf(" . ");
-          print_val(cons->rest);
+          fprintf(out, " . ");
+          print_val(out, cons->rest);
           break;
         }
         cons = as_cons(cons->rest);
-        if (cons) printf(" ");
+        if (cons) fprintf(out, " ");
       }
-      printf(")");
+      fprintf(out, ")");
       break;
     case STYPE_CODE:
-      printf("<fn %p>", (void*)as_obj(val));
+      fprintf(out, "<fn %p>", (void*)as_obj(val));
       break;
     case STYPE_CLOSURE:
-      printf("<closure %p>", (void*)as_obj(val));
+      fprintf(out, "<closure %p>", (void*)as_obj(val));
       break;
     case STYPE_TYPE:
-      printf("%s", as_type(val)->name->data);
+      fprintf(out, "%s", as_type(val)->name->data);
       break;
     case STYPE_STRUCT: {
       SStruct* st = as_struct(val);
-      printf("#%s{", st->stype->name->data);
+      fprintf(out, "#%s{", st->stype->name->data);
       for (i = 0; i < st->stype->num_fields; ++i) {
-        if (i > 0) printf(" ");
-        print_val(st->stype->fields[i]);
-        printf(" ");
-        print_val(st->vals[i]);
+        if (i > 0) fprintf(out, " ");
+        print_val(out, st->stype->fields[i]);
+        fprintf(out, " ");
+        print_val(out, st->vals[i]);
       }
-      printf("}");
+      fprintf(out, "}");
       break;
     }
     case STYPE_METHOD:
-      printf("<method %s>", as_method(val)->name->data);
+      fprintf(out, "<method %s>", as_method(val)->name->data);
       break;
   }
 }
@@ -3377,7 +3476,7 @@ static void print_code(SCode* code, int indent) {
     switch (op) {
       case LOAD_GLOBAL: case STORE_GLOBAL: case LOAD_CONSTANT:
         printf(" %-6d ", arg);
-        print_val(code->constants[arg]);
+        print_val(stdout, code->constants[arg]);
         break;
       case JUMP: case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
         printf(" %-6d (to %d)", arg, i + 1 + arg);
@@ -3385,6 +3484,10 @@ static void print_code(SCode* code, int indent) {
       case LOAD_LOCAL: case STORE_LOCAL: case LOAD_CLOSED: case STORE_CLOSED:
       case CALL: case CLOSE_UPVALS:
         printf(" %d", arg);
+        break;
+      case CALL_GLOBAL:
+        printf(" %-6d ", arg & 0xff);
+        print_val(stdout, code->constants[arg >> 8]);
         break;
     }
     printf("\n");
@@ -3644,21 +3747,22 @@ static bool map_entries(Snap* snap, const SValue* args, int num_args, int offset
 }
 
 // (str <str>...) joins strings
+// (str x...) joins strings, and other values as they print
 bool builtin_str(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  int i;
+  char* buf = NULL;
   size_t len = 0;
+  FILE* out = open_memstream(&buf, &len);
   SStr* s;
+  int i;
   for (i = 0; i < num_args; ++i) {
-    if (!is_str(args[i])) return fail(snap, result, "snap_type_error", "Expected strings");
-    len += as_str(args[i])->len;
+    if (is_str(args[i])) fwrite(as_str(args[i])->data, 1, as_str(args[i])->len, out);
+    else print_val(out, args[i]);
   }
+  fclose(out);
   s = (SStr*)gc_new(snap, STYPE_STR, sizeof(SStr) + len + 1);
-  s->len = 0;
-  for (i = 0; i < num_args; ++i) {
-    memcpy(s->data + s->len, as_str(args[i])->data, as_str(args[i])->len);
-    s->len += as_str(args[i])->len;
-  }
-  s->data[len] = '\0';
+  memcpy(s->data, buf, len + 1);
+  s->len = len;
+  free(buf);
   *result = create_obj(s);
   return true;
 }
@@ -3678,6 +3782,28 @@ bool builtin_gc_step(Snap* snap, const SValue* args, int num_args, SValue* resul
   if (num_args != 1) return arity_error(snap, result);
   if (!is_int(args[0]) || as_int(args[0]) < 0) return fail(snap, result, "snap_type_error", "Expected a non-negative integer");
   *result = create_bool(snap_gc_step(snap, as_int(args[0])));
+  return true;
+}
+
+// (gc-stats) is a map of what the collector has done, and the heap now
+bool builtin_gc_stats(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  static const char* phases[] = { "idle", "mark", "sweep" };
+  const SnapGCStats* stats = &snap->gc_stats;
+  SMap* m;
+  if (num_args != 0) return arity_error(snap, result);
+  m = (SMap*)snap_anchor(snap, (SObject*)snap_map_new(snap));
+#define PUT(name, val) snap_map_put(snap, m, create_obj(snap_key_new(snap, name)), val)
+  PUT("heap", create_int((SnapInt)snap->num_bytes_alloced));
+  PUT("next-gc", create_int((SnapInt)snap->next_gc));
+  PUT("phase", create_obj(snap_key_new(snap, phases[snap->gc_phase])));
+  PUT("collections", create_int((SnapInt)stats->collections));
+  PUT("steps", create_int((SnapInt)stats->steps));
+  PUT("allocated", create_int((SnapInt)stats->allocated));
+  PUT("pause-total", create_float(snap, stats->pause_total));
+  PUT("pause-max", create_float(snap, stats->pause_max));
+#undef PUT
+  snap_release(snap);
+  *result = create_obj(m);
   return true;
 }
 
@@ -3927,6 +4053,70 @@ static bool op_value(int token, SValue* val) {
   return true;
 }
 
+/* Math */
+
+// (sqrt x), (sin x), (cos x) and (atan2 y x) of ints or floats are floats
+#define XX(name, expr) \
+  static bool name(Snap* snap, const SValue* args, int num_args, SValue* result) { \
+    if (num_args != 1 || !is_num_p(&args[0])) return fail(snap, result, "snap_type_error", "Expected a number"); \
+    SnapFloat x = num_p(&args[0]); \
+    *result = expr; \
+    return true; \
+  }
+XX(builtin_sqrt, create_float(snap, sqrt(x))) XX(builtin_sin, create_float(snap, sin(x)))
+XX(builtin_cos, create_float(snap, cos(x))) XX(builtin_float, create_float(snap, x))
+// (floor x) and (int x) (toward zero) are ints
+XX(builtin_floor, is_int(args[0]) ? args[0] : create_int((SnapInt)floor(x)))
+XX(builtin_int, is_int(args[0]) ? args[0] : create_int((SnapInt)x))
+XX(builtin_abs, is_int(args[0]) ? create_int(llabs(as_int(args[0]))) : create_float(snap, fabs(x)))
+#undef XX
+
+bool builtin_atan2(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 2 || !is_num_p(&args[0]) || !is_num_p(&args[1])) {
+    return fail(snap, result, "snap_type_error", "Expected (atan2 <y> <x>)");
+  }
+  *result = create_float(snap, atan2(num_p(&args[0]), num_p(&args[1])));
+  return true;
+}
+
+// (min x y...) and (max x y...) are the smallest and largest of their
+// arguments
+static bool min_max(Snap* snap, int op, const SValue* args, int num_args, SValue* result) {
+  int i, best = 0;
+  if (num_args < 1) return arity_error(snap, result);
+  for (i = 0; i < num_args; ++i) {
+    if (!is_num_p(&args[i])) return fail(snap, result, "snap_type_error", "Expected numbers");
+    if (op == TK_LT ? num_p(&args[i]) < num_p(&args[best]) : num_p(&args[i]) > num_p(&args[best])) best = i;
+  }
+  *result = args[best];
+  return true;
+}
+
+bool builtin_min(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return min_max(snap, TK_LT, args, num_args, result);
+}
+
+bool builtin_max(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return min_max(snap, TK_GT, args, num_args, result);
+}
+
+// (rand) is a float from 0 up to 1, and (rand n) an int from 0 up to n
+// (xorshift64*)
+bool builtin_rand(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  static uint64_t state = 0x9e3779b97f4a7c15;
+  uint64_t r;
+  if (num_args > 1 || (num_args == 1 && (!is_int(args[0]) || as_int(args[0]) <= 0))) {
+    return fail(snap, result, "snap_type_error", "Expected (rand) or (rand <positive int>)");
+  }
+  state ^= state >> 12;
+  state ^= state << 25;
+  state ^= state >> 27;
+  r = state * 0x2545f4914f6cdd1d;
+  *result = num_args == 0 ? create_float(snap, (SnapFloat)(r >> 11) / (SnapFloat)(1ull << 53))
+                          : create_int((SnapInt)(r % (uint64_t)as_int(args[0])));
+  return true;
+}
+
 /* Types and methods */
 
 bool builtin_type(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -4001,7 +4191,7 @@ bool builtin_find_method(Snap* snap, const SValue* args, int num_args, SValue* r
 
 // stdlib.snap as a string, generated by the Makefile
 static const char stdlib_src[] =
-#include "stdlib.h"
+#include "stdlib_snap.h"
 ;
 
 void snap_init(Snap* snap) {
@@ -4015,6 +4205,7 @@ void snap_init(Snap* snap) {
   snap->pages = NULL;
   memset(snap->free_slots, 0, sizeof(snap->free_slots));
   snap->gc_phase = GC_IDLE;
+  memset(&snap->gc_stats, 0, sizeof(snap->gc_stats));
   snap->gc_unmarked = 0;
   snap->gc_manual = false;
   snap->gc_sym = 0;
@@ -4052,6 +4243,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "str", builtin_str);
   snap_def_cfunc(snap, "compile", builtin_compile);
   snap_def_cfunc(snap, "gc-step", builtin_gc_step);
+  snap_def_cfunc(snap, "gc-stats", builtin_gc_stats);
   snap_def_cfunc(snap, "list", builtin_list);
   snap_def_cfunc(snap, "cons", builtin_cons);
   snap_def_cfunc(snap, "first", builtin_first);
@@ -4066,6 +4258,17 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "make-type", builtin_make_type);
   snap_def_cfunc(snap, "add-method!", builtin_add_method);
   snap_def_cfunc(snap, "find-method", builtin_find_method);
+  snap_def_cfunc(snap, "sqrt", builtin_sqrt);
+  snap_def_cfunc(snap, "sin", builtin_sin);
+  snap_def_cfunc(snap, "cos", builtin_cos);
+  snap_def_cfunc(snap, "atan2", builtin_atan2);
+  snap_def_cfunc(snap, "floor", builtin_floor);
+  snap_def_cfunc(snap, "int", builtin_int);
+  snap_def_cfunc(snap, "float", builtin_float);
+  snap_def_cfunc(snap, "abs", builtin_abs);
+  snap_def_cfunc(snap, "min", builtin_min);
+  snap_def_cfunc(snap, "max", builtin_max);
+  snap_def_cfunc(snap, "rand", builtin_rand);
 
   {
     // The built-in types, which methods can be added to like struct types
@@ -4085,7 +4288,10 @@ void snap_init(Snap* snap) {
     }
   }
 
-  if (is_err(snap_exec(snap, stdlib_src))) assert(0 && "stdlib.snap failed");
+  if (is_err(snap_exec(snap, stdlib_src))) {
+    fprintf(stderr, "stdlib.snap failed\n");
+    abort();
+  }
 }
 
 void snap_destroy(Snap* snap) {

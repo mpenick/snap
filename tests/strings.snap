@@ -4,9 +4,9 @@
 (println "a\nb" "tab\there" "q\"uote" "back\\slash" "ends in \\")
 (println (= "\n" (str "\n")) (= "a\\" (str "a" "\\")))
 
-; str joins strings
+; str joins strings, and other values as they print
 (println (str) (str "a") (str "a" "" "b" "\n" "c"))
-(println (recover (fn [] (str "a" 1))))
+(println (str "a" 1 :k [1 "b"] nil))
 
 ; read-line returns nil at the end of input (stdin is empty in tests)
 (println (read-line))

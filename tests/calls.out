@@ -1,0 +1,17 @@
+-1 0 1 2
+[:neg :a :b :not-neg :zero :still-zero :a :b :pos :not-neg :one :a :b :pos :not-neg :two :big :a :b]
+[0 2 4]
+<err :snap_compile_error "recur must be in tail position">
+[1 2 3] 2 5
+#P{:x 1 :y 2} 7
+2
+10
+<err :snap_name_error "'not-defined' is not defined">
+<err :snap_arity_error "Invalid number of arguments">
+<err :snap_arity_error "Invalid number of arguments">
+300
+[3.500000 -0.500000 3.000000 0.750000 true false false] [3.500000 0.500000 3.000000 1.333333 false true false] [0.750000 0.250000 0.125000 2.000000 false true false]
+1.000000 2.000000 -1.000000 0.000000 true true true
+inf inf
+3.500000 2.250000 true 0.500000
+<err :snap_type_error "Expected numbers"> false <err :snap_arith_error "Division by zero">

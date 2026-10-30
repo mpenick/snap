@@ -102,3 +102,13 @@
 (println (loop [work 0 ok true]
   (if (< work 4000) (recur (+ work 40) (if (rebuild work) ok false)) ok)))
 
+
+; gc-stats counts what the collector does
+(def s1 (gc-stats))
+(start)
+(finish)
+(def s2 (gc-stats))
+(println (sort-by str (keys s1)))
+(println (> (get s2 :collections) (get s1 :collections)) (> (get s2 :steps) (get s1 :steps))
+         (> (get s2 :allocated) (get s1 :allocated)) (>= (get s2 :pause-total) (get s2 :pause-max))
+         (not (nil? (get {:idle 1 :mark 1 :sweep 1} (get s2 :phase)))) (> (get s2 :heap) 0))

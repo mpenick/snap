@@ -272,6 +272,15 @@ typedef struct {
   int pos;
 } SnapGray;
 
+// What the collector has done so far (see (gc-stats))
+typedef struct {
+  size_t collections;  // Finished collections
+  size_t steps;        // Pauses: collections started and steps of them
+  uint64_t allocated;  // Bytes allocated for objects and what they hold
+  double pause_total;  // Seconds spent collecting
+  double pause_max;    // The longest pause, in seconds
+} SnapGCStats;
+
 struct Snap_ {
   SnapHash symbols;
   SnapHash keywords;
@@ -294,6 +303,7 @@ struct Snap_ {
   SnapPage** gc_sweep;  // Page being swept
   uint32_t gc_sweep_slot; // Next slot to sweep in it
   struct { MVEC_FIELDS(SnapGray); } gray; // Marked objects whose children still need marking
+  SnapGCStats gc_stats;
   SUpval* open_upvals;
   struct SnapFnState_* fn_state; // Innermost function being compiled
   SErr* cause;

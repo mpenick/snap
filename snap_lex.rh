@@ -87,7 +87,7 @@ int snap_lex_next_token(SnapLex* lex) {
     id = (alnum | [_\+\-\*\?/=,<>!&])+;
     key = ':' id ;
     chars = '\'' | '`' | '~' | '(' | ')' | '[' | ']' | '{' | '}';
-    integer = [\+\-]? digit+;
+    integer = [\+\-]? (digit+ | '0x' xdigit+);
     floating = [\+\-]? ((digit+ ('.' digit+)?) | ('.' digit+) | (digit+ '.')) ([eE] [\+\-]? digit+)?;
     string = "\"" ([^\r\n\"\\] | "\\" [^\r\n])* "\"";
 

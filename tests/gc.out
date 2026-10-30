@@ -5,3 +5,5 @@ true
 true
 true
 true
+[:heap :phase :steps :next-gc :allocated :pause-max :collections :pause-total]
+true true true true true true

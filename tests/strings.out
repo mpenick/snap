@@ -1,5 +1,5 @@
 "a\nb" "tab\there" "q\"uote" "back\\slash" "ends in \\"
 true true
 "" "a" "ab\nc"
-<err :snap_type_error "Expected strings">
+"a1:k[1 \"b\"]nil"
 nil

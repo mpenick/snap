@@ -1,0 +1,19 @@
+; Math
+(println (sqrt 16) (sqrt 2.25) (sin 0) (cos 0) (atan2 1 1) (atan2 0 -1))
+(println (floor 1.5) (floor -1.5) (floor 7) (int 1.9) (int -1.9) (int 3))
+(println (float 3) (float 2.5) (abs -3) (abs 3) (abs -2.5))
+(println (min 3 1 2) (max 3 1 2) (min 2.5 3) (max 1 1.5) (min 4))
+(def r (rand))
+(println (>= r 0) (< r 1) (< (rand 10) 10) (>= (rand 10) 0) (rand 1))
+(println (recover (fn [] (sqrt :a))) (recover (fn [] (rand 0))) (recover (fn [] (min))))
+
+; Hex literals
+(println 0xff 0x10 -0x10 0xFF00FF)
+
+; doseq and sort-by
+(doseq [x [1 2 3]] (print x))
+(doseq [x '(4 5)] (print x))
+(doseq [x []] (print x))
+(println)
+(println (sort-by (fn [x] x) [5 3 9 1 4 1 8]) (sort-by (fn [x] (- 0 x)) '(1 2 3)) (sort-by inc []))
+(println (sort-by (fn [p] (nth p 0)) [[2 :a] [1 :b] [2 :c] [1 :d] [0 :e]]))

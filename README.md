@@ -68,7 +68,8 @@ Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
 vectors, maps, lists, structs, types, `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
 arithmetic wraps on overflow, and mixing integers with floats gives a float.
-Strings can contain the escapes `\n`, `\t`, `\r`, `\\` and `\"`.
+Strings can contain the escapes `\n`, `\t`, `\r`, `\\` and `\"`. Integers
+can be written in hex, as in `0xff`.
 
 Built-in functions:
 
@@ -86,18 +87,26 @@ Built-in functions:
   below)
 * Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`
-* Strings: `(str s...)` joins strings
+* Strings: `(str x...)` joins strings, and other values as they print
+* Math: `sqrt`, `sin`, `cos` and `(atan2 y x)` give floats; `floor` and `int`
+  (toward zero) give integers; `float`, `abs`, `min` and `max`; `(rand)` is a
+  float from 0 up to 1 and `(rand n)` an integer from 0 up to `n`
 * Code: `(compile src)` compiles a string into a function without arguments.
   It returns an error if the code doesn't parse or compile (`:snap_eof_error`
   when it ends early), and `nil` if there's no code.
 * GC: `(gc-step work)` does about `work` units of collection (marking a value
   or sweeping an object is one), starting a collection if none is running,
   and returns `true` when a collection finishes. `(gc-step 0)` just starts one.
+  `(gc-stats)` is a map of what the collector has done: `:collections`
+  finished, `:steps` (pauses, each starting a collection or doing a step of
+  one), `:allocated` (bytes, in all), `:pause-total` and `:pause-max`
+  (seconds), and the heap now: `:heap` and `:next-gc` (bytes) and `:phase`
+  (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
-`defn`, `when`, `cond`, `dotimes`, `inc`, `dec`, `map`, `filter` and
-`reduce` (which take a vector or list and make a vector), and the struct
-macros below.
+`defn`, `when`, `cond`, `dotimes`, `(doseq [x coll] ...)`, `inc`, `dec`,
+`map`, `filter`, `reduce` and `(sort-by key coll)` (which take a vector or
+list and make a vector), and the struct macros below.
 
 ```clojure
 (defn sum [v] (reduce (fn [a b] (+ a b)) 0 v))
@@ -283,9 +292,9 @@ return an error as a value, set `*result` to it and return `true`.
 
 Everything is in `snap.c`. The lexer is in `snap_lex.rh`, and `main.c` runs a
 file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
-string in `repl.h`: it reads lines until `compile` stops returning
+string in `repl_snap.h`: it reads lines until `compile` stops returning
 `:snap_eof_error`, then calls the result with `recover` and prints it.
-`stdlib.snap` is built in the same way, as `stdlib.h`, and `snap_init()` runs
+`stdlib.snap` is built in the same way, as `stdlib_snap.h`, and `snap_init()` runs
 it.
 
 * **Values** are 8 bytes. The low bits tag integers, floats, objects,
@@ -308,11 +317,15 @@ it.
 * **The compiler** turns each form straight into byte code, one 32-bit
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a
-  local, so most of a tight loop doesn't touch the stack.
+  local, so most of a tight loop doesn't touch the stack. A call to a global
+  is one instruction that carries the name. An expression whose value isn't
+  used (all but the last in a body) is compiled without its value, so an `if`
+  or `when` there doesn't push `nil` for a missing branch only to pop it.
 * **The VM** is a stack machine with computed-goto dispatch. Once a function
   is compiled, each binary op is switched to a variant for its kinds of
   operands (stack, local or constant), which handles ints without decoding
-  them and falls back to the general handler otherwise. Counting loops end in
+  them and falls back to the general handler otherwise (for floats, without
+  fetching the operands again). Counting loops end in
   a single `STEP` instruction that adds to the counter, compares it and jumps
   back. Closed-over variables are shared between closures and closed when
   their frame returns.

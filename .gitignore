@@ -9,5 +9,5 @@ snap_lex.h
 gc
 snap_stress
 snap_stress_pool
-repl.h
-stdlib.h
+repl_snap.h
+stdlib_snap.h

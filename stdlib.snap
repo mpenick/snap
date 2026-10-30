@@ -18,6 +18,12 @@
     `(let [~n ~(nth binding 1)]
        (loop [~i 0] (if (< ~i ~n) (begin ~@body (recur (+ ~i 1))) nil)))))
 
+; (doseq [x coll] body...) runs body with x as each item of a vector or list
+(defmacro doseq [binding & body]
+  (let [x (nth binding 0) v (gensym) i (gensym)]
+    `(let [~v ~(nth binding 1) ~v (if (vector? ~v) ~v (vec ~v))]
+       (dotimes [~i (count ~v)] (let [~x (nth ~v ~i)] ~@body)))))
+
 (defn inc [x] (+ x 1))
 (defn dec [x] (- x 1))
 
@@ -36,6 +42,26 @@
 (defn reduce [f init coll]
   (let [v (if (vector? coll) coll (vec coll)) n (count v)]
     (loop [acc init i 0] (if (< i n) (recur (f acc (nth v i)) (+ i 1)) acc))))
+
+; (sort-by key coll) is a vector of coll's items ordered by (key item),
+; smallest first. Items with equal keys keep their order (a bottom-up merge
+; sort).
+(defn sort-by [key coll]
+  (let [n (count coll) a (map (fn [x] [(key x) x]) coll) b (map (fn [x] x) a)]
+    (loop [width 1 src a dst b]
+      (if (< width n)
+        (begin
+          (loop [lo 0]
+            (when (< lo n)
+              (let [mid (min (+ lo width) n) hi (min (+ mid width) n)]
+                (loop [i lo j mid k lo]
+                  (when (< k hi)
+                    (if (and (< i mid) (or (>= j hi) (<= (nth (nth src i) 0) (nth (nth src j) 0))))
+                      (begin (put! dst k (nth src i)) (recur (+ i 1) j (+ k 1)))
+                      (begin (put! dst k (nth src j)) (recur i (+ j 1) (+ k 1))))))
+                (recur (+ lo width width)))))
+          (recur (* width 2) dst src))
+        (map (fn [p] (nth p 1)) src)))))
 
 ; Structs, methods and interfaces
 
