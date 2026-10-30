@@ -1,0 +1,33 @@
+; vi: filetype=scheme
+
+; Most floats are stored in values; ones too big or small for that (and
+; infinities and NaN) are on the heap. Both kinds should act the same.
+
+(println 1.5 -2.25 0.0 (+ 0.1 0.2))
+
+; In values near the ends of the range, and on the heap past them. Scaling
+; back by a power of 2 is exact.
+(def scale (fn [x k] (* (/ x k) k)))
+(println (= (scale 3.0e38 4.0) 3.0e38) (= (scale 1.2e-38 0.25) 1.2e-38))
+(println (= (scale 1e300 1024.0) 1e300) (= (scale 1e-300 0.5) 1e-300))
+(println (= (scale 7e38 2.0) 7e38) (= (scale 1e-39 0.5) 1e-39))
+
+; In values in, on the heap out, and back
+(println (> (* 1e30 1e30) 9e59) (< (/ 1e-30 1e30) 2e-60) (< 0.0 (/ 1e-30 1e30)))
+(println (> (* (* 1e30 1e30) 1e-30) 9e29) (* (* 1e-300 1e290) 1e10))
+
+; Exact: the mantissa is kept
+(println (= (+ 1.0 1e-15) 1.0) (= (- (+ 1.0 1e-15) 1.0) 1.1102230246251565e-15))
+(println (< 1.0 1e300) (> 1e-300 0.0) (= 1e300 1e300) (= 1.5 1.5) (= 0.0 -0.0))
+
+; Mixed with ints
+(println (+ 1 0.5) (- 3.5 1) (< 1 1.5) (> 2 1e-300) (= (* 2 1e300) (+ 1e300 1e300)))
+
+; As map keys and in vectors
+(def m {1.5 :a 1e300 :b 0.0 :c})
+(println (get m 1.5) (get m (* 1e300 1.0)) (get m -0.0) (get m 2.5))
+(println [1.5 (count [1e300 1e-300])])
+
+; Counting with a float counter (STEP's float path)
+(println (loop [x 0.5 n 0] (if (< x 10) (recur (+ x 1) (+ n 1)) n)))
+(println (loop [x 1e-300 n 0] (if (< x 3) (recur (+ x 1) (+ n 1)) n))) ; Starts on the heap

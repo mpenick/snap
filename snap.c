@@ -195,12 +195,13 @@ static int hash_pointer(void* ptr) {
 
 int snap_hash(const SValue* val) {
   SObject* obj = as_obj(*val);
+  if (is_float(*val)) {
+    return hash_float(as_float(*val)); // By value, so that 0.0 and -0.0 match
+  }
   if (!is_obj(*val)) {
     return (int)(val->bits ^ (val->bits >> 32)); // Ints, nil, bools, forms and cfuncs
   }
   switch (obj->type) {
-    case STYPE_FLOAT:
-      return hash_float(((SFloat*)obj)->f);
     // Hashed by contents so interning can look them up with a STempStr
     case STYPE_SYM:
       return hash_chars(((SSym*)obj)->data, ((SSym*)obj)->len);
@@ -616,7 +617,10 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
 /* Objects */
 
 SValue create_float(Snap* snap, SnapFloat f) {
-  SFloat* n = (SFloat*)gc_new(snap, STYPE_FLOAT, sizeof(SFloat));
+  SValue val;
+  SFloat* n;
+  if (snap_imm_float(f, &val)) return val;
+  n = (SFloat*)gc_new(snap, STYPE_FLOAT, sizeof(SFloat));
   n->f = f;
   return create_obj(n);
 }
@@ -947,9 +951,9 @@ static void close_upvals(Snap* snap, SValue* level) {
   b = OPERAND_RIGHT(inst) ? operand(OPERAND_RIGHT(inst)) : --stack; \
   a = OPERAND_LEFT(inst) ? operand(OPERAND_LEFT(inst)) : --stack;
 
-// Floats are allocated, so a float result is stored by saving the frame,
-// calling this and reloading the frame. Keeping the VM's registers live across
-// the call instead would spill them in every handler.
+// Floats that can't be immediate are allocated, so they're stored by saving
+// the frame, calling this and reloading the frame. Keeping the VM's registers
+// live across the call instead would spill them in every handler.
 static void store_float(Snap* snap, SnapFloat f, int dest) {
   SnapFrame* frame = &mvec_back(&snap->frames);
   SValue val = create_float(snap, f);
@@ -972,10 +976,18 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
     } \
   } else if (is_num_p(a) && is_num_p(b)) { \
     SnapFloat f = fop(num_p(a), num_p(b)); \
-    frame->pc = pc; \
-    frame->stack_top = stack; \
-    store_float(snap, f, OPERAND_DEST(inst)); \
-    goto new_frame; \
+    SValue val; \
+    if (!snap_imm_float(f, &val)) { \
+      frame->pc = pc; \
+      frame->stack_top = stack; \
+      store_float(snap, f, OPERAND_DEST(inst)); \
+      goto new_frame; \
+    } \
+    if (OPERAND_DEST(inst)) { \
+      locals[OPERAND_DEST(inst) - 1] = val; \
+    } else { \
+      *stack++ = val; \
+    } \
   } else { \
     RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
   }
@@ -1013,10 +1025,12 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
     } \
   } else if (is_float(*a)) { \
     SnapFloat f = as_float(*a) + as_int(constants[-OPERAND_LEFT(inst) - 1]); \
-    frame->pc = pc; \
-    frame->stack_top = stack; \
-    store_float(snap, f, OPERAND_DEST(inst)); \
-    goto new_frame; \
+    if (!snap_imm_float(f, a)) { \
+      frame->pc = pc; \
+      frame->stack_top = stack; \
+      store_float(snap, f, OPERAND_DEST(inst)); \
+      goto new_frame; \
+    } \
   } else { \
     RUNTIME_ERROR("snap_type_error", "Expected numbers"); \
   }

@@ -1,7 +1,7 @@
 ; vi: filetype=scheme
 
-; GC benchmark: float arithmetic. Floats are heap objects, so every result is
-; garbage, with almost nothing live.
+; Float arithmetic benchmark. Floats this size are stored in values, so this
+; doesn't allocate (it used to make every result garbage).
 
 (def f (fn [i x] (if (< i 3000000) (recur (+ i 1) (+ (* x 0.5) 1.0)) x)))
 (println (f 0 0.0))

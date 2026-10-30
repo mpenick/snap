@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #define check(a, e) (assert(a), (e))
 
@@ -53,9 +54,10 @@ typedef uint32_t SnapInst;
 
 // A value is one tagged word:
 //   ...xxx1  63-bit integer (i << 1 | 1)
-//   ...x000  pointer to a GC object, whose header holds its type (floats too)
-//   ...x010  undef, deleted, nil, false, true or the empty list (n << 3 | 2)
-//   ...x100  special form (token << 3 | 4)
+//   ...x000  pointer to a GC object, whose header holds its type
+//   ...x010  undef, deleted, nil, false, true, the empty list (n << 3 | 2) or
+//            a special form ((SV_FORMS + token) << 3 | 2)
+//   ...x100  float, unless it's too big or small (see snap_imm_float())
 //   ...x110  C function (pointer << 3 | 6; user space pointers fit in 61 bits)
 struct SValue_ {
   uint64_t bits;
@@ -64,7 +66,7 @@ struct SValue_ {
 #define TAG_MASK 7
 #define TAG_OBJ 0
 #define TAG_SPECIAL 2
-#define TAG_FORM 4
+#define TAG_FLOAT 4
 #define TAG_CFUNC 6
 
 #define SV_SPECIAL(n) (((uint64_t)(n) << 3) | TAG_SPECIAL)
@@ -75,6 +77,14 @@ struct SValue_ {
 #define SV_TRUE SV_SPECIAL(4)
 static_assert((SV_NIL | 8) == SV_FALSE, "is_falsy() needs nil and false to differ only in bit 3");
 #define SV_EMPTY SV_SPECIAL(5)
+#define SV_FORMS 8 // Special forms come after the specials
+
+// Floats with exponents from -126 to 128 (magnitudes from about 1e-38 to 6e38)
+// and zeros are immediate, as in Spur (Smalltalk): the bits are rotated so the
+// sign is lowest, and the 11-bit exponent is offset to fit in 8 bits, leaving
+// room for the tag. The mantissa is kept, so they're exact. Other floats
+// (including infinities and NaN) are boxed in objects.
+#define FLOAT_EXP_OFFSET ((uint64_t)(1023 - 127) << 53)
 
 #define SNAP_INT_MAX ((SnapInt)(((uint64_t)1 << 62) - 1))
 #define SNAP_INT_MIN (-SNAP_INT_MAX - 1)
@@ -249,10 +259,11 @@ struct Snap_ {
 #define is_falsy(v) (((v).bits & ~(uint64_t)8) == SV_NIL)
 #define is_bool(v) (is_false(v) || (v).bits == SV_TRUE)
 #define is_empty(v) ((v).bits == SV_EMPTY)
-#define is_form(v) (((v).bits & TAG_MASK) == TAG_FORM)
+#define is_form(v) (((v).bits & TAG_MASK) == TAG_SPECIAL && (v).bits >= SV_SPECIAL(SV_FORMS))
 #define is_cfunc(v) (((v).bits & TAG_MASK) == TAG_CFUNC)
 #define is_obj_type(v, t) (is_obj(v) && as_obj(v)->type == (t))
-#define is_float(v) is_obj_type(v, STYPE_FLOAT)
+#define is_imm_float(v) (((v).bits & TAG_MASK) == TAG_FLOAT)
+#define is_float(v) (is_imm_float(v) || is_obj_type(v, STYPE_FLOAT))
 #define is_sym(v) is_obj_type(v, STYPE_SYM)
 #define is_str(v) is_obj_type(v, STYPE_STR)
 #define is_key(v) is_obj_type(v, STYPE_KEY)
@@ -265,8 +276,8 @@ struct Snap_ {
 
 #define as_obj(v) ((SObject*)(uintptr_t)(v).bits)
 #define as_int(v) check(is_int(v), (SnapInt)(v).bits >> 1)
-#define as_float(v) check(is_float(v), ((SFloat*)as_obj(v))->f)
-#define as_form(v) check(is_form(v), (int)((v).bits >> 3))
+#define as_float(v) check(is_float(v), is_imm_float(v) ? snap_imm_float_val(v) : ((SFloat*)as_obj(v))->f)
+#define as_form(v) check(is_form(v), (int)((v).bits >> 3) - SV_FORMS)
 #define as_cfunc(v) check(is_cfunc(v), (SCFunc)(uintptr_t)((v).bits >> 3))
 #define as_str(v) check(is_str(v), (SStr*)as_obj(v))
 #define as_sym(v) check(is_sym(v), (SSym*)as_obj(v))
@@ -289,11 +300,36 @@ static inline SValue create_nil(void) { return snap_val(SV_NIL); }
 static inline SValue create_empty(void) { return snap_val(SV_EMPTY); }
 static inline SValue create_bool(bool b) { return snap_val(b ? SV_TRUE : SV_FALSE); }
 static inline SValue create_int(SnapInt i) { return snap_val(((uint64_t)i << 1) | 1); }
-static inline SValue create_form(int token) { return snap_val(((uint64_t)token << 3) | TAG_FORM); }
+static inline SValue create_form(int token) { return snap_val(SV_SPECIAL(SV_FORMS + token)); }
 static inline SValue create_cfunc(SCFunc c) { return snap_val(((uint64_t)(uintptr_t)c << 3) | TAG_CFUNC); }
 static inline SValue create_object(SObject* o) { return snap_val((uint64_t)(uintptr_t)o); }
 #define create_obj(o) create_object((SObject*)(o))
-SValue create_float(Snap* snap, SnapFloat f); // Allocates
+SValue create_float(Snap* snap, SnapFloat f); // Allocates if f can't be immediate
+
+// Sets *val to f and returns true if f can be immediate
+static inline bool snap_imm_float(SnapFloat f, SValue* val) {
+  uint64_t bits, r;
+  memcpy(&bits, &f, sizeof(bits));
+  r = (bits << 1) | (bits >> 63); // Exponent, mantissa, sign
+  if (r - (FLOAT_EXP_OFFSET + ((uint64_t)1 << 53)) < ((uint64_t)255 << 53)) {
+    val->bits = ((r - FLOAT_EXP_OFFSET) << 3) | TAG_FLOAT; // Offset exponent from 1 to 255
+    return true;
+  }
+  if (r <= 1) {
+    val->bits = (r << 3) | TAG_FLOAT; // Zeros get offset exponent 0
+    return true;
+  }
+  return false;
+}
+
+static inline SnapFloat snap_imm_float_val(SValue val) {
+  uint64_t r = val.bits >> 3, bits;
+  SnapFloat f;
+  if (r > 1) r += FLOAT_EXP_OFFSET;
+  bits = (r >> 1) | (r << 63);
+  memcpy(&f, &bits, sizeof(f));
+  return f;
+}
 
 static inline int snap_type(SValue val) {
   static const uint8_t specials[] = {
@@ -302,8 +338,8 @@ static inline int snap_type(SValue val) {
   if (is_int(val)) return STYPE_INT;
   switch (val.bits & TAG_MASK) {
     case TAG_OBJ: return as_obj(val)->type;
-    case TAG_SPECIAL: return specials[val.bits >> 3];
-    case TAG_FORM: return STYPE_FORM;
+    case TAG_SPECIAL: return val.bits < SV_SPECIAL(SV_FORMS) ? specials[val.bits >> 3] : STYPE_FORM;
+    case TAG_FLOAT: return STYPE_FLOAT;
     default: return STYPE_CFUNC;
   }
 }

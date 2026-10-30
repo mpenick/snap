@@ -174,8 +174,12 @@ file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
 string in `repl.h`: it reads lines until `compile` stops returning
 `:snap_eof_error`, then calls the result with `recover` and prints it.
 
-* **Values** are 8 bytes. The low bits tag integers, objects, `nil`/booleans
-  and C functions, so integers need no allocation. Floats are heap objects.
+* **Values** are 8 bytes. The low bits tag integers, floats, objects,
+  `nil`/booleans and C functions, so integers and most floats need no
+  allocation. A float is stored in the value, as in Spur (Smalltalk), when its
+  magnitude is between about 1e-38 and 6e38, or it's zero: its bits are
+  rotated and its exponent offset to make room for the tag, keeping the whole
+  mantissa, so it's exact. Other floats (and infinities and NaN) are boxed.
 * **The compiler** turns each form straight into byte code, one 32-bit
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a
@@ -207,4 +211,3 @@ string in `repl.h`: it reads lines until `compile` stops returning
 
 * Allocate objects from pools of fixed sizes, so that allocation has bounded
   time too (`malloc` and `free` don't)
-* Floats in values instead of on the heap
