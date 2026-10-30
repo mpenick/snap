@@ -108,8 +108,7 @@ typedef struct {
 #define SOBJECT_FIELDS          \
   uint8_t type;                 \
   uint8_t mark;                 \
-  uint8_t read_only; /* Vectors and maps from quote */ \
-  struct SObject_* gc_next;
+  uint8_t read_only; /* Vectors and maps from quote */
 
 struct SObject_ {
   SOBJECT_FIELDS
@@ -216,6 +215,16 @@ typedef struct SnapFrame_ {
   bool recover; // Called by recover: a panic unwinds to here
 } SnapFrame;
 
+// Objects live in pages of slots of one size, or a page of their own if
+// they're big (see snap.c)
+#define SNAP_NUM_SLOT_SIZES 8
+
+typedef struct SnapPage_ {
+  struct SnapPage_* next;
+  uint32_t slot_size;
+  uint32_t num_slots;
+} SnapPage;
+
 // A marked object and the index of its next child to mark, so that big
 // vectors and maps are marked a chunk at a time
 typedef struct {
@@ -233,7 +242,8 @@ struct Snap_ {
   struct { MVEC_FIELDS(SObject*); } anchors;
   size_t num_bytes_alloced;
   size_t next_gc; // Start a collection when num_bytes_alloced reaches this
-  SObject* all;
+  SnapPage* pages;
+  SObject* free_slots[SNAP_NUM_SLOT_SIZES]; // A free list for each slot size
   // The collector runs in small steps between allocations (see snap.c)
   uint8_t gc_phase;     // Idle, marking or sweeping
   uint8_t gc_unmarked;  // Mark value of unmarked objects (0 or 1), flipped each collection
@@ -241,7 +251,8 @@ struct Snap_ {
   int gc_sym;           // Next symbol table entry to mark the value of (globals)
   size_t gc_debt;       // Bytes allocated since the last step
   size_t gc_live;       // Estimate of live bytes: the heap when the collection started, less what it freed
-  SObject** gc_sweep;   // Next object to sweep
+  SnapPage** gc_sweep;  // Page being swept
+  uint32_t gc_sweep_slot; // Next slot to sweep in it
   struct { MVEC_FIELDS(SnapGray); } gray; // Marked objects whose children still need marking
   SUpval* open_upvals;
   struct SnapFnState_* fn_state; // Innermost function being compiled

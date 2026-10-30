@@ -203,11 +203,17 @@ string in `repl.h`: it reads lines until `compile` stops returning
   during a collection survive it. Big vectors and maps are marked 64 values at
   a time, and sweeping goes a few objects at a time. Which mark value means
   "marked" flips each collection, so objects never need to be unmarked.
+* **Allocation** takes constant time for objects up to 256 bytes (nearly
+  all of them): they come from free lists of slots of 8 sizes, carved from
+  16KB pages that are kept for reuse. Bigger objects get a page of their own.
+  Sweeping walks the pages slot by slot, so objects need no list pointer and
+  their header is 8 bytes. Big objects (such as long strings) and the arrays
+  inside vectors and maps still come from `malloc`.
 * **Real-time programs** can set `gc_manual` in the `Snap` struct so that
   allocation never collects, and call `snap_gc_step()` (or `gc-step`) in
   their idle time, such as the end of each frame.
 
 ## TODO
 
-* Allocate objects from pools of fixed sizes, so that allocation has bounded
-  time too (`malloc` and `free` don't)
+* Growing a vector or map copies it, which takes time in proportion to its
+  size

@@ -35,6 +35,34 @@
 
 #define GC_CHUNK 64
 
+// Objects up to GC_MAX_SLOT bytes are allocated from free lists of slots of
+// a few sizes, carved from GC_PAGE_SIZE pages, so allocating and freeing take
+// constant time. Bigger ones get a page of their own. Pages of slots aren't
+// given back, so a program that stays the same size stops calling malloc().
+#define GC_PAGE_SIZE 16384
+#define GC_MAX_SLOT 256
+
+// With GC_POOL 0 every object gets its own page, freed with free(), so that
+// ASan sees each use after free (see make stress)
+#ifndef GC_POOL
+#define GC_POOL 1
+#endif
+#define SLOT_FREE 0 // Type of a free slot (no object is STYPE_UNDEF)
+
+static const uint16_t slot_sizes[SNAP_NUM_SLOT_SIZES] = { 16, 32, 48, 64, 96, 128, 192, 256 };
+
+// Index into slot_sizes for an object of n bytes, by (n + 15) / 16
+static const uint8_t slot_size_index[GC_MAX_SLOT / 16 + 1] = {
+  0, 0, 1, 2, 3, 4, 4, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7
+};
+
+typedef struct {
+  SOBJECT_FIELDS
+  SObject* next;
+} SFreeSlot;
+
+#define page_slot(page, i) ((SObject*)((char*)((page) + 1) + (size_t)(i) * (page)->slot_size))
+
 #define MAX_ARG ((1 << 23) - 1)
 #define MAX_LOCALS 256
 #define MAX_UPVALS 256
@@ -393,7 +421,46 @@ static void gc_free(Snap* snap, SObject* obj) {
       assert(0 && "Not a GC object");
       break;
   }
-  free(obj);
+}
+
+static void gc_add_page(Snap* snap, SnapPage* page) {
+  page->next = snap->pages;
+  snap->pages = page;
+  // A sweep on the first page stays on it (new pages hold no garbage)
+  if (snap->gc_sweep == &snap->pages) snap->gc_sweep = &page->next;
+}
+
+// Threads a new page's slots onto the free list for slot size c, first slot
+// first
+static void gc_new_page(Snap* snap, int c) {
+  uint32_t size = slot_sizes[c], i, n = (GC_PAGE_SIZE - sizeof(SnapPage)) / size;
+  SnapPage* page = (SnapPage*)malloc(sizeof(SnapPage) + n * size);
+  page->slot_size = size;
+  page->num_slots = n;
+  gc_add_page(snap, page);
+  for (i = n; i-- > 0;) {
+    SFreeSlot* slot = (SFreeSlot*)page_slot(page, i);
+    slot->type = SLOT_FREE;
+    slot->next = snap->free_slots[c];
+    snap->free_slots[c] = (SObject*)slot;
+  }
+}
+
+static SObject* gc_alloc(Snap* snap, size_t size) {
+  SObject* obj;
+  int c;
+  if (!GC_POOL || size > GC_MAX_SLOT) {
+    SnapPage* page = (SnapPage*)malloc(sizeof(SnapPage) + size);
+    page->slot_size = size;
+    page->num_slots = 1;
+    gc_add_page(snap, page);
+    return page_slot(page, 0);
+  }
+  c = slot_size_index[(size + 15) / 16];
+  if (!snap->free_slots[c]) gc_new_page(snap, c);
+  obj = snap->free_slots[c];
+  snap->free_slots[c] = ((SFreeSlot*)obj)->next;
+  return obj;
 }
 
 // Symbols and keywords are GC_FIXED, so they never get past the first line
@@ -551,13 +618,14 @@ static bool gc_step(Snap* snap, size_t work) {
         if (gray.pos >= 0) *mvec_push(&snap->gray, SnapGray) = gray;
       } else {
         snap->gc_phase = GC_SWEEP;
-        snap->gc_sweep = &snap->all;
+        snap->gc_sweep = &snap->pages;
+        snap->gc_sweep_slot = 0;
       }
     } else if (snap->gc_phase == GC_SWEEP) {
-      // New objects go on the front of the list, so they're never between
-      // the sweep position and the end, and they're marked anyway
-      SObject* obj = *snap->gc_sweep;
-      if (!obj) {
+      // Objects made during the sweep are marked, wherever they go
+      SnapPage* page = *snap->gc_sweep;
+      SObject* obj;
+      if (!page) {
         // Grow from the live estimate rather than the heap size, which
         // includes everything allocated during the collection
         snap->gc_phase = GC_IDLE;
@@ -567,15 +635,27 @@ static bool gc_step(Snap* snap, size_t work) {
         }
         return true;
       }
-      if (obj->mark == snap->gc_unmarked) {
+      obj = page_slot(page, snap->gc_sweep_slot);
+      done++;
+      if (obj->type != SLOT_FREE && obj->mark == snap->gc_unmarked) {
         size_t before = snap->num_bytes_alloced;
-        *snap->gc_sweep = obj->gc_next;
         gc_free(snap, obj);
         snap->gc_live -= before - snap->num_bytes_alloced;
-      } else {
-        snap->gc_sweep = &obj->gc_next;
+        if (page->num_slots == 1) { // An object's own page
+          *snap->gc_sweep = page->next;
+          free(page);
+          continue;
+        } else {
+          int c = slot_size_index[page->slot_size / 16];
+          obj->type = SLOT_FREE;
+          ((SFreeSlot*)obj)->next = snap->free_slots[c];
+          snap->free_slots[c] = obj;
+        }
       }
-      done++;
+      if (++snap->gc_sweep_slot == page->num_slots) {
+        snap->gc_sweep = &page->next;
+        snap->gc_sweep_slot = 0;
+      }
     } else {
       break;
     }
@@ -604,12 +684,10 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   } else if (snap->num_bytes_alloced + size > snap->next_gc) {
     gc_start(snap);
   }
-  obj = (SObject*)malloc(size);
+  obj = gc_alloc(snap, size);
   obj->type = type;
   obj->mark = snap->gc_unmarked ^ 1; // New objects survive the collection they're made in
   obj->read_only = false;
-  obj->gc_next = snap->all;
-  snap->all = obj;
   snap->num_bytes_alloced += size;
   return obj;
 }
@@ -3054,7 +3132,8 @@ void snap_init(Snap* snap) {
   mvec_init(&snap->anchors, SObject*, 32);
   snap->num_bytes_alloced = 0;
   snap->next_gc = GC_MIN_STEP;
-  snap->all = NULL;
+  snap->pages = NULL;
+  memset(snap->free_slots, 0, sizeof(snap->free_slots));
   snap->gc_phase = GC_IDLE;
   snap->gc_unmarked = 0;
   snap->gc_manual = false;
@@ -3062,6 +3141,7 @@ void snap_init(Snap* snap) {
   snap->gc_debt = 0;
   snap->gc_live = 0;
   snap->gc_sweep = NULL;
+  snap->gc_sweep_slot = 0;
   mvec_init(&snap->gray, SnapGray, 64);
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
@@ -3094,11 +3174,16 @@ void snap_init(Snap* snap) {
 }
 
 void snap_destroy(Snap* snap) {
-  SObject* obj = snap->all;
-  while (obj) {
-    SObject* temp = obj;
-    obj = obj->gc_next;
-    gc_free(snap, temp);
+  SnapPage* page = snap->pages;
+  while (page) {
+    SnapPage* next = page->next;
+    uint32_t i;
+    for (i = 0; i < page->num_slots; ++i) {
+      SObject* obj = page_slot(page, i);
+      if (obj->type != SLOT_FREE) gc_free(snap, obj);
+    }
+    free(page);
+    page = next;
   }
   free((void*)snap->stack);
   mvec_destroy(&snap->frames);
