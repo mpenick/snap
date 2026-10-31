@@ -199,6 +199,7 @@ typedef struct SType_ {
   bool is_struct;
   int num_fields;
   SSym* name;
+  SValue gc; // Finalizer for its structs, or nil (see snap_set_gc()). Pinned, as types aren't scanned.
   SValue fields[0]; // Keywords
 } SType;
 
@@ -323,6 +324,15 @@ struct Snap_ {
   SnapPage** gc_sweep;  // Page being swept
   uint32_t gc_sweep_slot; // Next slot to sweep in it
   struct { MVEC_FIELDS(SnapGray); } gray; // Marked objects whose children still need marking
+  // Finalizers (see snap_set_gc()). Structs whose type had one when they were
+  // made are in finobj, which isn't a root. When marking ends, the unmarked
+  // ones move to tobefnz, which is, until their finalizers run.
+  struct { MVEC_FIELDS(SObject*); } finobj;
+  struct { MVEC_FIELDS(SValue); } tobefnz;
+  bool gc_separated;   // This collection has moved finobj's unmarked structs to tobefnz
+  bool fin_pending;    // tobefnz has structs to finalize
+  bool fin_running;    // In snap_run_finalizers(), which doesn't nest
+  bool gc_closing;     // In snap_destroy(), where new structs don't get finalizers
   SnapGCStats gc_stats;
   SUpval* open_upvals;
   struct SnapFnState_* fn_state; // Innermost function being compiled
@@ -484,6 +494,16 @@ void snap_print(SValue value);
 // collection finishes. With gc_manual set, this is the only way the collector
 // runs, e.g. in a program's idle time each frame.
 bool snap_gc_step(Snap* snap, size_t work);
+
+// Gives a struct type a finalizer: fn (a snap or C function, or nil for none)
+// is called with each struct of the type made from now on, once nothing can
+// reach it, to free what it holds (files, textures...). Like Lua's __gc.
+void snap_set_gc(Snap* snap, SType* type, SValue fn);
+// Runs the finalizers of the structs the collector has found unreachable,
+// newest first. They run snap code, so like snap_call() this can move the
+// stack. The VM runs them by itself after C function calls, and snap_exec()
+// between forms; this is for C programs that want them run sooner.
+void snap_run_finalizers(Snap* snap);
 
 void snap_init(Snap* snap);
 void snap_destroy(Snap* snap);

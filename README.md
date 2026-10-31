@@ -11,7 +11,7 @@ are fast, small and simple.
 * Structs, methods and interfaces, in the style of Go
 * Tail recursion (`recur` and `loop`)
 * Byte code compiler and stack-based interpreter
-* Incremental mark-and-sweep GC with short pauses
+* Incremental mark-and-sweep GC with short pauses, and finalizers
 * FFI (C functions)
 * Errors as values (no exceptions)
 
@@ -83,8 +83,8 @@ Built-in functions:
   and `vec` (a list to a vector). `count` and `nth` work on lists too. `nil`
   counts as an empty list.
 * Macros: `gensym` and `macroexpand` (see below)
-* Types: `type`, `make-type`, `add-method!` and `find-method` (see Structs
-  below)
+* Types: `type`, `make-type`, `add-method!`, `find-method` and `set-gc!`
+  (see Structs and Finalizers below)
 * Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`
 * Strings: `(str x...)` joins strings, and other values as they print
@@ -108,7 +108,7 @@ Built-in functions:
 The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `dotimes`, `(doseq [x coll] ...)`, `inc`,
 `dec`, `map`, `filter`, `reduce` and `(sort-by key coll)` (which take a
-vector or list and make a vector), and the struct macros below.
+vector or list and make a vector), the struct macros below, and `defgc`.
 
 `(defconst name expr)` defines a global that can't change: `def`, `set!` or
 another `defconst` of it is an error. Code compiled after it uses the value
@@ -204,6 +204,45 @@ Underneath, `defstruct` calls `(make-type 'Rect '[w h])`, `defmethod` calls
 `(add-method! 'area Rect (fn [r] ...))`, which defines the method if the name
 isn't defined yet, and `(find-method area Rect)` is the function a type runs,
 or `nil`. An interface is just a vector of method names.
+
+## Finalizers
+
+A struct type can have a finalizer, like Lua's `__gc`: a function that's
+called with each of its structs once nothing can reach it, to free what it
+holds, such as a texture or a file, without the program having to.
+
+```clojure
+(defstruct Voice [channel])
+(defgc [v Voice] (stop-channel (get v :channel)))  ; A C binding
+
+(defn play [sound]
+  (Voice (start-channel sound)))
+; Once nothing holds a Voice, a later collection finds it and the finalizer
+; stops its channel
+```
+
+`defgc` is `(set-gc! Voice (fn [v] ...))`, and `(set-gc! Voice nil)` takes
+the finalizer away. The finalizer can be a C function, so bindings can make
+handles that free themselves. As in Lua, only structs made after their type
+gets a finalizer are finalized, so give it one right after `defstruct`.
+
+* A finalizer runs once per struct. If it stores the struct somewhere, the
+  struct lives on, but it's never finalized again.
+* What a struct holds stays alive until its finalizer has run, so the
+  finalizer can use it. Its memory is freed by the collection after that.
+* Collections happen during allocation, where running snap code isn't safe,
+  so finalizers run soon after at a safe point: when a C function (like
+  `gc-step`) returns, and between top-level forms. Those found by the same
+  collection run newest first. A loop that allocates without calling any C
+  function holds them back until it does.
+* One that panics prints a warning to stderr, and the rest still run.
+* When the program ends (`snap_destroy()`), every struct that still has a
+  finalizer gets it run, live or not, as Lua does when it closes. A program
+  that frees GPU resources in finalizers should call `snap_destroy()` before
+  closing its window.
+
+In C, `snap_set_gc(snap, type, fn)` sets one, and `snap_run_finalizers()`
+runs any that are waiting.
 
 ## Macros
 
@@ -382,6 +421,14 @@ it.
   during a collection survive it. Big vectors and maps are marked 64 values at
   a time, and sweeping goes a few objects at a time. Which mark value means
   "marked" flips each collection, so objects never need to be unmarked.
+* **Finalizers** work as in Lua 5.4. A struct whose type has a finalizer
+  goes on a list when it's made, which isn't a root. When marking has reached
+  everything, the structs on it that weren't marked move to a second list,
+  which is a root, and get marked, along with what they reach; marking then
+  carries on before the sweep. The VM runs the second list's finalizers after
+  its next C call, through the check it already makes for C functions that
+  ran snap code, so it costs nothing when there aren't any. Moving them goes
+  through the first list in one step, rather than incrementally.
 * **Allocation** takes constant time for objects up to 256 bytes (nearly
   all of them): they come from free lists of slots of 8 sizes, carved from
   16KB pages that are kept for reuse. Bigger objects get a page of their own.

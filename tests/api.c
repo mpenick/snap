@@ -16,6 +16,18 @@ static int failed = 0;
     }                                                       \
   } while (0)
 
+static int num_finalized;
+static SnapInt sum_finalized;
+
+// A C finalizer for (defstruct Handle [id]), like a binding freeing what a
+// handle names
+static bool handle_gc(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  num_finalized++;
+  sum_finalized += as_int(as_struct(args[0])->vals[0]);
+  *result = create_nil();
+  return true;
+}
+
 // Runs two whole collections, so that one starts after everything above
 static void collect(Snap* snap) {
   int i;
@@ -66,6 +78,36 @@ int main(void) {
   CHECK(snap.pins.vsize == 0);
 
   snap_destroy(&snap);
+
+  // Finalizers: a C one, and snap ones that run in the middle of a function
+  // (after a C call returns) and move the stack by recursing, which the VM
+  // has to reload its pointers after. The collector runs by itself here.
+  snap_init(&snap);
+  r = snap_exec(&snap, "(defstruct Handle [id]) Handle");
+  CHECK(is_type(r));
+  snap_set_gc(&snap, as_type(r), create_cfunc(handle_gc));
+  r = snap_exec(&snap,
+    "(defn deep [n] (if (= n 0) 0 (+ 1 (deep (- n 1)))))\n"
+    "(defstruct Deep [n])\n"
+    "(def depth 0)\n"
+    "(defgc [d Deep] (set! depth (max depth (deep 3000))))\n"
+    "(defn churn [n]\n"
+    "  (loop [i 0 acc 0]\n"
+    "    (if (< i n)\n"
+    "      (begin (Deep i) (Handle i) (gc-step 200) (recur (+ i 1) (+ acc (abs i))))\n"
+    "      acc)))\n"
+    "(churn 2000)");
+  CHECK(is_int(r) && as_int(r) == 1999 * 2000 / 2);
+  r = snap_exec(&snap, "depth");
+  CHECK(is_int(r) && as_int(r) == 3000);
+  CHECK(num_finalized > 0);
+
+  // snap_destroy() finalizes the rest, live or not, each exactly once
+  r = snap_exec(&snap, "(def live (Handle 1000000))");
+  snap_destroy(&snap);
+  CHECK(num_finalized == 2001);
+  CHECK(sum_finalized == 1999 * 2000 / 2 + 1000000);
+
   printf(failed ? "api: %d failed\n" : "api: passed\n", failed);
   return failed != 0;
 }

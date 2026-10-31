@@ -662,6 +662,7 @@ static void gc_start(Snap* snap) {
   snap->gc_phase = GC_MARK;
   snap->gc_unmarked ^= 1;
   snap->gc_sym = 0;
+  snap->gc_separated = false;
   snap->gc_debt = 0;
   snap->gc_live = snap->num_bytes_alloced; // Less what the sweep frees
 
@@ -669,6 +670,7 @@ static void gc_start(Snap* snap) {
     gc_mark(snap, *obj);
   }
   gc_mark_vals(snap, snap->pins.vitems, snap->pins.vsize);
+  gc_mark_vals(snap, snap->tobefnz.vitems, snap->tobefnz.vsize); // Waiting for their finalizers
 
   gc_mark(snap, (SObject*)snap->cause);
 
@@ -687,6 +689,30 @@ static void gc_start(Snap* snap) {
   gc_mark_fn_states(snap);
 }
 
+// Once marking has reached everything, moves the structs with finalizers that
+// it didn't reach from finobj to tobefnz, in the order they were made, and
+// marks them. They (and what they reach) live until their finalizers have run,
+// which happens at the VM's next safe point, as allocation can't run snap
+// code. Like Lua, this goes through finobj in one step. Returns the work done.
+static size_t gc_separate(Snap* snap) {
+  int i, kept = 0, n = snap->finobj.vsize, first = snap->tobefnz.vsize;
+  for (i = 0; i < n; ++i) {
+    SObject* obj = snap->finobj.vitems[i];
+    if (obj->mark == snap->gc_unmarked) *mvec_push(&snap->tobefnz, SValue) = create_object(obj);
+    else snap->finobj.vitems[kept++] = obj;
+  }
+  snap->finobj.vsize = kept;
+  // Marking them after moving them all finalizes a struct that's only
+  // reachable from another one's too, as in Lua
+  for (i = first; i < snap->tobefnz.vsize; ++i) gc_mark_val(snap, snap->tobefnz.vitems[i]);
+  if (snap->tobefnz.vsize > first) {
+    snap->fin_pending = true;
+    snap->reentered = true; // Gets the VM to look at fin_pending after its next C call
+  }
+  snap->gc_separated = true;
+  return n + 1;
+}
+
 // Does about `work` units of marking or sweeping. Returns true when it
 // finishes the collection.
 static bool gc_step(Snap* snap, size_t work) {
@@ -703,6 +729,8 @@ static bool gc_step(Snap* snap, size_t work) {
         SnapGray gray = snap->gray.vitems[--snap->gray.vsize];
         done += gc_scan(snap, &gray);
         if (gray.pos >= 0) *mvec_push(&snap->gray, SnapGray) = gray;
+      } else if (!snap->gc_separated) {
+        done += gc_separate(snap); // Can gray more objects, so marking goes on
       } else {
         snap->gc_phase = GC_SWEEP;
         snap->gc_sweep = &snap->pages;
@@ -1083,6 +1111,7 @@ static SType* type_new(Snap* snap, const char* name, SVec* fields) {
   t->is_struct = fields != NULL;
   t->num_fields = n;
   t->name = snap_sym_new(snap, name); // Interned, so it can't be collected
+  t->gc = create_nil();
   for (i = 0; i < n; ++i) t->fields[i] = *snap_vec_at(fields, i);
   return t;
 }
@@ -1108,6 +1137,7 @@ static bool struct_new(Snap* snap, SType* type, const SValue* args, int num_args
   st->stype = type;
   st->num_vals = num_args;
   if (num_args > 0) memcpy(st->vals, args, num_args * sizeof(SValue));
+  if (!is_nil(type->gc) && !snap->gc_closing) *mvec_push(&snap->finobj, SObject*) = (SObject*)st;
   *result = create_obj(st);
   return true;
 }
@@ -1159,6 +1189,36 @@ void snap_unpin(Snap* snap, SValue val) {
       return;
     }
   }
+}
+
+void snap_set_gc(Snap* snap, SType* type, SValue fn) {
+  assert(type->is_struct);
+  snap_unpin(snap, type->gc);
+  type->gc = snap_pin(snap, fn);
+}
+
+void snap_run_finalizers(Snap* snap) {
+  if (snap->fin_running || snap->c_depth >= SNAP_MAX_C_DEPTH) return;
+  snap->fin_running = true;
+  while (snap->tobefnz.vsize > 0) {
+    // Popped and pinned, so it's kept for the call, then left for the
+    // collector unless the finalizer kept it. It's never finalized again.
+    SValue obj = snap->tobefnz.vitems[--snap->tobefnz.vsize], r;
+    SType* type = as_struct(obj)->stype;
+    if (is_nil(type->gc)) continue; // Taken away since
+    snap_pin(snap, obj);
+    r = snap_call(snap, type->gc, &obj, 1);
+    if (is_err(r)) {
+      // There's no one to return the error to, so it's a warning, as in Lua
+      fflush(stdout); // After what the program printed before it
+      fprintf(stderr, "snap: finalizer for %s failed: ", type->name->data);
+      print_val(stderr, r);
+      fputc('\n', stderr);
+    }
+    snap_unpin(snap, obj);
+  }
+  snap->fin_pending = false;
+  snap->fin_running = false;
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
@@ -1695,6 +1755,19 @@ new_frame:
             frame = &mvec_back(&snap->frames);
             locals = frame->stack_base;
             stack = frame->stack_top - arg;
+            if (ok && snap->fin_pending) {
+              // Structs are waiting for their finalizers (which set
+              // reentered), and between instructions is a safe place to run
+              // them. The result goes on the stack meanwhile, to keep it.
+              *stack = temp;
+              frame->stack_top = stack + 1;
+              snap_run_finalizers(snap);
+              snap->reentered = false;
+              frame = &mvec_back(&snap->frames);
+              locals = frame->stack_base;
+              stack = frame->stack_top - 1;
+              temp = *stack;
+            }
           }
           if (!ok) goto call_failed;
           *stack++ = temp;
@@ -3448,6 +3521,7 @@ SValue snap_exec(Snap* snap, const char* str) {
     result = snap_run(snap, fn);
     if (is_err(result)) break;
     if (is_obj(result)) snap_anchor(snap, as_obj(result));
+    if (snap->fin_pending) snap_run_finalizers(snap);
   }
   snap->anchors.vsize = num_anchors;
   return is_err(fn) ? fn : result; // An error, or the last result
@@ -4420,6 +4494,19 @@ bool builtin_add_method(Snap* snap, const SValue* args, int num_args, SValue* re
   return true;
 }
 
+// (set-gc! Type f) has f called with each struct of Type made from now on,
+// once nothing can reach it (see defgc). (set-gc! Type nil) takes it away.
+bool builtin_set_gc(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SValue fn = num_args == 2 ? args[1] : create_nil();
+  if (num_args != 2 || !is_type(args[0]) || !as_type(args[0])->is_struct ||
+      !(is_nil(fn) || is_cfunc(fn) || is_code(fn) || is_closure(fn) || is_method(fn))) {
+    return fail(snap, result, "snap_type_error", "Expected (set-gc! <struct type> <fn or nil>)");
+  }
+  snap_set_gc(snap, as_type(args[0]), fn);
+  *result = args[0];
+  return true;
+}
+
 // (find-method m Type) is the function method m (or the method named by the
 // symbol m) runs for Type, or nil if there isn't one
 bool builtin_find_method(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -4459,6 +4546,12 @@ void snap_init(Snap* snap) {
   snap->gc_sweep = NULL;
   snap->gc_sweep_slot = 0;
   mvec_init(&snap->gray, SnapGray, 64);
+  mvec_init(&snap->finobj, SObject*, 16);
+  mvec_init(&snap->tobefnz, SValue, 16);
+  snap->gc_separated = false;
+  snap->fin_pending = false;
+  snap->fin_running = false;
+  snap->gc_closing = false;
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
   snap->cause = NULL;
@@ -4506,6 +4599,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "make-type", builtin_make_type);
   snap_def_cfunc(snap, "add-method!", builtin_add_method);
   snap_def_cfunc(snap, "find-method", builtin_find_method);
+  snap_def_cfunc(snap, "set-gc!", builtin_set_gc);
   snap_def_cfunc(snap, "sqrt", builtin_sqrt);
   snap_def_cfunc(snap, "sin", builtin_sin);
   snap_def_cfunc(snap, "cos", builtin_cos);
@@ -4543,7 +4637,19 @@ void snap_init(Snap* snap) {
 }
 
 void snap_destroy(Snap* snap) {
-  SnapPage* page = snap->pages;
+  SnapPage* page;
+  int i;
+  // Every struct with a finalizer gets it run, live or not, as in lua_close().
+  // Nothing collects meanwhile, and structs made by finalizers don't get one.
+  snap->gc_manual = true;
+  snap->gc_closing = true;
+  for (i = 0; i < snap->finobj.vsize; ++i) {
+    *mvec_push(&snap->tobefnz, SValue) = create_object(snap->finobj.vitems[i]);
+  }
+  snap->finobj.vsize = 0;
+  snap_run_finalizers(snap);
+
+  page = snap->pages;
   while (page) {
     SnapPage* next = page->next;
     uint32_t i;
@@ -4559,6 +4665,8 @@ void snap_destroy(Snap* snap) {
   mvec_destroy(&snap->anchors);
   mvec_destroy(&snap->pins);
   mvec_destroy(&snap->gray);
+  mvec_destroy(&snap->finobj);
+  mvec_destroy(&snap->tobefnz);
   snap_hash_destroy(&snap->symbols);
   snap_hash_destroy(&snap->keywords);
   assert(snap->num_bytes_alloced == 0);

@@ -1,0 +1,16 @@
+[:c :b :a]
+[:kept]
+[10]
+[:inner :outer]
+[:finalized] 7
+[]
+[2]
+[]
+snap: finalizer for Bad failed: <err :snap_arith_error "Division by zero">
+[3 1]
+#Printed{:msg "printed by a C finalizer"}
+<err :snap_type_error "Expected (set-gc! <struct type> <fn or nil>)">
+<err :snap_type_error "Expected (set-gc! <struct type> <fn or nil>)">
+5000
+"done"
+"finalized at exit"

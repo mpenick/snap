@@ -84,6 +84,14 @@
   (let [ps (concat params)]
     `(add-method! '~name ~(nth ps 1) (fn [~(first ps) ~@(rest (rest ps))] ~@body))))
 
+; (defgc [s Type] body...) runs body with s bound to each struct of Type made
+; from now on, once nothing can reach it, to free what it holds (textures,
+; files...). It runs once, at a safe point soon after a collection finds it.
+; Underneath it's (set-gc! Type (fn [s] body...)).
+(defmacro defgc [params & body]
+  (let [ps (concat params)]
+    `(set-gc! ~(nth ps 1) (fn [~(first ps)] ~@body))))
+
 ; (definterface Name method...) names a set of methods. A value satisfies an
 ; interface when its type has all of them, without having to say so.
 (defmacro definterface [name & methods]

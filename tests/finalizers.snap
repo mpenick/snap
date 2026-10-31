@@ -1,0 +1,109 @@
+; vi: filetype=scheme
+
+; Finalizers (defgc and set-gc!). They record what they see in `log` rather
+; than printing, as when they run depends on when the collector does (which in
+; the stress build is all the time). collect finishes any collection under way
+; and then does a whole one, so everything unreachable before it is found;
+; finalizers run when gc-step returns.
+
+(def log [])
+(def finish (fn [] (if (gc-step 1000000) nil (recur))))
+(def collect (fn [] (finish) (gc-step 0) (finish)))
+(def take-log (fn [] (let [l log] (set! log []) l)))
+
+(defstruct Res [name data])
+(defgc [r Res] (push! log (get r :name)))
+
+; Unreachable structs are finalized, newest first, and reachable ones aren't
+(def kept (Res :kept nil))
+(def make-garbage (fn [] (Res :a nil) (Res :b nil) (Res :c nil) nil))
+(make-garbage)
+(collect)
+(println (take-log))
+
+; Dropping the last reference
+(set! kept nil)
+(collect)
+(println (take-log))
+
+; What a struct holds is kept until its finalizer has run, so the finalizer
+; can still use it
+(defstruct Holder [items])
+(defgc [h Holder] (push! log (reduce + 0 (get h :items))))
+(def make-holder (fn [] (Holder [1 2 3 4]) nil))
+(make-holder)
+(collect)
+(println (take-log))
+
+; A struct only reachable from another one with a finalizer is finalized too
+(def make-pair (fn [] (Res :outer (Res :inner nil)) nil))
+(make-pair)
+(collect)
+(println (sort-by str (take-log)))
+
+; A finalizer can keep its struct (resurrect it), but it isn't finalized again
+(defstruct Zombie [n])
+(def saved nil)
+(defgc [z Zombie] (push! log :finalized) (set! saved z))
+(def make-zombie (fn [] (Zombie 7) nil))
+(make-zombie)
+(collect)
+(println (take-log) (get saved :n))
+(set! saved nil)
+(collect)
+(collect)
+(println (take-log))
+
+; Structs made before their type had a finalizer don't get one
+(defstruct Late [n])
+(def early (Late 1))
+(defgc [l Late] (push! log (get l :n)))
+(set! early nil)
+(def make-late (fn [] (Late 2) nil))
+(make-late)
+(collect)
+(println (take-log))
+
+; (set-gc! Type nil) takes it away, for structs made before too
+(defstruct Off [n])
+(defgc [o Off] (push! log (get o :n)))
+(def o (Off 1))
+(set-gc! Off nil)
+(set! o nil)
+(collect)
+(println (take-log))
+
+; A finalizer that panics prints a warning, and the others still run
+(defstruct Bad [n])
+(defgc [b Bad] (if (= (get b :n) 2) (/ 1 0) (push! log (get b :n))))
+(def make-bad (fn [] (Bad 1) (Bad 2) (Bad 3) nil))
+(make-bad)
+(collect)
+(println (take-log))
+
+; A finalizer can be a C function
+(defstruct Printed [msg])
+(set-gc! Printed println)
+(def make-printed (fn [] (Printed "printed by a C finalizer") nil))
+(make-printed)
+(collect)
+
+; Only struct types can have finalizers
+(println (recover (fn [] (set-gc! Vector println))))
+(println (recover (fn [] (set-gc! Res 5))))
+
+; Lots of them, made and dropped while the collector is running, all get
+; finalized exactly once
+(defstruct Many [i])
+(def total 0)
+(defgc [m Many] (set! total (+ total 1)))
+(dotimes [i 5000] (Many i))
+(collect)
+(collect)
+(println total)
+
+; Live structs are finalized when the program ends
+(defstruct AtExit [msg])
+(defgc [a AtExit] (println (get a :msg)))
+(def at-exit (AtExit "finalized at exit"))
+(println "done")
