@@ -281,6 +281,12 @@ can come out of is marked in the source.
 division by zero and calls with the wrong number of arguments. A top-level
 form whose value is an error (such as from `try`) also stops a script.
 
+Recursing without end panics with `:snap_stack_error` once the stack holds
+a million values, as in Lua, rather than using up memory. Recursion in C is
+limited to 1000 levels, so a macro that compiles code that uses itself, or
+code nested 1000 deep, is an error rather than a crash. The limits are
+`SNAP_MAX_STACK` and `SNAP_MAX_C_DEPTH` in `snap.h`.
+
 `(recover f)` is the one place a panic stops. It calls `f` without arguments,
 and if `f` panics, the panic's error is the result instead. It's meant for
 code that supervises other code, like the REPL:
@@ -338,6 +344,11 @@ it.
   a single `STEP` instruction that adds to the counter, compares it and jumps
   back. Closed-over variables are shared between closures and closed when
   their frame returns.
+* **The stack** is one array for every frame, which grows (by reallocating
+  and fixing the pointers into it) up to `SNAP_MAX_STACK`. It only moves when
+  a function is called, so the VM reloads its pointers after a C function
+  only if that C function ran snap code through `snap_call()`, which sets a
+  flag, as Lua 5.4 does.
 * **The GC** is incremental mark and sweep, so pauses stay short however big
   the heap is. A collection starts once the heap has grown to twice what was
   live after the last one, then runs in small steps that allocation pays for.
