@@ -28,3 +28,7 @@ inf inf
 2
 <err :snap_arith_error "Number is too big for an integer"> <err :snap_arith_error "Number is too big for an integer"> <err :snap_arith_error "Number is too big for an integer"> 4000000000000000000 -4000000000000000000 true <err :snap_arith_error "Number is too big for an integer">
 1 2 3 20000 20000
+:none 2 false 0 nil true
+[(1)] [nil] nil 2 nil
+(2 3) nil nil nil () 0
+6 0 <err :snap_type_error "Expected a list"> <err :snap_arity_error "Invalid number of arguments">

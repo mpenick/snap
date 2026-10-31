@@ -1550,12 +1550,12 @@ static bool unwind(Snap* snap, SValue err) {
 }
 
 // Replaces the last `count` values on the stack with a list of them, for a
-// function whose last parameter takes the rest of its arguments. Returns the
-// new top. The list is built from the end, each cell going in the slot of the
-// value it took, so the GC sees all of it.
+// function whose last parameter takes the rest of its arguments, or nil if
+// there are none. Returns the new top. The list is built from the end, each
+// cell going in the slot of the value it took, so the GC sees all of it.
 static SValue* pack_rest(Snap* snap, SValue* top, int count) {
   SValue* slot;
-  *top = create_empty(); // The callable's slot, which is free
+  *top = count > 0 ? create_empty() : create_nil(); // The callable's slot, which is free
   mvec_back(&snap->frames).stack_top = top + 1;
   for (slot = top - 1; slot >= top - count; --slot) {
     SCons* cell = snap_cons_new(snap);
@@ -3284,7 +3284,7 @@ static void compile_try(Snap* snap, SnapFnState* fs, SCons* args) {
 
 static void compile_arith(Snap* snap, SnapFnState* fs, int opcode, SCons* args) {
   SCons* curr;
-  if (opcode == SUB && list_length(args) == 1) { // (- x) is (- 0 x)
+  if ((opcode == SUB || opcode == ADD) && list_length(args) == 1) { // (- x) is (- 0 x), (+ x) is (+ 0 x)
     compile_binary(snap, fs, opcode, create_int(0), args->first);
     return;
   }
@@ -3640,7 +3640,7 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
     }
     n = c->num_args - 1;
     for (i = n; i < num_args; ++i) *list_add(snap, &list) = args[i];
-    rest = list_done(snap, &list); // Rooted again by the frame before anything allocates
+    rest = num_args > n ? list_done(snap, &list) : create_nil(); // Rooted again by the frame before anything allocates
   }
 
   // The arguments can be in the stack, which push_frame() can move
@@ -3678,6 +3678,52 @@ SValue snap_exec(Snap* snap, const char* str) {
   }
   snap->anchors.vsize = num_anchors;
   return is_err(fn) ? fn : result; // An error, or the last result
+}
+
+// Reads a whole file into a new string, or returns NULL
+static char* read_file(const char* path) {
+  FILE* file = fopen(path, "rb");
+  char* buf;
+  long size;
+  if (!file) return NULL;
+  if (fseek(file, 0, SEEK_END) != 0 || (size = ftell(file)) < 0 || fseek(file, 0, SEEK_SET) != 0) {
+    fclose(file);
+    return NULL;
+  }
+  buf = (char*)malloc(size + 1);
+  buf[fread(buf, 1, size, file)] = '\0';
+  fclose(file);
+  return buf;
+}
+
+SValue snap_load(Snap* snap, const char* path) {
+  char *full, *src, *outer = snap->load_file;
+  const char* slash = outer && path[0] != '/' ? strrchr(outer, '/') : NULL;
+  size_t dir = slash ? (size_t)(slash - outer + 1) : 0;
+  SValue result;
+  full = (char*)malloc(dir + strlen(path) + 1);
+  if (dir) memcpy(full, outer, dir);
+  strcpy(full + dir, path);
+  if (!(src = read_file(full))) {
+    result = create_obj(snap_err_new_format(snap, "snap_io_error", "Unable to read '%s'", full));
+    free(full);
+    return result;
+  }
+  snap->load_file = full;
+  result = snap_exec(snap, src);
+  snap->load_file = outer;
+  // Says which file an error is from, when it was loaded by another file
+  // (each file it was loaded through adds its name)
+  if (outer && is_err(result) && is_str(as_err(result)->msg)) {
+    SValue old = snap_pin(snap, result);
+    SValue msg = snap_pin(snap, create_obj(snap_str_new_format(snap, "%s: %s", full, as_str(as_err(old)->msg)->data)));
+    result = create_obj(snap_err_new(snap, as_err(old)->err, msg));
+    snap_unpin(snap, msg);
+    snap_unpin(snap, old);
+  }
+  free(full);
+  free(src);
+  return result;
 }
 
 /* Printing */
@@ -4023,7 +4069,9 @@ bool builtin_map(Snap* snap, const SValue* args, int num_args, SValue* result) {
 
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 1) return arity_error(snap, result);
-  if (is_cons(args[0])) {
+  if (is_nil(args[0])) {
+    *result = create_int(0); // nil counts as an empty list
+  } else if (is_cons(args[0])) {
     *result = create_int(list_length(as_cons(args[0])));
   } else if (is_vec(args[0])) {
     *result = create_int(as_vec(args[0])->len);
@@ -4297,6 +4345,16 @@ bool builtin_rest(Snap* snap, const SValue* args, int num_args, SValue* result) 
   return true;
 }
 
+// (next list) is the list after its first value, or nil if that's empty, so
+// (if xs ...) can tell when a walk down a list is done
+bool builtin_next(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SCons* list;
+  if (num_args != 1) return arity_error(snap, result);
+  if (!list_arg(snap, args[0], &list, result)) return false;
+  *result = list && !is_empty(list->rest) ? list->rest : create_nil();
+  return true;
+}
+
 // (concat a b...) is a new list of the values in the lists or vectors
 bool builtin_concat(Snap* snap, const SValue* args, int num_args, SValue* result) {
   int i, j;
@@ -4395,8 +4453,8 @@ bool builtin_macroexpand(Snap* snap, const SValue* args, int num_args, SValue* r
 static bool arith(Snap* snap, int op, const SValue* args, int num_args, SValue* result) {
   SValue acc;
   int i;
-  if (num_args < 2 && !(op == TK_SUB && num_args == 1)) return arity_error(snap, result);
-  acc = num_args == 1 ? create_int(0) : args[0]; // (- x) is (- 0 x)
+  if (num_args < 2 && !((op == TK_SUB || op == TK_ADD) && num_args == 1)) return arity_error(snap, result);
+  acc = num_args == 1 ? create_int(0) : args[0]; // (- x) is (- 0 x), (+ x) is (+ 0 x)
   for (i = num_args == 1 ? 0 : 1; i < num_args; ++i) {
     const SValue* a = &acc, * b = &args[i];
     if (!is_num_p(a) || !is_num_p(b)) return fail(snap, result, "snap_type_error", "Expected numbers");
@@ -4497,30 +4555,71 @@ static bool op_value(int token, SValue* val) {
 XX(builtin_sqrt, create_float(snap, sqrt(x))) XX(builtin_sin, create_float(snap, sin(x)))
 XX(builtin_cos, create_float(snap, cos(x))) XX(builtin_float, create_float(snap, x))
 XX(builtin_abs, is_int(args[0]) ? create_int(llabs(as_int(args[0]))) : create_float(snap, fabs(x)))
+XX(builtin_tan, create_float(snap, tan(x))) XX(builtin_asin, create_float(snap, asin(x)))
+XX(builtin_acos, create_float(snap, acos(x))) XX(builtin_exp, create_float(snap, exp(x)))
+XX(builtin_log, create_float(snap, log(x)))
 #undef XX
 
-// (floor x) and (int x) (toward zero) are ints. Floats too big for one (or NaN)
-// are an error.
-static bool to_int(Snap* snap, const SValue* args, int num_args, bool round_down, SValue* result) {
+// (floor x), (ceil x), (round x) (half away from zero) and (int x) (toward
+// zero) are ints. Floats too big for one (or NaN) are an error.
+static bool to_int(Snap* snap, const SValue* args, int num_args, double (*round_fn)(double), SValue* result) {
   SnapFloat x;
   if (num_args != 1 || !num_val(&args[0], &x)) return fail(snap, result, "snap_type_error", "Expected a number");
   if (is_int(args[0])) {
     *result = args[0];
     return true;
   }
-  if (round_down) x = floor(x);
+  if (round_fn) x = round_fn(x);
   if (!in_int_range(x)) return fail(snap, result, "snap_arith_error", "Number is too big for an integer");
   *result = create_int((SnapInt)x);
   return true;
 }
 
 static bool builtin_floor(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  return to_int(snap, args, num_args, true, result);
+  return to_int(snap, args, num_args, floor, result);
+}
+
+static bool builtin_ceil(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return to_int(snap, args, num_args, ceil, result);
+}
+
+static bool builtin_round(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return to_int(snap, args, num_args, round, result);
 }
 
 static bool builtin_int(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  return to_int(snap, args, num_args, false, result);
+  return to_int(snap, args, num_args, NULL, result);
 }
+
+// (pow x y) is x to the power y, a float
+static bool builtin_pow(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 2 || !is_num_p(&args[0]) || !is_num_p(&args[1])) {
+    return fail(snap, result, "snap_type_error", "Expected (pow <x> <y>)");
+  }
+  *result = create_float(snap, pow(num_p(&args[0]), num_p(&args[1])));
+  return true;
+}
+
+// (bit-and a b), (bit-or a b), (bit-xor a b), (bit-shl a n) and (bit-shr a n)
+// (which keeps the sign) of ints. Shifts are by 0 to 63, and what's shifted
+// out of an int's 63 bits is lost.
+#define XX(name, shift, expr) \
+  static bool name(Snap* snap, const SValue* args, int num_args, SValue* result) { \
+    SnapInt a, b; \
+    if (num_args != 2 || !is_int(args[0]) || !is_int(args[1])) return fail(snap, result, "snap_type_error", "Expected two integers"); \
+    a = as_int(args[0]); \
+    b = as_int(args[1]); \
+    if (shift && (b < 0 || b > 63)) { \
+      return fail(snap, result, "snap_arith_error", "Shift must be 0 to 63"); \
+    } \
+    *result = expr; \
+    return true; \
+  }
+XX(builtin_bit_and, false, create_int(a & b)) XX(builtin_bit_or, false, create_int(a | b))
+XX(builtin_bit_xor, false, create_int(a ^ b))
+XX(builtin_bit_shl, true, create_int((SnapInt)((uint64_t)a << b)))
+XX(builtin_bit_shr, true, create_int(a >> b))
+#undef XX
 
 bool builtin_atan2(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (num_args != 2 || !is_num_p(&args[0]) || !is_num_p(&args[1])) {
@@ -4554,17 +4653,39 @@ bool builtin_max(Snap* snap, const SValue* args, int num_args, SValue* result) {
 // (rand) is a float from 0 up to 1, and (rand n) an int from 0 up to n
 // (xorshift64*)
 bool builtin_rand(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  static uint64_t state = 0x9e3779b97f4a7c15;
-  uint64_t r;
+  uint64_t r, state = snap->rand_state;
   if (num_args > 1 || (num_args == 1 && (!is_int(args[0]) || as_int(args[0]) <= 0))) {
     return fail(snap, result, "snap_type_error", "Expected (rand) or (rand <positive int>)");
   }
   state ^= state >> 12;
   state ^= state << 25;
   state ^= state >> 27;
+  snap->rand_state = state;
   r = state * 0x2545f4914f6cdd1d;
   *result = num_args == 0 ? create_float(snap, (SnapFloat)(r >> 11) / (SnapFloat)(1ull << 53))
                           : create_int((SnapInt)(r % (uint64_t)as_int(args[0])));
+  return true;
+}
+
+// (rand-seed n) starts (rand) over from n, so what it gives can be repeated
+static bool builtin_rand_seed(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  uint64_t z;
+  if (num_args != 1 || !is_int(args[0])) return fail(snap, result, "snap_type_error", "Expected (rand-seed <int>)");
+  // splitmix64 of n, which is never 0 (xorshift's one bad state) for any int
+  z = (uint64_t)as_int(args[0]) + 0x9e3779b97f4a7c15;
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+  z ^= z >> 31;
+  snap->rand_state = z ? z : 0x9e3779b97f4a7c15;
+  *result = create_nil();
+  return true;
+}
+
+// (load "file") runs a file and gives its last value, or an error (see
+// snap_load())
+static bool builtin_load(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1 || !is_str(args[0])) return fail(snap, result, "snap_type_error", "Expected (load <path>)");
+  *result = snap_load(snap, as_str(args[0])->data);
   return true;
 }
 
@@ -4712,6 +4833,8 @@ void snap_init(Snap* snap) {
   snap->dump_code = false;
   snap->reentered = false;
   snap->c_depth = 0;
+  snap->load_file = NULL;
+  snap->rand_state = 0x9e3779b97f4a7c15;
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
 
@@ -4742,6 +4865,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "cons", builtin_cons);
   snap_def_cfunc(snap, "first", builtin_first);
   snap_def_cfunc(snap, "rest", builtin_rest);
+  snap_def_cfunc(snap, "next", builtin_next);
   snap_def_cfunc(snap, "concat", builtin_concat);
   snap_def_cfunc(snap, "vec", builtin_vec);
   snap_def_cfunc(snap, "list?", builtin_islist);
@@ -4764,6 +4888,21 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "min", builtin_min);
   snap_def_cfunc(snap, "max", builtin_max);
   snap_def_cfunc(snap, "rand", builtin_rand);
+  snap_def_cfunc(snap, "rand-seed", builtin_rand_seed);
+  snap_def_cfunc(snap, "tan", builtin_tan);
+  snap_def_cfunc(snap, "asin", builtin_asin);
+  snap_def_cfunc(snap, "acos", builtin_acos);
+  snap_def_cfunc(snap, "exp", builtin_exp);
+  snap_def_cfunc(snap, "log", builtin_log);
+  snap_def_cfunc(snap, "pow", builtin_pow);
+  snap_def_cfunc(snap, "ceil", builtin_ceil);
+  snap_def_cfunc(snap, "round", builtin_round);
+  snap_def_cfunc(snap, "bit-and", builtin_bit_and);
+  snap_def_cfunc(snap, "bit-or", builtin_bit_or);
+  snap_def_cfunc(snap, "bit-xor", builtin_bit_xor);
+  snap_def_cfunc(snap, "bit-shl", builtin_bit_shl);
+  snap_def_cfunc(snap, "bit-shr", builtin_bit_shr);
+  snap_def_cfunc(snap, "load", builtin_load);
 
   {
     // The built-in types, which methods can be added to like struct types

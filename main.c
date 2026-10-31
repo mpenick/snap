@@ -67,34 +67,13 @@ static int repl(Snap* snap) {
 }
 
 static int run_file(Snap* snap, const char* filename) {
-  int rc = 0;
-  FILE* file = fopen(filename, "r");
-  if (file) {
-    long int end;
-    size_t num_bytes;
-    char* buf;
-    fseek(file, 0, SEEK_END);
-    end = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    buf = (char*)malloc(end + 1);
-    if ((num_bytes = fread(buf, 1, end, file)) > 0) {
-      SValue result;
-      buf[num_bytes] = '\0';
-      result = snap_exec(snap, buf);
-      if (is_err(result)) {
-        snap_print(result);
-        printf("\n");
-        rc = -1;
-      }
-    } else {
-      fprintf(stderr, "Unable to read %s\n", filename);
-    }
-    fclose(file);
-    free(buf);
-  } else {
-    fprintf(stderr, "'%s' not found\n", filename);
+  SValue result = snap_load(snap, filename);
+  if (is_err(result)) {
+    snap_print(result);
+    printf("\n");
+    return -1;
   }
-  return rc;
+  return 0;
 }
 
 int main(int argc, char** argv) {

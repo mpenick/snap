@@ -1,0 +1,23 @@
+; vi: filetype=scheme
+
+; (load "file") runs a file and gives its last value. Paths are from the
+; directory of the file doing the loading.
+(println (load "load/a.snap"))
+(println a-val (a-fn 2))
+; load/a.snap loaded load/sub/b.snap, which loaded load/c.snap with "../c.snap"
+(println b-val c-val)
+; A macro defined in a loaded file works in the forms after the load
+(println (twice (+ 1 2)))
+
+; Errors are values: a missing file, a file that doesn't parse, and a file
+; whose form panics
+(defn show [e] [(err-kind e) (err? e)])
+(println (show (load "load/missing.snap")))
+(println (show (load "load/bad-parse.snap")))
+(println (show (load "load/panics.snap")))
+; The forms before a failing one have run
+(println before-panic)
+(println (recover (fn [] (load 1))))
+; An error says which file it came from, and the files it was loaded through
+(println (err-msg (load "load/bad-parse.snap")))
+(println (err-msg (load "load/loads-bad.snap")))

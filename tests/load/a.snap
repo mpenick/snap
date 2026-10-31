@@ -1,0 +1,5 @@
+(def a-val :a)
+(defn a-fn [x] (* x 10))
+(defmacro twice [x] `[~x ~x])
+(load "sub/b.snap")
+:a-done

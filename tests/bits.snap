@@ -1,0 +1,29 @@
+; vi: filetype=scheme
+
+; More math: tan, asin, acos, exp, log and pow give floats; ceil and round
+; (half away from zero) give ints, like floor
+(println (tan 0) (asin 1.0) (acos 1) (exp 0) (log 1) (exp 1))
+(println (pow 2 10) (pow 2.0 0.5) (pow 9 0.5) (pow 0 0))
+(println (ceil 1.2) (ceil -1.2) (ceil 3) (round 2.5) (round -2.5) (round 2.4) (round 7))
+(println (floor 1.7) (floor -1.2))
+(println (recover (fn [] (ceil 1e300))) (recover (fn [] (pow :a 2))) (recover (fn [] (tan "x"))))
+
+; Bit operations on ints
+(println (bit-and 12 10) (bit-or 12 10) (bit-xor 12 10) (bit-and -1 255))
+(println (bit-shl 1 10) (bit-shr 1024 3) (bit-shr -16 2) (bit-shl 1 62) (bit-shl 1 63) (bit-shl 3 61))
+(println (recover (fn [] (bit-shl 1 64))) (recover (fn [] (bit-shr 1 -1))) (recover (fn [] (bit-and 1.0 1))))
+; A small hash, as games use for noise
+(defn hash [x y] (bit-and (bit-xor (* x 374761393) (* y 668265263)) 0xffff))
+(println (hash 1 2) (hash 2 1) (hash 1 2))
+
+; (rand-seed n) makes (rand) repeat
+(defn draws [] [(rand 1000) (rand 1000) (rand 1000)])
+(rand-seed 42)
+(def first-draws (draws))
+(rand-seed 42)
+(println (= first-draws (draws)))
+(rand-seed 43)
+(println (= first-draws (draws)))
+(rand-seed 0)
+(let [r (rand)] (println (and (>= r 0.0) (< r 1.0))))
+(println (recover (fn [] (rand-seed 1.5))))

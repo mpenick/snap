@@ -88,3 +88,13 @@
         y (macroexpand '(big))]
     (println a b x (code) y)))
 (expands 1 2)
+; An empty rest argument is nil, so (if opts ...) tells whether there are any
+(def opt (fn [a & opts] (if opts (first opts) :none)))
+(println (opt 1) (opt 1 2) (opt 1 false) (many) ((fn [& xs] xs)) ((fn [a & xs] (nil? xs)) 1))
+; The same from C (map calls the function) and from a macro with no body
+(defmacro body-or-nil [& body] (if body `(begin ~@body) nil))
+(println (map (fn [& xs] xs) [1]) (map (fn [a & xs] xs) [1]) (body-or-nil) (body-or-nil 1 2) (macroexpand '(body-or-nil)))
+; next is rest, but nil at the end, so a walk stops on (if xs ...)
+(println (next '(1 2 3)) (next '(1)) (next '()) (next nil) (rest '(1)) (count nil))
+(def total (fn [xs acc] (if xs (total (next xs) (+ acc (first xs))) acc)))
+(println (total '(1 2 3) 0) (total nil 0) (recover (fn [] (next [1 2]))) (recover (fn [] (next))))

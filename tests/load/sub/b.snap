@@ -1,0 +1,2 @@
+(def b-val :b)
+(load "../c.snap")

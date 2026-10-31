@@ -1,0 +1,11 @@
+:a-done
+:a 20
+:b :c
+[3 3]
+[:snap_io_error true]
+[:snap_eof_error true]
+[:snap_arith_error true]
+:ran
+<err :snap_type_error "Expected (load <path>)">
+"tests/load/bad-parse.snap: Premature end of file on line 2"
+"tests/load/loads-bad.snap: tests/load/bad-parse.snap: Premature end of file on line 2"

@@ -308,6 +308,8 @@ struct Snap_ {
   struct { MVEC_FIELDS(SnapFrame); } frames;
   bool reentered; // Set by snap_call(), which can move the stack and the frames
   int c_depth; // Counted up to SNAP_MAX_C_DEPTH
+  char* load_file; // The file snap_load() is running, which relative paths are from
+  uint64_t rand_state; // (rand), set by (rand-seed n)
   struct { MVEC_FIELDS(SObject*); } anchors;
   struct { MVEC_FIELDS(SValue); } pins; // See snap_pin()
   size_t num_bytes_alloced;
@@ -487,6 +489,12 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args);
 // value, or the first error (one that doesn't compile, or a panic or error
 // value from running one).
 SValue snap_exec(Snap* snap, const char* str);
+// Runs a file with snap_exec(). A relative path is from the directory of the
+// file being loaded, if any (so files can load their neighbors), else the
+// current directory. Returns an error value if the file can't be read. An
+// error from a file loaded by another file has the file's path in front of
+// its message.
+SValue snap_load(Snap* snap, const char* path);
 void snap_print(SValue value);
 
 // Does about `work` units of collection (one is marking a value or sweeping an

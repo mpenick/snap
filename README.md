@@ -51,7 +51,7 @@ make stress   # The same under ASan/UBSan, collecting all the time
 
 Special forms: `def`, `defmacro`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
 `quote`, `and`, `or`, `not`, `try`, `panic`, `recover`, and the operators
-`+ - * / %` and `< <= > >= =`. `(- x)` negates.
+`+ - * / %` and `< <= > >= =`. `(- x)` negates, and `(+ x)` is `x` (it must be a number).
 
 The operators and `not` can be used as values too, as in `(reduce + 0 v)` or
 `(map not v)`: there they're C functions that do the same thing (a call like
@@ -59,7 +59,10 @@ The operators and `not` can be used as values too, as in `(reduce + 0 v)` or
 the special forms can be rebound.
 
 A function's last parameter can take the rest of its arguments, as a list:
-`(fn [a & more] ...)` called with `1 2 3` gets `a` = 1 and `more` = `(2 3)`.
+`(fn [a & more] ...)` called with `1 2 3` gets `a` = 1 and `more` = `(2 3)`,
+and called with just `1` gets `more` = `nil`, so `(if more ...)` tells
+whether there are any. `nil` works as an empty list (`first`, `rest`,
+`next`, `count`, `map`, `doseq`, `concat`, `~@`...).
 
 `let` and `loop` bindings alternate names and values, and are bound in order,
 so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
@@ -79,7 +82,8 @@ Built-in functions:
   readline.
 * Predicates: `nil?`, `vector?`, `map?`, `list?` and `sym?`
 * Errors: `err`, `err?`, `err-kind` and `err-msg`
-* Lists: `list`, `cons`, `first`, `rest`, `concat` (of lists and vectors)
+* Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
+  instead of `()` at the end), `concat` (of lists and vectors)
   and `vec` (a list to a vector). `count` and `nth` work on lists too. `nil`
   counts as an empty list.
 * Macros: `gensym` and `macroexpand` (see below)
@@ -88,9 +92,18 @@ Built-in functions:
 * Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`
 * Strings: `(str x...)` joins strings, and other values as they print
-* Math: `sqrt`, `sin`, `cos` and `(atan2 y x)` give floats; `floor` and `int`
-  (toward zero) give integers; `float`, `abs`, `min` and `max`; `(rand)` is a
-  float from 0 up to 1 and `(rand n)` an integer from 0 up to `n`
+* Math: `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `exp`, `log`, `(pow x y)`
+  and `(atan2 y x)` give floats; `floor`, `ceil`, `round` (half away from
+  zero) and `int` (toward zero) give integers; `float`, `abs`, `min` and
+  `max`; `(rand)` is a float from 0 up to 1 and `(rand n)` an integer from 0
+  up to `n`, and `(rand-seed n)` starts them over, to repeat what they give
+* Bits: `bit-and`, `bit-or`, `bit-xor`, `(bit-shl x n)` and `(bit-shr x n)`
+  (which keeps the sign) of integers, shifting by 0 to 63
+* Files: `(load "file")` runs a file and gives its last value, or an error
+  (`:snap_io_error` if it can't be read). A relative path is from the
+  directory of the file doing the loading, so a program can be split into
+  files that load each other. An error from a file loaded by another file
+  starts with the file's path. In C it's `snap_load()`.
 * Code: `(compile src)` compiles a string into a function without arguments.
   It returns an error if the code doesn't parse or compile (`:snap_eof_error`
   when it ends early), and `nil` if there's no code.
@@ -223,8 +236,9 @@ holds, such as a texture or a file, without the program having to.
 
 `defgc` is `(set-gc! Voice (fn [v] ...))`, and `(set-gc! Voice nil)` takes
 the finalizer away. The finalizer can be a C function, so bindings can make
-handles that free themselves. As in Lua, only structs made after their type
-gets a finalizer are finalized, so give it one right after `defstruct`.
+handles that free themselves, as quake's images and meshes do. As in Lua, only
+structs made after their type gets a finalizer are finalized, so give it one
+right after `defstruct`.
 
 * A finalizer runs once per struct. If it stores the struct somewhere, the
   struct lives on, but it's never finalized again.
@@ -358,6 +372,62 @@ Errors don't undo them. Inside snap.c, `snap_anchor()` and `snap_release()`
 do the short-lived version of this: they keep an object alive while C is
 still building it (filling a new map allocates), and they come undone, last
 first, by the end of the call or when an error unwinds.
+
+## Doom
+
+`doom/` is a small doom-like game, written to stress the language: a
+Wolfenstein-style raycaster that draws every pixel of a 320x200 framebuffer
+from snap (textured walls, floors and ceilings, and sprites, with textures it
+makes when it starts), demons that chase you, and pickups. It runs at about
+200 frames a second, with two thirds of the time in the VM. The corner of the screen
+shows the GC's stats: it allocates a few KB a frame, and its pauses stay
+around 100 microseconds.
+
+![doom](doom/doom.png)
+
+It uses [raylib](https://www.raylib.com), which isn't packaged on Ubuntu, so
+`make raylib` in `doom/` fetches it and builds it there (this needs the X11
+and GL headers, e.g. `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`,
+`libxcursor-dev`, `libxi-dev` and `libgl-dev`). `doom/snap_game.c` has the
+bindings (windows, input, drawing and images) and a `main()` that runs a file
+with them. Images are `Image` structs with a C finalizer (see Finalizers), so
+the game never frees them. Finding an image's slot from its struct checks
+that the struct owns it, and the last two found are cached, as drawing goes
+back and forth between the framebuffer and a texture for every pixel.
+
+```
+cd doom
+make raylib   # Once
+make run      # WASD, mouse or arrows to turn, click or space to shoot, tab for the map
+```
+
+## Quake
+
+`quake/` is a small arena shooter in the style of quake 3, the next stress
+test after doom. The GPU draws it, so the work in snap is everywhere else. When
+it starts, it makes its textures and meshes, lights every vertex of the arena
+(sun, sky and colored lights, each casting a shadow ray), and finds which
+places bots can walk between by trying each walk with the game's physics.
+While it plays, snap runs quake 3's movement for everyone (strafe jumping,
+rocket jumping, stairs and jump pads), the rockets and rails, items, and four
+bots. The bots find paths (Dijkstra), go after items, and aim, strafe and hop
+at you and at each other. With all five players being bots, it runs 600
+frames in about 0.6 seconds.
+
+![quake](quake/quake.png)
+
+It shares doom's raylib build. `quake/snap_game.c` is doom's with 3D added:
+a camera, cubes, spheres and cylinders, blending, and meshes built a vertex
+at a time. Its images and meshes are `Image` and `Mesh` structs with C
+finalizers (see Finalizers), so the game never frees them: their pixels,
+triangles and GPU textures and buffers go when they're dropped, or when the
+program ends, before the window closes. If the tables run out of slots,
+making one runs a whole collection and the finalizers first.
+
+```
+cd quake
+make run      # WASD and mouse, space to jump, click to shoot, 1-3 for weapons, tab for scores
+```
 
 ## Implementation
 

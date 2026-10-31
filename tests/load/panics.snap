@@ -1,0 +1,3 @@
+(def before-panic :ran)
+(/ 1 0)
+(def after-panic :never)
