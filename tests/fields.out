@@ -1,0 +1,8 @@
+1 6 1 6
+#A{:x 10 :y 2 :z 3} #B{:z 4 :y 5 :x 20 :w 7} 10 20
+10 2 3 7 20
+9 {:x 2} 3 [:a 2]
+<err :snap_key_error "A has no field :w"> <err :snap_key_error "A has no field :w">
+[:mine :x]
+10
+600 600

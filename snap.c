@@ -96,6 +96,7 @@ enum {
   XX(NTH) \
   XX(COUNT) \
   XX(GET) \
+  XX(PUT) \
   XX(INT) \
   XX(MIN) \
   XX(MAX) \
@@ -415,7 +416,8 @@ void snap_hash_destroy(SnapHash* hash) {
 static size_t code_extra_bytes(SCode* code) {
   return code->insts_count * sizeof(SnapInst) +
          code->num_constants * sizeof(SValue) +
-         code->num_upvals * sizeof(uint32_t);
+         code->num_upvals * sizeof(uint32_t) +
+         code->num_caches * sizeof(SFieldCache);
 }
 
 #define map_bytes(cap) ((size_t)(cap) * 2 * (sizeof(SValue) + sizeof(int32_t)))
@@ -467,6 +469,7 @@ static void gc_free(Snap* snap, SObject* obj) {
       free(((SCode*)obj)->insts);
       free(((SCode*)obj)->constants);
       free(((SCode*)obj)->upvals);
+      free(((SCode*)obj)->caches);
       break;
     case STYPE_CLOSURE:
       snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->num_upvals * sizeof(SUpval*));
@@ -1157,12 +1160,34 @@ static bool struct_new(Snap* snap, SType* type, const SValue* args, int num_args
 }
 
 // The slot of a struct's field, or NULL if it doesn't have it
-static SValue* struct_field(SStruct* st, SValue key) {
+static int field_index(SType* type, SValue key) {
   int i;
-  for (i = 0; i < st->stype->num_fields; ++i) {
-    if (st->stype->fields[i].bits == key.bits) return &st->vals[i];
+  for (i = 0; i < type->num_fields; ++i) {
+    if (type->fields[i].bits == key.bits) return i;
   }
-  return NULL;
+  return -1;
+}
+
+static SValue* struct_field(SStruct* st, SValue key) {
+  int i = field_index(st->stype, key);
+  return i < 0 ? NULL : &st->vals[i];
+}
+
+// The index of field key in st, or -1, with the call site's cache (slot, 0
+// for none): a hit is the struct's type and key it saw last
+static inline int cached_field(SCode* code, int slot, SStruct* st, SValue key) {
+  SFieldCache* fc;
+  int i;
+  if (slot == 0) return field_index(st->stype, key);
+  fc = &code->caches[slot - 1];
+  if (fc->type == st->stype && fc->key.bits == key.bits) return fc->index;
+  i = field_index(st->stype, key);
+  if (i >= 0) { // Only field keywords, which are interned, are kept
+    fc->type = st->stype;
+    fc->key = key;
+    fc->index = i;
+  }
+  return i;
 }
 
 // The function a method call runs, picked by its first argument's type, or
@@ -1536,6 +1561,7 @@ static inline bool num_val(const SValue* v, SnapFloat* f) {
 // globals with
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_min(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_max(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result);
@@ -1729,13 +1755,16 @@ new_frame:
         }
         goto call_global;
       }
+      // GET and PUT keep their call site's field cache slot in the low 8
+      // bits (in place of the number of arguments, which is fixed)
       OP(GET) {
         SValue* val;
+        int i;
         a = stack - 2;
         b = stack - 1;
         if (builtin_global(builtin_get)) {
-          if (is_struct(*a) && (val = struct_field(as_struct(*a), *b))) {
-            *a = *val;
+          if (is_struct(*a) && (i = cached_field(code, arg & 0xff, as_struct(*a), *b)) >= 0) {
+            *a = as_struct(*a)->vals[i];
             stack--;
             DISPATCH();
           }
@@ -1746,6 +1775,21 @@ new_frame:
             DISPATCH();
           }
         }
+        arg = (arg & ~0xff) | 2;
+        goto call_global;
+      }
+      OP(PUT) {
+        int i;
+        a = stack - 3;
+        b = stack - 2;
+        if (builtin_global(builtin_put) && is_struct(*a) && (i = cached_field(code, arg & 0xff, as_struct(*a), *b)) >= 0) {
+          SValue* val = &as_struct(*a)->vals[i];
+          gc_barrier(snap, *val);
+          *val = *(stack - 1);
+          stack -= 2; // The struct is the result
+          DISPATCH();
+        }
+        arg = (arg & ~0xff) | 3;
         goto call_global;
       }
       OP(INT) {
@@ -2428,6 +2472,7 @@ typedef struct SnapFnState_ {
   int stack;       // Operand stack depth at this point in the code
   int max_stack;
   int last_target; // Instruction most recently targeted by a jump
+  int num_caches;  // Field caches for GET and PUT
   SnapLoop* loop;  // Innermost recur target, NULL at the top-level
   SnapLoop fn_loop;
 } SnapFnState;
@@ -2511,6 +2556,8 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   c->arity = fs->variadic ? -1 : fs->num_args;
   c->num_locals = fs->max_locals;
   c->max_stack_size = fs->max_stack + 2; /* Add enough room for raising errors */
+  c->num_caches = fs->num_caches;
+  c->caches = (SFieldCache*)calloc(fs->num_caches > 0 ? fs->num_caches : 1, sizeof(SFieldCache));
   heap_add(snap, code_extra_bytes(c));
 
   // The code object owns the buffers now
@@ -2621,6 +2668,7 @@ static int call_op(SnapFnState* fs, int index, int num_args) {
   if (num_args == 2 && strcmp(name, "nth") == 0) return NTH;
   if (num_args == 1 && strcmp(name, "count") == 0) return COUNT;
   if (num_args == 2 && strcmp(name, "get") == 0) return GET;
+  if (num_args == 3 && strcmp(name, "put!") == 0) return PUT;
   if (num_args == 1 && strcmp(name, "int") == 0) return INT;
   if (num_args >= 1 && strcmp(name, "min") == 0) return MIN;
   if (num_args >= 1 && strcmp(name, "max") == 0) return MAX;
@@ -2646,7 +2694,9 @@ static int emit(SnapFnState* fs, int op, int arg) {
     if (op == CALL && last == LOAD_GLOBAL && arg < 256) {
       SnapInst* inst = &fs->insts.vitems[pc(fs) - 1];
       if (INST_ARG(*inst) < 32768) {
-        *inst = INST(call_op(fs, INST_ARG(*inst), arg), INST_ARG(*inst) << 8 | arg);
+        int op = call_op(fs, INST_ARG(*inst), arg), low = arg;
+        if (op == GET || op == PUT) low = fs->num_caches < 255 ? ++fs->num_caches : 0; // Its cache slot
+        *inst = INST(op, INST_ARG(*inst) << 8 | low);
         adjust_stack(fs, -1 - arg); // Pops the arguments and the function, pushes the result
         return pc(fs) - 1;
       }
@@ -4537,7 +4587,7 @@ static void print_code(SCode* code, int indent) {
       case CALL: case CLOSE_UPVALS: case RETURN_VEC: case UNPACK:
         printf(" %d", arg);
         break;
-      case CALL_GLOBAL: case NTH: case COUNT: case GET: case INT: case MIN: case MAX:
+      case CALL_GLOBAL: case NTH: case COUNT: case GET: case PUT: case INT: case MIN: case MAX:
         printf(" %-6d ", arg & 0xff);
         print_val(stdout, code->constants[arg >> 8]);
         break;

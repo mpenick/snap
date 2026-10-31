@@ -1,0 +1,31 @@
+; vi: filetype=scheme
+; (get x :k) and (put! x :k v) remember where each call site last found a
+; struct's field. These check that the answers are the same as a search.
+
+(defstruct A [x y z])
+(defstruct B [z y x w])
+(defn gx [s] (get s :x))
+(defn sx! [s v] (put! s :x v))
+; One site, structs whose field is in different places
+(def a (A 1 2 3))
+(def b (B 4 5 6 7))
+(println (gx a) (gx b) (gx a) (gx b))
+(println (sx! a 10) (sx! b 20) (gx a) (gx b))
+; The key in a variable, changing at the same site
+(defn g [s k] (get s k))
+(println (g a :x) (g a :y) (g a :z) (g b :w) (g b :x))
+; Maps and vectors at the same sites
+(println (gx {:x 9}) (sx! {:x 1} 2) (g {:k 3} :k) (put! [1 2] 0 :a))
+; A missing field is still an error, from both
+(println (recover (fn [] (gx (B 1 2 3 4)) (get a :w))) (recover (fn [] (put! a :w 1))))
+; Once get or put! isn't the built-in, sites use what it is
+(def real-get get)
+(set! get (fn [s k] [:mine k]))
+(println (gx a))
+(set! get real-get)
+(println (gx a))
+; More sites in one function than there are cache slots (255)
+(def src "(fn [s] (+")
+(dotimes [_ 300] (set! src (str src " (get s :y)")))
+(def many ((compile (str src "))"))))
+(println (many a) (many (B 1 2 3 4)))

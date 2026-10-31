@@ -244,7 +244,17 @@ struct SCode_ {
   int arity; // num_args, or -1 if the last parameter takes the rest (a list)
   int num_locals;
   int max_stack_size;
+  struct SFieldCache_* caches; // One for each (get x :k) and (put! x :k v) (see GET)
+  int num_caches;
 };
+
+// Where a call site last found a struct field: for structs of type, key is
+// field index
+typedef struct SFieldCache_ {
+  SType* type;
+  SValue key;
+  int index;
+} SFieldCache;
 
 typedef struct SnapFrame_ {
   SnapInst* pc;
