@@ -42,7 +42,7 @@
 "dest:" 9 9.500000
 "(/ i7 i0):" <err :snap_arith_error "Division by zero">
 "(% i7 0):" <err :snap_arith_error "Division by zero">
-"(/ (+ 0 7) i0):" <err :snap_arith_error "Division by zero">
+"(/ (+ i0 7) i0):" <err :snap_arith_error "Division by zero">
 "(+ i7 :k):" <err :snap_type_error "Expected numbers">
 "(< i7 s):" true
 "(- :a :b):" <err :snap_type_error "Expected numbers">

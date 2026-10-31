@@ -1,0 +1,110 @@
+; vi: filetype=scheme
+
+; Conditions of if (and when and cond, once expanded) compile to jumps: an
+; and (or) jumps out at its first false (true) operand, not (...) flips where
+; the jumps go, and a condition that's a constant needs no test at all.
+; Arithmetic and compares of two number constants are worked out when
+; compiling. (min ...) and (max ...) of numbers are instructions of their own.
+
+(def log [])
+(def take-log (fn [] (let [l log] (set! log []) l)))
+(defn t [x] (push! log x) x)
+
+; and, or and not, with every mix of true and false operands. The operands
+; run in order and stop at the first that decides the answer.
+(defn conds [a b c]
+  [(if (and (t a) (t b)) :y :n)
+   (if (or (t a) (t b)) :y :n)
+   (if (not (t a)) :y :n)
+   (if (and (t a) (or (t b) (t c))) :y :n)
+   (if (or (and (t a) (t b)) (t c)) :y :n)
+   (if (not (and (t a) (t b))) :y :n)
+   (if (not (or (t a) (t b))) :y :n)
+   (if (and (t a) (not (t b)) (t c)) :y :n)])
+(doseq [a [false true]]
+  (doseq [b [nil 0]]
+    (doseq [c [false :c]]
+      (println a b c (conds a b c) (take-log)))))
+
+; Values that aren't booleans: only nil and false are false
+(println (if 0 :t :f) (if "" :t :f) (if [] :t :f) (if nil :t :f) (if false :t :f))
+
+; As values rather than conditions, and and or are still the deciding operand
+(println (and 1 2) (and 1 nil 2) (or nil false) (or nil 3) (not 5) (and) (or))
+(println (if (and) :t :f) (if (or) :t :f))
+
+; Compares in and/or with ints and floats
+(defn in-box? [x y] (and (>= x 0) (< x 10) (>= y 0.0) (< y 10.0)))
+(println (in-box? 5 5.0) (in-box? -1 5.0) (in-box? 5 10.0) (in-box? 5.5 0))
+(defn outside? [x] (or (< x 0) (> x 9)))
+(println (outside? -1) (outside? 4) (outside? 10) (outside? 4.5))
+
+; A condition that's an if itself, ending in constants
+(defn both [x] (if (if x true false) :yes :no))
+(println (both 1) (both nil))
+
+; In a counting loop, the compare that starts an and is fused with recur's
+; step
+(println (loop [i 0 s 0] (if (and (< i 100) (< s 1000)) (recur (+ i 1) (+ s i)) [i s])))
+(println (loop [i 0 v []] (if (and (< i 5) (not (= i 3))) (recur (+ i 1) (push! v i)) v)))
+
+; For effect only (when, and an if that isn't the last of a body)
+(defn effects [a b]
+  (when (and a b) (push! log :and))
+  (when (or a b) (push! log :or))
+  (if (not a) (push! log :not-a) (push! log :a))
+  (take-log))
+(println (effects true nil) (effects nil nil) (effects 1 2))
+
+; Constant conditions: no test, and the branch that can't run is dropped
+(defconst DEBUG false)
+(defconst ON true)
+(defn consts [x]
+  [(if true :t :f) (if false :t :f) (if nil :t :f) (if 1 :t :f) (if :k :t :f)
+   (if DEBUG :t :f) (if ON :t :f) (if (not DEBUG) :t :f) (if (and ON x) :t :f)
+   (if (or DEBUG x) :t :f) (if (< 1 2) :t :f) (if (= 1.0 2) :t :f)])
+(println (consts true) (consts nil))
+(defn grade [n] (cond (>= n 90) :a (>= n 80) :b true :c))
+(println (grade 95) (grade 85) (grade 10))
+(println (loop [i 0] (cond (>= i 5) i true (recur (+ i 1)))))
+(defn effect-consts [] (when true (push! log 1)) (when nil (push! log 2)) (if false 3 (push! log 4)) (take-log))
+(println (effect-consts))
+
+; The branch that can't run is still compiled, for its errors
+(println (compile "(if true 1 (fn))"))
+(println (compile "(if false (fn) 1)"))
+(println (compile "(when true 1 (recur))"))
+
+; Folding
+(defconst N 6)
+(defn folded []
+  [(+ 1 2) (- 1 2) (* 3 4) (+ 1.5 2) (- 1 0.25) (* 2.0 3.0) (* N 7) (+ N N N) (- N)
+   (< 1 2) (<= 2 2) (> 1 2.5) (>= 2.5 2.5) (= 1 1.0) (= 1 2) (* 4611686018427387903 2)
+   (+ 4611686018427387903 1) (+ (* 2 3) (* 4 5)) 0.0 (* -1.0 0.0) (* 1e300 1e300)])
+(println (folded))
+(defn nan-cases []
+  (let [n (- (* 1e300 1e300) (* 1e300 1e300))]
+    [(= n n) (< n 1.0) (= (- (* 1e300 1e300) (* 1e300 1e300)) 0.0) 0.0]))
+(println (nan-cases))
+; Division and modulo aren't folded, so dividing by zero is still an error
+; when (and if) it runs
+(defn div-zero [] (/ 1 0))
+(defn mod-zero [] (% 1 0))
+(println (recover div-zero) (recover mod-zero) (/ 7 2) (% 7 2) (/ 7.0 2))
+; Constants that aren't numbers are left to run
+(println (recover (fn [] (+ 1 :a))) (recover (fn [] (< "a" 1))) (= :a :a) (< "a" "b"))
+
+; min and max
+(defn mm [a b c]
+  [(min a b) (max a b) (min a b c) (max a b c) (min a) (max c)])
+(println (mm 3 1 2) (mm 2.5 3 -1) (mm 1 1.0 1) (mm 1.0 1 1.0) (mm -0.5 -2 7))
+(defn clamp [x lo hi] (min hi (max lo x)))
+(println (clamp 5 0 10) (clamp -5 0 10) (clamp 15.5 0 10) (clamp 0.5 0.0 1.0))
+(println (recover (fn [] (min 1 :a))) (recover (fn [] (max :a 1))) (recover (fn [] (min))))
+(println (reduce min 10 [3 5]) (reduce max 0 [3.5 5 1]) (map (fn [x] (max x 2)) [1 2 3]))
+
+; A min or max that isn't the built-in any more is called like any function,
+; even from code compiled before it changed
+(defn old-max [a b] (max a b))
+(def max (fn [& xs] [:mine xs]))
+(println (old-max 1 2) (max 3 4) ((fn [] (max 5 6 7))))

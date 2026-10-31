@@ -97,11 +97,14 @@ enum {
   XX(COUNT) \
   XX(GET) \
   XX(INT) \
+  XX(MIN) \
+  XX(MAX) \
   XX(CLOSURE) \
   XX(CLOSE_UPVALS) \
   XX(RETURN) \
   XX(JUMP) \
   XX(JUMP_FALSE) \
+  XX(JUMP_TRUE) \
   XX(JUMP_FALSE_OR_POP) \
   XX(JUMP_TRUE_OR_POP) \
   XX(TRY) \
@@ -1518,8 +1521,11 @@ static inline bool num_val(const SValue* v, SnapFloat* f) {
 #define DISPATCH() continue
 #endif
 
-// Built-ins that the NTH, COUNT and GET instructions compare globals with
+// Built-ins that the NTH, COUNT, GET, INT, MIN and MAX instructions compare
+// globals with
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_min(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_max(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result);
 static bool builtin_int(Snap* snap, const SValue* args, int num_args, SValue* result);
@@ -1727,6 +1733,28 @@ new_frame:
         }
         goto call_global;
       }
+      // (min x y...) and (max x y...) of numbers. The result is the first
+      // argument that's smallest (largest), as with the built-ins.
+#define min_max_op(fn, op) \
+        int i, n = arg & 0xff; \
+        SValue* best; \
+        a = stack - n; \
+        if (builtin_global(fn) && num_val(a, &x)) { \
+          for (best = a, i = 1; i < n; ++i) { \
+            if (!num_val(a + i, &y)) goto call_global; \
+            if (y op x) { \
+              x = y; \
+              best = a + i; \
+            } \
+          } \
+          *a = *best; \
+          stack = a + 1; \
+          DISPATCH(); \
+        } \
+        goto call_global;
+      OP(MIN) { min_max_op(builtin_min, <) }
+      OP(MAX) { min_max_op(builtin_max, >) }
+#undef min_max_op
 #undef builtin_global
       OP(CALL_GLOBAL) {
         SSym* sym;
@@ -1849,6 +1877,10 @@ new_frame:
       }
       OP(JUMP_FALSE) {
         if (is_falsy(*--stack)) pc += arg;
+        DISPATCH();
+      }
+      OP(JUMP_TRUE) {
+        if (!is_falsy(*--stack)) pc += arg;
         DISPATCH();
       }
       OP(JUMP_FALSE_OR_POP) {
@@ -2306,6 +2338,7 @@ typedef struct SnapLoop_ {
 } SnapLoop;
 
 typedef struct SnapFnState_ {
+  Snap* snap;
   struct SnapFnState_* up;
   struct { MVEC_FIELDS(SnapInst); } insts;
   SnapVec constants;
@@ -2338,6 +2371,7 @@ static SnapFnState* fn_state_new(Snap* snap) {
   mvec_init(&fs->insts, SnapInst, 16);
   mvec_init(&fs->constants, SValue, 8);
   fs->last_target = -1;
+  fs->snap = snap;
   fs->up = snap->fn_state;
   snap->fn_state = fs;
   return fs;
@@ -2424,7 +2458,50 @@ static int take_operand(SnapFnState* fs) {
   return operand;
 }
 
+static int add_constant(Snap* snap, SnapFnState* fs, SValue val);
+
+// Works out (op a b) of two number constants now, the way the instruction
+// would, and loads the result. Division and modulo are left to run, for
+// their errors.
+static bool fold(SnapFnState* fs, int op, int left, int right) {
+  const SValue* a, * b;
+  SValue val;
+  SnapFloat x, y;
+  if (left >= 0 || right >= 0 || op == DIV || op == MOD) return false;
+  a = &fs->constants.vitems[-left - 1];
+  b = &fs->constants.vitems[-right - 1];
+  if (is_int_p(a) && is_int_p(b)) {
+    switch (op) {
+      case ADD: val.bits = add_iop(a->bits, b->bits); break;
+      case SUB: val.bits = sub_iop(a->bits, b->bits); break;
+      case MUL: val.bits = mul_iop(a->bits, b->bits); break;
+      case LESS_THAN: val = create_bool((SnapInt)a->bits < (SnapInt)b->bits); break;
+      case LESS_EQUALS: val = create_bool((SnapInt)a->bits <= (SnapInt)b->bits); break;
+      case GREATER_THAN: val = create_bool((SnapInt)a->bits > (SnapInt)b->bits); break;
+      case GREATER_EQUALS: val = create_bool((SnapInt)a->bits >= (SnapInt)b->bits); break;
+      default: val = create_bool(a->bits == b->bits); break;
+    }
+  } else if (num_val(a, &x) && num_val(b, &y)) {
+    switch (op) {
+      case ADD: val = create_float(fs->snap, x + y); break;
+      case SUB: val = create_float(fs->snap, x - y); break;
+      case MUL: val = create_float(fs->snap, x * y); break;
+      case LESS_THAN: val = create_bool(x < y); break;
+      case LESS_EQUALS: val = create_bool(x <= y); break;
+      case GREATER_THAN: val = create_bool(x > y); break;
+      case GREATER_EQUALS: val = create_bool(x >= y); break;
+      default: val = create_bool(x == y); break;
+    }
+  } else {
+    return false;
+  }
+  *mvec_push(&fs->insts, SnapInst) = INST(LOAD_CONSTANT, add_constant(fs->snap, fs, val));
+  adjust_stack(fs, 1);
+  return true;
+}
+
 static int emit_binary_operands(SnapFnState* fs, int op, int left, int right) {
+  if (fold(fs, op, left, right)) return pc(fs) - 1;
   adjust_stack(fs, 1 - (left == 0) - (right == 0)); // Pops stack operands, pushes the result
   *mvec_push(&fs->insts, SnapInst) = INST(op, OPERANDS(0, left, right));
   return pc(fs) - 1;
@@ -2444,6 +2521,8 @@ static int call_op(SnapFnState* fs, int index, int num_args) {
   if (num_args == 1 && strcmp(name, "count") == 0) return COUNT;
   if (num_args == 2 && strcmp(name, "get") == 0) return GET;
   if (num_args == 1 && strcmp(name, "int") == 0) return INT;
+  if (num_args >= 1 && strcmp(name, "min") == 0) return MIN;
+  if (num_args >= 1 && strcmp(name, "max") == 0) return MAX;
   return CALL_GLOBAL;
 }
 
@@ -2492,7 +2571,7 @@ static int emit(SnapFnState* fs, int op, int arg) {
       break;
     case STORE_GLOBAL: case STORE_LOCAL: case STORE_CLOSED:
     case POP: case RETURN: case PANIC:
-    case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
+    case JUMP_FALSE: case JUMP_TRUE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
       adjust_stack(fs, -1);
       break;
     case CALL:
@@ -2526,8 +2605,12 @@ static void emit_jump_back(Snap* snap, SnapFnState* fs, int target) {
   emit(fs, JUMP, offset);
 }
 
+static int add_global_constant(Snap* snap, SnapFnState* fs, SValue val);
+
 static int add_constant(Snap* snap, SnapFnState* fs, SValue val) {
   int i;
+  // Floats by identity: compared, 0.0 equals -0.0, and NaN equals anything
+  if (is_float(val)) return add_global_constant(snap, fs, val);
   for (i = 0; i < fs->constants.vsize; ++i) {
     if (snap_compare(&fs->constants.vitems[i], &val) == 0) return i;
   }
@@ -2840,22 +2923,103 @@ static void compile_set(Snap* snap, SnapFnState* fs, SCons* args) {
   emit(fs, LOAD_NIL, 0); /* TODO: Hack */
 }
 
+// Jumps to the same place are chained through their args until it's known:
+// each holds the index of the one before, or -1
+static int chain_jump(SnapFnState* fs, int op, int chain) {
+  int at = emit_jump(fs, op);
+  fs->insts.vitems[at] = INST(op, chain);
+  return at;
+}
+
+static void patch_jumps(Snap* snap, SnapFnState* fs, int chain) {
+  while (chain >= 0) {
+    int prev = INST_ARG(fs->insts.vitems[chain]);
+    patch_jump(snap, fs, chain);
+    chain = prev;
+  }
+}
+
+// Compiles a condition that jumps when its truth is `when`, and otherwise
+// falls through, leaving nothing on the stack. Returns the chain of its
+// jumps, added to `chain`. An and (or) jumps out at the first false (true)
+// operand, so each compare branches by itself instead of pushing a bool. A
+// condition that turns out to be a constant, like cond's last true, needs no
+// test.
+static int compile_jump(Snap* snap, SnapFnState* fs, SValue cond, bool when, int chain) {
+  SCons* sexpr = is_cons(cond) && !is_empty(cond) ? as_cons(cond) : NULL;
+  int form = sexpr && is_form(sexpr->first) ? as_form(sexpr->first) : -1;
+  SCons* args = sexpr ? as_cons(sexpr->rest) : NULL;
+  enter(snap, "snap_compile_error");
+  if ((form == TK_AND || form == TK_OR) && args) {
+    // Every operand but the last jumps on false for and (true for or): out
+    // of the condition when that's `when`, otherwise past it
+    bool stop = form == TK_OR;
+    int past = -1;
+    for (; !is_empty(args->rest); args = as_cons(args->rest)) {
+      if (stop == when) chain = compile_jump(snap, fs, args->first, stop, chain);
+      else past = compile_jump(snap, fs, args->first, stop, past);
+    }
+    chain = compile_jump(snap, fs, args->first, when, chain);
+    patch_jumps(snap, fs, past);
+  } else if (form == TK_NOT && list_length(args) == 1) {
+    chain = compile_jump(snap, fs, args->first, !when, chain);
+  } else {
+    compile(snap, fs, cond, false);
+    if (fs->last_target != pc(fs) && (last_op(fs) == LOAD_CONSTANT || last_op(fs) == LOAD_NIL)) {
+      SnapInst inst = fs->insts.vitems[pc(fs) - 1];
+      bool truth = INST_OP(inst) == LOAD_CONSTANT && !is_falsy(fs->constants.vitems[INST_ARG(inst)]);
+      fs->insts.vsize--;
+      adjust_stack(fs, -1);
+      if (truth == when) chain = chain_jump(fs, JUMP, chain);
+    } else {
+      chain = chain_jump(fs, when ? JUMP_TRUE : JUMP_FALSE, chain);
+    }
+  }
+  snap->c_depth--;
+  return chain;
+}
+
+// Code that can't run, like the else of a condition that's always true, is
+// still compiled (for its errors), then dropped
+static void compile_dead(Snap* snap, SnapFnState* fs, SValue expr, bool tail, bool effect) {
+  int at = pc(fs), target = fs->last_target, stack = fs->stack;
+  if (effect) compile_effect(snap, fs, expr);
+  else compile(snap, fs, expr, tail);
+  fs->insts.vsize = at;
+  fs->last_target = target;
+  fs->stack = stack;
+}
+
+// (if cond then else), for its value or (with `effect`) only its effects,
+// where a missing else (nil) needs no code
+static void compile_branches(Snap* snap, SnapFnState* fs, SCons* args, bool tail, bool effect) {
+  int cond_jumps, jump, stack;
+  SValue then = nth(args, 1), other = nth(args, 2);
+  cond_jumps = compile_jump(snap, fs, args->first, false, -1);
+  stack = fs->stack;
+  if (effect) compile_effect(snap, fs, then);
+  else compile(snap, fs, then, tail);
+  if (cond_jumps < 0) { // Always true
+    compile_dead(snap, fs, other, tail, effect);
+    return;
+  }
+  if (effect && is_nil(other)) {
+    patch_jumps(snap, fs, cond_jumps);
+    return;
+  }
+  jump = emit_jump(fs, JUMP);
+  patch_jumps(snap, fs, cond_jumps);
+  fs->stack = stack;
+  if (effect) compile_effect(snap, fs, other);
+  else compile(snap, fs, other, tail);
+  patch_jump(snap, fs, jump);
+}
+
 static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
-  int cond_jump, jump, stack;
   if (list_length(args) != 3) {
     raise(snap, "snap_compile_error", "Expected (if <cond> <then> <else>)");
   }
-  compile(snap, fs, args->first, false);
-  cond_jump = emit_jump(fs, JUMP_FALSE);
-  stack = fs->stack;
-
-  compile(snap, fs, nth(args, 1), tail);
-  jump = emit_jump(fs, JUMP);
-
-  patch_jump(snap, fs, cond_jump);
-  fs->stack = stack;
-  compile(snap, fs, nth(args, 2), tail);
-  patch_jump(snap, fs, jump);
+  compile_branches(snap, fs, args, tail, false);
 }
 
 static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
@@ -3202,18 +3366,7 @@ static void compile_effect(Snap* snap, SnapFnState* fs, SValue expr) {
     compile_effect(snap, fs, form);
     if (is_obj(form)) snap_release(snap);
   } else if (sexpr && is_form(sexpr->first) && as_form(sexpr->first) == TK_IF && list_length(args) == 3) {
-    int cond_jump, jump;
-    compile(snap, fs, args->first, false);
-    cond_jump = emit_jump(fs, JUMP_FALSE);
-    compile_effect(snap, fs, nth(args, 1));
-    if (is_nil(nth(args, 2))) {
-      patch_jump(snap, fs, cond_jump);
-    } else {
-      jump = emit_jump(fs, JUMP);
-      patch_jump(snap, fs, cond_jump);
-      compile_effect(snap, fs, nth(args, 2));
-      patch_jump(snap, fs, jump);
-    }
+    compile_branches(snap, fs, args, false, true);
   } else if (sexpr && is_form(sexpr->first) && as_form(sexpr->first) == TK_BEGIN && args) {
     for (; args; args = as_cons(args->rest)) compile_effect(snap, fs, args->first);
   } else {
@@ -3729,14 +3882,14 @@ static void print_code(SCode* code, int indent) {
         printf(" %-6d ", arg);
         print_val(stdout, code->constants[arg]);
         break;
-      case JUMP: case JUMP_FALSE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
+      case JUMP: case JUMP_FALSE: case JUMP_TRUE: case JUMP_FALSE_OR_POP: case JUMP_TRUE_OR_POP:
         printf(" %-6d (to %d)", arg, i + 1 + arg);
         break;
       case LOAD_LOCAL: case STORE_LOCAL: case LOAD_CLOSED: case STORE_CLOSED:
       case CALL: case CLOSE_UPVALS:
         printf(" %d", arg);
         break;
-      case CALL_GLOBAL: case NTH: case COUNT: case GET: case INT:
+      case CALL_GLOBAL: case NTH: case COUNT: case GET: case INT: case MIN: case MAX:
         printf(" %-6d ", arg & 0xff);
         print_val(stdout, code->constants[arg >> 8]);
         break;

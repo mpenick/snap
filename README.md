@@ -389,13 +389,21 @@ it.
   instruction at a time, with a few peepholes. Binary operators can read
   locals and constants directly and store arithmetic results straight into a
   local, so most of a tight loop doesn't touch the stack. A call to a global
-  is one instruction that carries the name. Calls to `nth`, `count`, `get` and
-  `int` have instructions of their own that index vectors, look up maps and
-  struct fields, and truncate floats themselves, as long as the globals still
-  hold the built-ins (otherwise, and for other arguments, they call the
-  global). An expression whose value isn't
+  is one instruction that carries the name. Calls to `nth`, `count`, `get`,
+  `int`, `min` and `max` have instructions of their own that index vectors,
+  look up maps and struct fields, truncate floats and compare numbers
+  themselves, as long as the globals still hold the built-ins (otherwise, and
+  for other arguments, they call the global). An expression whose value isn't
   used (all but the last in a body) is compiled without its value, so an `if`
-  or `when` there doesn't push `nil` for a missing branch only to pop it.
+  or `when` there doesn't push `nil` for a missing branch only to pop it. The
+  condition of an `if` (so of `when` and `cond` too) compiles to jumps: `and`
+  and `or` jump out at the operand that decides them, `not` flips where the
+  jumps go, and each compare takes its branch itself rather than pushing a
+  bool. A condition that's a constant, like `cond`'s final `true`, is never
+  tested, and the branch that can't run is dropped. Arithmetic and compares
+  of two number constants, including `defconst` values like `(* PI 2.0)`,
+  are worked out when compiling (except `/` and `%`, so dividing by zero is
+  still an error when it runs).
 * **The VM** is a stack machine with computed-goto dispatch. Once a function
   is compiled, each binary op is switched to a variant for its kinds of
   operands (stack, local or constant), which handles ints without decoding
