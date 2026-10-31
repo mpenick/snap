@@ -327,7 +327,7 @@ holds, such as a texture or a file, without the program having to.
 
 `defgc` is `(set-gc! Voice (fn [v] ...))`, and `(set-gc! Voice nil)` takes
 the finalizer away. The finalizer can be a C function, so bindings can make
-handles that free themselves, as quake's images and meshes do. As in Lua, only
+handles that free themselves, such as a game's images and meshes. As in Lua, only
 structs made after their type gets a finalizer are finalized, so give it one
 right after `defstruct`.
 
@@ -463,62 +463,6 @@ Errors don't undo them. Inside snap.c, `snap_anchor()` and `snap_release()`
 do the short-lived version of this: they keep an object alive while C is
 still building it (filling a new map allocates), and they come undone, last
 first, by the end of the call or when an error unwinds.
-
-## Doom
-
-`doom/` is a small doom-like game, written to stress the language: a
-Wolfenstein-style raycaster that draws every pixel of a 320x200 framebuffer
-from snap (textured walls, floors and ceilings, and sprites, with textures it
-makes when it starts), demons that chase you, and pickups. It runs at about
-200 frames a second, with two thirds of the time in the VM. The corner of the screen
-shows the GC's stats: it allocates a few KB a frame, and its pauses stay
-around 100 microseconds.
-
-![doom](doom/doom.png)
-
-It uses [raylib](https://www.raylib.com), which isn't packaged on Ubuntu, so
-`make raylib` in `doom/` fetches it and builds it there (this needs the X11
-and GL headers, e.g. `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`,
-`libxcursor-dev`, `libxi-dev` and `libgl-dev`). `doom/snap_game.c` has the
-bindings (windows, input, drawing and images) and a `main()` that runs a file
-with them. Images are `Image` structs with a C finalizer (see Finalizers), so
-the game never frees them. Finding an image's slot from its struct checks
-that the struct owns it, and the last two found are cached, as drawing goes
-back and forth between the framebuffer and a texture for every pixel.
-
-```
-cd doom
-make raylib   # Once
-make run      # WASD, mouse or arrows to turn, click or space to shoot, tab for the map
-```
-
-## Quake
-
-`quake/` is a small arena shooter in the style of quake 3, the next stress
-test after doom. The GPU draws it, so the work in snap is everywhere else. When
-it starts, it makes its textures and meshes, lights every vertex of the arena
-(sun, sky and colored lights, each casting a shadow ray), and finds which
-places bots can walk between by trying each walk with the game's physics.
-While it plays, snap runs quake 3's movement for everyone (strafe jumping,
-rocket jumping, stairs and jump pads), the rockets and rails, items, and four
-bots. The bots find paths (Dijkstra), go after items, and aim, strafe and hop
-at you and at each other. With all five players being bots, it runs 600
-frames in about 0.6 seconds.
-
-![quake](quake/quake.png)
-
-It shares doom's raylib build. `quake/snap_game.c` is doom's with 3D added:
-a camera, cubes, spheres and cylinders, blending, and meshes built a vertex
-at a time. Its images and meshes are `Image` and `Mesh` structs with C
-finalizers (see Finalizers), so the game never frees them: their pixels,
-triangles and GPU textures and buffers go when they're dropped, or when the
-program ends, before the window closes. If the tables run out of slots,
-making one runs a whole collection and the finalizers first.
-
-```
-cd quake
-make run      # WASD and mouse, space to jump, click to shoot, 1-3 for weapons, tab for scores
-```
 
 ## Implementation
 
