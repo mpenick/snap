@@ -88,6 +88,10 @@ evaluated when it's used:
 (let [{:keys [wall floor] :or {wall :plaster}} room] ...)
 ```
 
+`_` binds nothing: in a pattern its position isn't read (`[_ _ z]` reads
+only `z`), and as a whole binding (`let`, `loop`, `fn`, `doseq`, `dotimes`)
+the value is still evaluated but can't be read, so `(fn [_ _ z] z)` is fine.
+
 Patterns nest. They compile to the `nth` and `get` calls they stand for, so
 they're as fast, and a vector too short for its pattern is `nth`'s error.
 Map patterns work on structs too, and a missing key is `nil`. A pattern on

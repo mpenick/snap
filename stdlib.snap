@@ -35,7 +35,7 @@
 
 ; (dotimes [i n] body...) runs body with i from 0 to n - 1
 (defmacro dotimes [binding & body]
-  (let [i (nth binding 0) n (gensym)]
+  (let [i (if (= (nth binding 0) '_) (gensym) (nth binding 0)) n (gensym)]
     `(let [~n ~(nth binding 1)]
        (loop [~i 0] (if (< ~i ~n) (begin ~@body (recur (+ ~i 1))) nil)))))
 

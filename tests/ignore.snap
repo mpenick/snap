@@ -1,0 +1,22 @@
+; _ binds nothing: in a pattern its position isn't read
+
+; Skipped positions, nested, and after & and :as
+(let [[_ _ _ _ hx hy hz yaw] [:box 1 2 3 4 5 6 0.5] [x _ z] [7 8 9] [[_ b] _ c] [[1 2] 3 4]] (println hx hy hz yaw x z b c))
+(let [[a & _] [1 2 3] [b :as _] [4] [c & _ :as all] [5 6]] (println a b c all))
+; A skipped position isn't read: a list or vector only needs the positions named
+(println (let [[_ _ c] '(1 2 3)] c))
+; Map patterns: {_ :k} skips the get
+(let [{_ :a b :b} {:a 1 :b 2} {_ :x :as m} {:x 1}] (println b m))
+; As a whole binding the value is still evaluated, under a name nothing reads
+(let [_ (println "side effect") _ (println "again") x 1] (println x))
+(defn third [_ _ z] z)
+(println (third 1 2 3) ((fn [_ & _] :ok) 1 2 3))
+(println (loop [_ 0 i 0] (if (< i 3) (recur (println "loop" i) (+ i 1)) i)))
+(doseq [_ [1 2]] (println "doseq"))
+(dotimes [_ 2] (println "dotimes"))
+; Reading _ is an error, since it's never bound
+(println (recover (fn [] (let [_ 1] _))) (recover (fn [] (let [[_ a] [1 2]] _))))
+; Short is still nth's error for the positions read
+(println (recover (fn [] (let [[_ _ _ _ r] [1 2 3]] r))))
+; _ can't be looked up or given a default
+(println (compile "(let [{:keys [_]} {}] 1)") (compile "(let [{_ :k :or {_ 1}} {}] 1)"))

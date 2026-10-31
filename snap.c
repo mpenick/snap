@@ -3034,6 +3034,16 @@ static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
 
 static bool is_pattern(SValue v) { return is_vec(v) || is_map(v); }
 
+static SValue new_gensym(Snap* snap);
+
+// _ in a binding binds nothing: in a pattern its position isn't read, and as
+// a whole binding (let, loop, fn) the value goes in a name nothing can read
+static bool is_ignore(Snap* snap, SValue v) { return is_sym(v) && as_sym(v) == snap_sym_new(snap, "_"); }
+
+static SSym* binding_name(Snap* snap, SValue name) {
+  return is_ignore(snap, name) ? as_sym(new_gensym(snap)) : as_sym(name);
+}
+
 static bool is_key_named(Snap* snap, SValue v, const char* name) {
   return is_obj(v) && as_obj(v) == (SObject*)snap_key_new(snap, name);
 }
@@ -3148,8 +3158,10 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
       SValue p = *snap_vec_at(v, i);
       if (is_sym(p) && as_sym(p) == amp) {
         if (i + 1 >= v->len) raise(snap, "snap_compile_error", "Expected a pattern after &");
-        destructure(snap, fs, *snap_vec_at(v, ++i),
-                    call2(snap, global_fn(fs, "nthnext", builtin_nthnext, snap), tmp, create_int(n)), out);
+        if (!is_ignore(snap, *snap_vec_at(v, ++i))) {
+          destructure(snap, fs, *snap_vec_at(v, i),
+                      call2(snap, global_fn(fs, "nthnext", builtin_nthnext, snap), tmp, create_int(n)), out);
+        }
         if (i + 1 < v->len && !(is_obj(*snap_vec_at(v, i + 1)) && as_obj(*snap_vec_at(v, i + 1)) == (SObject*)as)) {
           raise(snap, "snap_compile_error", "Expected only :as after & <pattern>");
         }
@@ -3157,7 +3169,9 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
         if (i + 2 != v->len || !is_sym(*snap_vec_at(v, i + 1))) {
           raise(snap, "snap_compile_error", "Expected :as <name> at the end of the pattern");
         }
-        push_binding(snap, out, *snap_vec_at(v, ++i), tmp);
+        if (!is_ignore(snap, *snap_vec_at(v, ++i))) push_binding(snap, out, *snap_vec_at(v, i), tmp);
+      } else if (is_ignore(snap, p)) {
+        n++; // Skipped, not read
       } else {
         destructure(snap, fs, p, call2(snap, global_fn(fs, "nth", builtin_nth, snap), tmp, create_int(n++)), out);
       }
@@ -3181,7 +3195,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
       for (i = 0; i < as_vec(*keys)->len; ++i) {
         SValue name = *snap_vec_at(as_vec(*keys), i);
         SValue* d;
-        if (!is_sym(name)) raise(snap, "snap_compile_error", "Expected :keys [names]");
+        if (!is_sym(name) || is_ignore(snap, name)) raise(snap, "snap_compile_error", "Expected :keys [names]");
         push_binding(snap, out, name,
                      call2(snap, global_fn(fs, "get", builtin_get, snap), tmp,
                            create_obj(snap_key_new(snap, as_sym(name)->data))));
@@ -3200,6 +3214,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
       if (!is_key(key) && !is_str(key) && !is_int(key)) {
         raise(snap, "snap_compile_error", "Expected a keyword, string or int to look up after a name in a map pattern");
       }
+      if (is_ignore(snap, target)) continue;
       get = call2(snap, global_fn(fs, "get", builtin_get, snap), tmp, key);
       if (is_sym(target)) {
         SValue* d;
@@ -3218,13 +3233,13 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
         bool found = false;
         int j;
         if (name.bits == SV_DELETED) continue;
-        if (!is_sym(name)) raise(snap, "snap_compile_error", "Expected :or {name default ...}");
+        if (!is_sym(name) || is_ignore(snap, name)) raise(snap, "snap_compile_error", "Expected :or {name default ...}");
         for (j = 0; keys && j < as_vec(*keys)->len && !found; ++j) found = as_sym(*snap_vec_at(as_vec(*keys), j)) == as_sym(name);
         for (j = 0; j < m->used && !found; ++j) found = m->entries[2 * j].bits == name.bits;
         if (!found) raise(snap, "snap_compile_error", "'%s' in :or isn't a name this pattern binds from a key", as_sym(name)->data);
       }
     }
-    if (as) push_binding(snap, out, *as, tmp);
+    if (as && !is_ignore(snap, *as)) push_binding(snap, out, *as, tmp);
   }
 }
 
@@ -3307,7 +3322,7 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
       fs->variadic = true;
       continue;
     }
-    add_local(snap, fs, as_sym(param), false);
+    add_local(snap, fs, binding_name(snap, param), false);
   }
   fs->num_args = fs->num_locals;
 
@@ -3428,7 +3443,7 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
   base = fs->num_locals;
   for (i = 0; i < count; ++i) {
     compile(snap, fs, *snap_vec_at(bindings, 2 * i + 1), false);
-    emit(fs, STORE_LOCAL, add_local(snap, fs, as_sym(*snap_vec_at(bindings, 2 * i)), true));
+    emit(fs, STORE_LOCAL, add_local(snap, fs, binding_name(snap, *snap_vec_at(bindings, 2 * i)), true));
   }
   assert(fs->num_locals == base + count);
 
