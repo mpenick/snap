@@ -90,7 +90,10 @@ evaluated when it's used:
 
 Patterns nest. They compile to the `nth` and `get` calls they stand for, so
 they're as fast, and a vector too short for its pattern is `nth`'s error.
-Map patterns work on structs too, and a missing key is `nil`. In a `loop`,
+Map patterns work on structs too, and a missing key is `nil`. A pattern on
+`nil` is an error; for a value that can be `nil`, `(if-let [[x z] (find)]
+then else)` and `(when-let [[x z] (find)] body...)` bind only when the value
+is truthy. In a `loop`,
 `recur` takes one value for each binding, as usual: `(recur [b (+ a b)] ...)`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
@@ -146,9 +149,10 @@ Built-in functions:
   (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
-`defn`, `defconst`, `when`, `cond`, `dotimes`, `(doseq [x coll] ...)`, `inc`,
-`dec`, `map`, `filter`, `reduce` and `(sort-by key coll)` (which take a
-vector or list and make a vector), the struct macros below, and `defgc`.
+`defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `dotimes`,
+`(doseq [x coll] ...)`, `inc`, `dec`, `map`, `filter`, `reduce` and
+`(sort-by key coll)` (which take a vector or list and make a vector), the
+struct macros below, and `defgc`.
 
 `(defconst name expr)` defines a global that can't change: `def`, `set!` or
 another `defconst` of it is an error. Code compiled after it uses the value

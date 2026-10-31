@@ -1,0 +1,8 @@
+3 :none :none
+5 nil :zero-is-truthy
+"body"
+3 nil
+1 1
+6 nil
+:outer 2
+<err :snap_compile_error "Expected (if-let [<name or pattern> <expr>] <then> <else>)"> <err :snap_compile_error "Expected (when-let [<name or pattern> <expr>] <body>...)"> <err :snap_compile_error "Expected (if-let [<name or pattern> <expr>] <then> <else>)">

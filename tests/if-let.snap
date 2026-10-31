@@ -1,0 +1,16 @@
+; if-let and when-let: bind only when the value is truthy
+(println (if-let [[a b] [1 2]] (+ a b) :none) (if-let [[a b] nil] (+ a b) :none) (if-let [x false] x :none))
+(println (if-let [x 5] x) (if-let [x nil] x) (when-let [x 0] :zero-is-truthy))
+(println (when-let [{:keys [a b]} {:a 1 :b 2}] (println "body") (+ a b)) (when-let [[a] nil] (panic :boom "ran")))
+; The value is evaluated once
+(def calls 0)
+(defn once [] (set! calls (+ calls 1)) [calls])
+(println (if-let [[n] (once)] n :none) calls)
+; recur from both branches
+(defn count-down [xs n] (if-let [[x & more] xs] (recur more (+ n x)) n))
+(println (count-down [1 2 3] 0) (loop [i 0] (when-let [x (if (< i 3) i nil)] (recur (+ x 1)))))
+; Nested, and the names don't leak into else
+(def a :outer)
+(println (if-let [a nil] a a) (when-let [p [1 2]] (when-let [[x y] p] (* x y))))
+; Bad bindings
+(println (compile "(if-let [a] a)") (compile "(when-let (a 1) a)") (compile "(if-let [a 1 b 2] a)"))

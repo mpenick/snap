@@ -17,6 +17,22 @@
   (if (= (count clauses) 0) nil
     `(if ~(first clauses) ~(nth clauses 1) (cond ~@(rest (rest clauses))))))
 
+; (if-let [target expr] then else) binds target (a name or a pattern) to the
+; value of expr and is then, if the value is truthy, else else (or nil).
+; (when-let [target expr] body...) is the same with only body. For values
+; that can be nil, which a pattern would reject.
+(defmacro if-let [binding then & else]
+  (if (not (and (vector? binding) (= (count binding) 2)))
+    (err :snap_compile_error "Expected (if-let [<name or pattern> <expr>] <then> <else>)")
+    (let [v (gensym)]
+      `(let [~v ~(nth binding 1)]
+         (if ~v (let [~(nth binding 0) ~v] ~then) ~(first else))))))
+
+(defmacro when-let [binding & body]
+  (if (not (and (vector? binding) (= (count binding) 2)))
+    (err :snap_compile_error "Expected (when-let [<name or pattern> <expr>] <body>...)")
+    `(if-let ~binding (begin ~@body) nil)))
+
 ; (dotimes [i n] body...) runs body with i from 0 to n - 1
 (defmacro dotimes [binding & body]
   (let [i (nth binding 0) n (gensym)]
