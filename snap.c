@@ -102,6 +102,8 @@ enum {
   XX(CLOSURE) \
   XX(CLOSE_UPVALS) \
   XX(RETURN) \
+  XX(RETURN_VEC) \
+  XX(UNPACK) \
   XX(JUMP) \
   XX(JUMP_FALSE) \
   XX(JUMP_TRUE) \
@@ -1524,6 +1526,7 @@ static inline bool num_val(const SValue* v, SnapFloat* f) {
 // Built-ins that the NTH, COUNT, GET, INT, MIN and MAX instructions compare
 // globals with
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_min(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_max(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result);
@@ -1872,6 +1875,53 @@ new_frame:
         temp = *--stack;
         mvec_pop(&snap->frames);
         return temp;
+      }
+      // Returns the vector literal [a b ...] that ends a function. A caller
+      // that only takes its parts (UNPACK n next) gets them on its stack,
+      // with no vector made.
+      OP(RETURN_VEC) {
+        stack--; // Pop the vector function
+        if (!frame->stop) {
+          SnapFrame* frame_prev = &mvec_back(&snap->frames) - 1;
+          SnapInst next = *frame_prev->pc;
+          if (INST_OP(next) == UNPACK && INST_ARG(next) <= arg) {
+            close_upvals(snap, locals); // Before the parts go over the frame
+            memmove(frame_prev->stack_top, stack - arg, INST_ARG(next) * sizeof(SValue));
+            frame_prev->stack_top += INST_ARG(next);
+            frame_prev->pc++; // Past the UNPACK
+            mvec_pop(&snap->frames);
+            goto new_frame;
+          }
+        }
+        frame->stack_top = stack; // Keep the parts rooted
+        builtin_vector(snap, stack - arg, arg, &temp);
+        stack -= arg;
+        *stack++ = temp;
+        goto do_return;
+      }
+      // Replaces a vector (or list) with its first n items, for a pattern
+      // that takes its parts. Short or not a vector is nth's error.
+      OP(UNPACK) {
+        int i;
+        a = stack - 1;
+        if (is_vec(*a) && as_vec(*a)->len >= arg) {
+          SVec* v = as_vec(*a);
+          for (i = 0; i < arg; ++i) a[i] = *snap_vec_at(v, i);
+          stack = a + arg;
+          DISPATCH();
+        }
+        // The parts go above the value, which stays rooted, then move down
+        for (i = 0; i < arg; ++i) {
+          SValue nth_args[2];
+          nth_args[0] = *a;
+          nth_args[1] = create_int(i);
+          frame->stack_top = stack;
+          if (!builtin_nth(snap, nth_args, 2, &temp)) goto call_failed;
+          *stack++ = temp;
+        }
+        memmove(a, a + 1, arg * sizeof(SValue));
+        stack--;
+        DISPATCH();
       }
       OP(JUMP) {
         pc += arg;
@@ -2398,8 +2448,36 @@ static void specialize(SnapFnState* fs) {
   }
 }
 
+// Whether the code from at returns what's on top of the stack, without
+// changing it: a RETURN, maybe after closing upvalues or jumping to one
+static bool returns_top(SnapFnState* fs, int at) {
+  int steps;
+  for (steps = 0; steps < 16 && at < fs->insts.vsize; ++steps) {
+    SnapInst inst = fs->insts.vitems[at];
+    if (INST_OP(inst) == RETURN) return true;
+    if (INST_OP(inst) == CLOSE_UPVALS) at++;
+    else if (INST_OP(inst) == JUMP) at += 1 + INST_ARG(inst);
+    else return false;
+  }
+  return false;
+}
+
+// A vector literal that's returned, [a b] at the end of a function, returns
+// with RETURN_VEC, which can hand its parts to a caller that takes them apart
+static void return_vectors(SnapFnState* fs) {
+  int i;
+  for (i = 1; i < fs->insts.vsize; ++i) {
+    SnapInst inst = fs->insts.vitems[i], prev = fs->insts.vitems[i - 1];
+    if (INST_OP(inst) == CALL && INST_OP(prev) == LOAD_CONSTANT &&
+        fs->constants.vitems[INST_ARG(prev)].bits == create_cfunc(builtin_vector).bits && returns_top(fs, i + 1)) {
+      fs->insts.vitems[i] = INST(RETURN_VEC, INST_ARG(inst));
+    }
+  }
+}
+
 static SCode* code_new(Snap* snap, SnapFnState* fs) {
   SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
+  return_vectors(fs);
   specialize(fs);
   c->insts = fs->insts.vitems;
   c->insts_count = fs->insts.vsize;
@@ -3158,6 +3236,68 @@ static void push_binding(Snap* snap, SVec* out, SValue name, SValue form) {
   if (is_obj(form)) snap_release(snap);
 }
 
+static bool find_macro(SnapFnState* fs, SValue name, SValue* macro);
+static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form, SVec* out);
+
+// (#unpack a b ...), the name of a binding to the first parts of a call's
+// value, which let and def take with UNPACK: no vector is made when the call
+// returns a literal ([x z] at the end of a function)
+static SSym* unpack_sym(Snap* snap) { return snap_sym_new(snap, "#unpack"); }
+
+static bool is_unpack(Snap* snap, SValue name) {
+  return is_cons(name) && !is_empty(name) && is_sym(as_cons(name)->first) && as_sym(as_cons(name)->first) == unpack_sym(snap);
+}
+
+// [x [y z] _ w] from a call: an unpack binding of the parts read, then their
+// nested patterns. Not with & or :as (which need the whole value), nor once
+// nth isn't the built-in (as the parts are taken with it).
+static bool unpack_binding(Snap* snap, SnapFnState* fs, SVec* v, SValue form, SVec* out) {
+  SValue head, macro, names;
+  SVec* nested;
+  SnapList list = { NULL, NULL };
+  int i, n = 0;
+  if (!is_cons(form) || is_empty(form)) return false;
+  head = as_cons(form)->first;
+  if (!(is_cons(head) || (is_sym(head) && !find_macro(fs, head, &macro)))) return false;
+  if (snap_sym_new(snap, "nth")->value.bits != create_cfunc(builtin_nth).bits) return false;
+  for (i = 0; i < v->len; ++i) {
+    SValue p = *snap_vec_at(v, i);
+    if (is_sym(p) && as_sym(p) == snap_sym_new(snap, "&")) return false;
+    if (is_obj(p) && as_obj(p) == (SObject*)snap_key_new(snap, "as")) return false;
+    if (!is_ignore(snap, p)) n = i + 1;
+  }
+  if (n == 0 || n > 255) return false;
+  nested = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
+  *list_add(snap, &list) = create_obj(unpack_sym(snap));
+  for (i = 0; i < n; ++i) {
+    SValue p = *snap_vec_at(v, i);
+    if (is_sym(p) && !is_ignore(snap, p)) {
+      *list_add(snap, &list) = p;
+    } else {
+      SValue g = new_gensym(snap);
+      *list_add(snap, &list) = g;
+      if (!is_ignore(snap, p)) {
+        snap_vec_push(snap, nested, p);
+        snap_vec_push(snap, nested, g);
+      }
+    }
+  }
+  names = list_done(snap, &list);
+  push_binding(snap, out, names, form);
+  for (i = 0; i < nested->len; i += 2) {
+    destructure(snap, fs, *snap_vec_at(nested, i), *snap_vec_at(nested, i + 1), out);
+  }
+  snap_release(snap);
+  return true;
+}
+
+// Takes the parts of the value on the stack: n values in its place
+static void emit_unpack(SnapFnState* fs, int n) {
+  emit(fs, UNPACK, n);
+  adjust_stack(fs, n); // Room for the parts above the value, while it's unpacked
+  adjust_stack(fs, -1);
+}
+
 // Appends the plain bindings (name, form, ...) for binding pattern to the
 // value of form, to out (which the caller roots)
 static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form, SVec* out) {
@@ -3171,6 +3311,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
   if (!is_pattern(pattern)) {
     raise(snap, "snap_compile_error", "Expected a name, a [pattern] or a {:keys [names]} pattern");
   }
+  if (is_vec(pattern) && unpack_binding(snap, fs, as_vec(pattern), form, out)) return;
   // The whole value, once, in a name the parts are taken from
   tmp = is_sym(form) ? form : new_gensym(snap);
   if (!is_sym(form)) push_binding(snap, out, tmp, form);
@@ -3443,7 +3584,8 @@ static void compile_let_patterns(Snap* snap, SnapFnState* fs, SCons* args, bool 
 // value. (def _ expr) runs expr and defines nothing.
 static void compile_def_pattern(Snap* snap, SnapFnState* fs, SValue pattern, SValue form) {
   SVec* out;
-  int i, j;
+  SVec* names;
+  int i, j, slots[256];
   if (is_ignore(snap, pattern)) {
     compile_effect(snap, fs, form);
     return;
@@ -3453,20 +3595,40 @@ static void compile_def_pattern(Snap* snap, SnapFnState* fs, SValue pattern, SVa
   check_hidden_globals(snap, out, 1);
   out->len = 0;
   destructure(snap, fs, pattern, form, out);
+  // Every name defined, in order, with an unpack binding's names spread out
+  names = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
   for (i = 0; i < out->len; i += 2) {
-    SSym* name = as_sym(*snap_vec_at(out, i));
+    SValue name = *snap_vec_at(out, i);
+    int n = 1, k;
     compile(snap, fs, *snap_vec_at(out, i + 1), false);
-    if (fs->depth > 0) {
-      // A name bound twice here (a default after its get) keeps its slot
-      for (j = 0; j < i && as_sym(*snap_vec_at(out, j)) != name; j += 2) {}
-      emit(fs, STORE_LOCAL, j < i ? resolve_local(fs, name) : add_local(snap, fs, name, false));
+    if (is_unpack(snap, name)) {
+      SCons* c;
+      n = list_length(as_cons(as_cons(name)->rest));
+      emit_unpack(fs, n);
+      for (c = as_cons(as_cons(name)->rest); c; c = as_cons(c->rest)) snap_vec_push(snap, names, c->first);
     } else {
-      store_global(snap, fs, name);
+      snap_vec_push(snap, names, name);
+    }
+    // Each name's slot (inside a function: a name bound twice here, as a
+    // default after its get, keeps its first), then stored from the top of
+    // the stack, the last part first
+    for (k = names->len - n; k < names->len; ++k) {
+      SSym* sym = as_sym(*snap_vec_at(names, k));
+      if (fs->depth == 0) continue;
+      for (j = 0; j < k && as_sym(*snap_vec_at(names, j)) != sym; ++j) {}
+      slots[k - (names->len - n)] = j < k ? resolve_local(fs, sym) : add_local(snap, fs, sym, false);
+    }
+    for (k = names->len - 1; k >= names->len - n; --k) {
+      if (fs->depth > 0) {
+        emit(fs, STORE_LOCAL, slots[k - (names->len - n)]);
+      } else {
+        store_global(snap, fs, as_sym(*snap_vec_at(names, k)));
+      }
     }
   }
   if (fs->depth == 0) {
-    for (i = 0; i < out->len; i += 2) {
-      SSym* name = as_sym(*snap_vec_at(out, i));
+    for (i = 0; i < names->len; ++i) {
+      SSym* name = as_sym(*snap_vec_at(names, i));
       if (!binds(snap, pattern, name)) {
         emit(fs, LOAD_NIL, 0);
         store_global(snap, fs, name);
@@ -3474,11 +3636,12 @@ static void compile_def_pattern(Snap* snap, SnapFnState* fs, SValue pattern, SVa
     }
   }
   snap_release(snap);
+  snap_release(snap);
 }
 
 // Bindings alternate names and values: (let [a 1 b 2] ...)
 static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail) {
-  int i, base, count;
+  int i, base, count, extra;
   SVec* bindings;
   SnapLoop recur_target;
 
@@ -3501,6 +3664,7 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
   }
   for (i = 0; i < count; ++i) {
     check_bindable(snap, *snap_vec_at(bindings, 2 * i), false);
+    if (!loop && is_unpack(snap, *snap_vec_at(bindings, 2 * i))) continue; // From a pattern
     if (!is_sym(*snap_vec_at(bindings, 2 * i))) {
       raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
     }
@@ -3511,11 +3675,22 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
   // recur relies on).
   begin_scope(fs);
   base = fs->num_locals;
-  for (i = 0; i < count; ++i) {
+  for (i = 0, extra = 0; i < count; ++i) {
+    SValue name = *snap_vec_at(bindings, 2 * i);
     compile(snap, fs, *snap_vec_at(bindings, 2 * i + 1), false);
-    emit(fs, STORE_LOCAL, add_local(snap, fs, binding_name(snap, *snap_vec_at(bindings, 2 * i)), true));
+    if (is_unpack(snap, name)) {
+      // The parts in consecutive slots, stored from the top of the stack
+      int n = list_length(as_cons(as_cons(name)->rest)), first = fs->num_locals, j;
+      SCons* c;
+      emit_unpack(fs, n);
+      for (c = as_cons(as_cons(name)->rest); c; c = as_cons(c->rest)) add_local(snap, fs, as_sym(c->first), true);
+      for (j = n - 1; j >= 0; --j) emit(fs, STORE_LOCAL, first + j);
+      extra += n - 1;
+    } else {
+      emit(fs, STORE_LOCAL, add_local(snap, fs, binding_name(snap, name), true));
+    }
   }
-  assert(fs->num_locals == base + count);
+  assert(fs->num_locals == base + count + extra);
 
   if (loop) {
     recur_target.top = pc(fs);
@@ -4338,7 +4513,7 @@ static void print_code(SCode* code, int indent) {
         printf(" %-6d (to %d)", arg, i + 1 + arg);
         break;
       case LOAD_LOCAL: case STORE_LOCAL: case LOAD_CLOSED: case STORE_CLOSED:
-      case CALL: case CLOSE_UPVALS:
+      case CALL: case CLOSE_UPVALS: case RETURN_VEC: case UNPACK:
         printf(" %d", arg);
         break;
       case CALL_GLOBAL: case NTH: case COUNT: case GET: case INT: case MIN: case MAX:

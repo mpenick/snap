@@ -1,0 +1,43 @@
+; vi: filetype=scheme
+; A function that ends in a vector literal, called by a pattern that only
+; takes its parts, hands them over without making the vector. Nothing else
+; changes, so this checks that every path gives what nth would.
+
+(defn rot [x z] (let [c 2] [(* x c) (+ z 1)]))
+(let [[a b] (rot 3 4)] (println a b))
+; Through if branches and a loop's result
+(defn pick [c] (if c [1 2] [3 4]))
+(defn walk [n] (loop [i 0] (if (< i n) (recur (+ i 1)) [i (* i 10)])))
+(let [[a b] (pick false) [c d] (walk 3)] (println a b c d))
+; Fewer names than parts, _ (still read), nested patterns, and in def
+(defn parts [] [1 [2 3] 4 5])
+(let [[a [b c] _ d] (parts) [e] (parts)] (println a b c d e))
+(def [ga gb] (rot 10 20))
+(defn in-fn [] (def [la lb] (rot 0 0)) (+ la lb))
+(println ga gb (in-fn))
+; The callee's locals captured by what it returns
+(defn counter [] (let [n 5 f (fn [] n)] [f n]))
+(let [[f n] (counter)] (println (f) n))
+; Recursion: each call's parts land in its own caller
+(defn fib2 [n] (if (< n 2) [n 1] (let [[a ca] (fib2 (- n 1)) [b cb] (fib2 (- n 2))] [(+ a b) (+ ca cb 1)])))
+(println (fib2 15))
+; Not unpacked: the caller keeps the vector (a new one each call), a wrapper,
+; & and :as, and from C (map)
+(let [v (rot 1 1) w (rot 1 1)] (push! v 9) (println v w))
+(defn wrap [] (rot 2 2))
+(let [[a b] (wrap) [c & r] (parts) [d :as all] (rot 0 0)] (println a b c r d all))
+(println (map (fn [i] [i i]) [1 2]))
+; Other values are taken apart as nth would: lists, a C function's vector,
+; and the errors for short and nil
+(defn lst [] (list 7 8))
+(let [[p q] (lst) [s t] (vec (list 5 6))] (println p q s t))
+(println (recover (fn [] (let [[a b c] (rot 1 2)] c))))
+(println (recover (fn [] (let [[a b] (first [nil])] a))))
+; A literal in try isn't returned directly
+(defn tried [] (try [1 2]))
+(let [[a b] (tried)] (println a b))
+; Once nth isn't the built-in, patterns compiled after use it, as before
+(def real-nth nth)
+(set! nth (fn [v i] [:part i]))
+(let [[a b] (rot 1 1)] (println a b))
+(set! nth real-nth)

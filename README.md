@@ -105,6 +105,21 @@ then else)` and `(when-let [[x z] (find)] body...)` bind only when the value
 is truthy. In a `loop`,
 `recur` takes one value for each binding, as usual: `(recur [b (+ a b)] ...)`.
 
+A function that ends in a vector literal can return several values without
+making the vector: when its caller takes the parts straight away, with a
+vector pattern (no `&` or `:as`) on the call, the parts go directly to it.
+
+```clojure
+(defn rot-yaw [x z yaw]
+  (let [c (cos yaw) s (sin yaw)] [(- (* x c) (* z s)) (+ (* x s) (* z c))]))
+(let [[rx rz] (rot-yaw x z yaw)] ...)  ; No vector made
+(def p (rot-yaw x z yaw))              ; A vector, as usual
+```
+
+Nothing else changes: any other caller gets a new vector, and a value that
+isn't a returned literal is taken apart as `nth` would. Patterns compiled
+while `nth` isn't the built-in use it, as they always did.
+
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
 vectors, maps, lists, structs, types, `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
