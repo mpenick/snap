@@ -1721,6 +1721,17 @@ static inline bool num_val(const SValue* v, SnapFloat* f) {
 // Built-ins that the NTH, COUNT, GET, INT, MIN and MAX instructions compare
 // globals with
 bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_apply(Snap* snap, const SValue* args, int num_args, SValue* result);
+
+// apply's last argument: a vector, a list or nil
+#define is_seq(v) (is_vec(v) || is_cons(v) || is_nil(v))
+
+static int seq_length(SValue seq) {
+  int n = 0;
+  if (is_vec(seq)) return as_vec(seq)->len;
+  for (; !is_nil(seq) && !is_empty(seq); seq = as_cons(seq)->rest) n++;
+  return n;
+}
 bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_min(Snap* snap, const SValue* args, int num_args, SValue* result);
@@ -2003,6 +2014,34 @@ new_frame:
         a = --stack; // Pop callable
       call:
         if (is_cfunc(*a)) {
+          if (as_cfunc(*a) == builtin_apply && arg >= 2 && is_seq(stack[-1])) {
+            // (apply f a b xs) becomes (f a b xs...) here, so it's an
+            // ordinary call. A bad call goes to builtin_apply() for its error.
+            SValue fn, seq = stack[-1];
+            int len = seq_length(seq), i;
+            if (stack + len + 2 >= snap->stack_end) {
+              SValue* moved;
+              frame->stack_top = stack;
+              moved = grow_stack(snap, stack, len + 2);
+              if (!moved) {
+                RUNTIME_ERROR("snap_stack_error", "Stack overflow");
+              }
+              stack = moved;
+              locals = frame->stack_base;
+            }
+            fn = stack[-arg];
+            memmove(stack - arg, stack - arg + 1, (arg - 2) * sizeof(SValue)); // The fixed arguments
+            stack -= 2;
+            if (is_vec(seq)) {
+              for (i = 0; i < len; ++i) *stack++ = *snap_vec_at(as_vec(seq), i);
+            } else {
+              for (; !is_nil(seq) && !is_empty(seq); seq = as_cons(seq)->rest) *stack++ = as_cons(seq)->first;
+            }
+            a = stack;
+            *a = fn;
+            arg = arg - 2 + len;
+            goto call;
+          }
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
           ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
@@ -4839,6 +4878,22 @@ bool builtin_ismap(Snap* snap, const SValue* args, int num_args, SValue* result)
   return true;
 }
 
+// Type predicates, one per built-in type: (int? x) is (= (type x) Int)
+#define XX(name, test) \
+  static bool name(Snap* snap, const SValue* args, int num_args, SValue* result) { \
+    if (num_args != 1) return arity_error(snap, result); \
+    *result = create_bool(test(args[0])); \
+    return true; \
+  }
+#define is_number(v) (is_int(v) || is_float(v))
+#define is_fn_value(v) (is_cfunc(v) || is_code(v) || is_closure(v) || is_method(v))
+XX(builtin_isint, is_int) XX(builtin_isfloat, is_float) XX(builtin_isnumber, is_number)
+XX(builtin_isstr, is_str) XX(builtin_iskey, is_key) XX(builtin_isbool, is_bool)
+XX(builtin_isfn, is_fn_value) XX(builtin_isstruct, is_struct) XX(builtin_istype, is_type)
+#undef is_number
+#undef is_fn_value
+#undef XX
+
 // (err <kind> <msg>) makes an error value. Unlike panic it doesn't unwind;
 // it's returned like any other value (see try).
 bool builtin_err(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -5482,6 +5537,30 @@ bool builtin_macroexpand(Snap* snap, const SValue* args, int num_args, SValue* r
   return true;
 }
 
+// (apply f a b xs) calls f with a, b and the values in xs. The VM does this
+// itself (see CALL), so this is for C calling it with snap_call(), and for
+// the errors. A function that returns an error value looks like it failed,
+// as snap_call() can't tell them apart.
+bool builtin_apply(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SValue seq, *argv;
+  int len, n, i;
+  if (num_args < 2) return arity_error(snap, result);
+  seq = args[num_args - 1];
+  if (!is_seq(seq)) return fail(snap, result, "snap_type_error", "Expected a vector or list as apply's last argument");
+  len = seq_length(seq);
+  n = num_args - 2 + len;
+  argv = (SValue*)malloc((n + 1) * sizeof(SValue));
+  for (i = 0; i < num_args - 2; ++i) argv[i] = args[i + 1];
+  if (is_vec(seq)) {
+    for (i = 0; i < len; ++i) argv[num_args - 2 + i] = *snap_vec_at(as_vec(seq), i);
+  } else {
+    for (i = num_args - 2; !is_nil(seq) && !is_empty(seq); seq = as_cons(seq)->rest) argv[i++] = as_cons(seq)->first;
+  }
+  *result = snap_call(snap, args[0], argv, n); // The values are rooted by args and the call
+  free(argv);
+  return !is_err(*result);
+}
+
 /* Operators as values */
 
 // What the arithmetic instructions do, folding left over two or more numbers
@@ -5620,6 +5699,24 @@ static bool builtin_ceil(Snap* snap, const SValue* args, int num_args, SValue* r
 
 static bool builtin_round(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return to_int(snap, args, num_args, round, result);
+}
+
+// (mod a b) is the remainder with b's sign, so (mod -1 4) is 3. % keeps a's.
+static bool builtin_mod_floor(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 2) return arity_error(snap, result);
+  if (!is_num_p(&args[0]) || !is_num_p(&args[1])) return fail(snap, result, "snap_type_error", "Expected numbers");
+  if (is_int(args[0]) && is_int(args[1])) {
+    SnapInt a = as_int(args[0]), b = as_int(args[1]), r;
+    if (b == 0) return fail(snap, result, "snap_arith_error", "Division by zero");
+    r = a % b;
+    if (r != 0 && (r < 0) != (b < 0)) r += b;
+    *result = create_int(r);
+  } else {
+    SnapFloat a = num_p(&args[0]), b = num_p(&args[1]), r = fmod(a, b);
+    if (r != 0 && (r < 0) != (b < 0)) r += b;
+    *result = create_float(snap, r);
+  }
+  return true;
 }
 
 static bool builtin_int(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -5883,6 +5980,15 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "println", builtin_println);
   snap_def_cfunc(snap, "nil?", builtin_isnil);
   snap_def_cfunc(snap, "vector?", builtin_isvec);
+  snap_def_cfunc(snap, "int?", builtin_isint);
+  snap_def_cfunc(snap, "float?", builtin_isfloat);
+  snap_def_cfunc(snap, "number?", builtin_isnumber);
+  snap_def_cfunc(snap, "str?", builtin_isstr);
+  snap_def_cfunc(snap, "key?", builtin_iskey);
+  snap_def_cfunc(snap, "bool?", builtin_isbool);
+  snap_def_cfunc(snap, "fn?", builtin_isfn);
+  snap_def_cfunc(snap, "struct?", builtin_isstruct);
+  snap_def_cfunc(snap, "type?", builtin_istype);
   snap_def_cfunc(snap, "map?", builtin_ismap);
   snap_def_cfunc(snap, "err", builtin_err);
   snap_def_cfunc(snap, "err?", builtin_iserr);
@@ -5890,6 +5996,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "err-msg", builtin_err_msg);
   snap_def_cfunc(snap, "count", builtin_count);
   snap_def_cfunc(snap, "nth", builtin_nth);
+  snap_def_cfunc(snap, "apply", builtin_apply);
   snap_def_cfunc(snap, "put!", builtin_put);
   snap_def_cfunc(snap, "push!", builtin_push);
   snap_def_cfunc(snap, "pop!", builtin_pop);
@@ -5928,6 +6035,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "cos", builtin_cos);
   snap_def_cfunc(snap, "atan2", builtin_atan2);
   snap_def_cfunc(snap, "floor", builtin_floor);
+  snap_def_cfunc(snap, "mod", builtin_mod_floor);
   snap_def_cfunc(snap, "int", builtin_int);
   snap_def_cfunc(snap, "float", builtin_float);
   snap_def_cfunc(snap, "abs", builtin_abs);

@@ -69,6 +69,19 @@ int main(void) {
   r = snap_call(&snap, fn, NULL, 0);
   CHECK(is_int(r) && as_int(r) == 3);
 
+  // apply called from C goes through snap_call() itself
+  {
+    SValue args[3];
+    args[0] = snap_exec(&snap, "+");
+    args[1] = create_int(1);
+    args[2] = snap_pin(&snap, snap_exec(&snap, "[2 3]"));
+    r = snap_call(&snap, snap_exec(&snap, "apply"), args, 3);
+    CHECK(is_int(r) && as_int(r) == 6);
+    r = snap_call(&snap, snap_exec(&snap, "apply"), args, 2);
+    CHECK(is_err(r));
+    snap_unpin(&snap, args[2]);
+  }
+
   // Values that aren't objects are fine to pin and unpin
   snap_pin(&snap, create_int(1));
   snap_unpin(&snap, create_int(1));

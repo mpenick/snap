@@ -133,7 +133,15 @@ Built-in functions:
   returns `nil` at the end of input. On a terminal it uses readline and shows
   the prompt. It's defined in `main.c`, so programs that embed snap don't need
   readline.
-* Predicates: `nil?`, `vector?`, `map?`, `list?` and `sym?`
+* Predicates: `nil?`, `vector?`, `map?`, `list?` and `sym?`, and one for each
+  other built-in type: `int?`, `float?`, `number?` (either), `str?`, `key?`,
+  `bool?`, `fn?` (functions, C functions and methods, but not keywords or
+  types, which can be called too), `struct?` (any struct) and `type?`
+* Calling: `(apply f a b xs)` calls `f` with `a`, `b` and the values in `xs`
+  (a vector, list or `nil`), as in `(apply + [1 2 3])` or passing on rest
+  arguments, `(defn log [& args] (apply println :log args))`. The VM spreads
+  them itself, so it's an ordinary call. Called from C with `snap_call()`, an
+  error value returned by `f` looks like a panic.
 * Errors: `err`, `err?`, `err-kind` and `err-msg`
 * Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
   instead of `()` at the end), `nthnext` (the values from an index on, of a
@@ -147,7 +155,8 @@ Built-in functions:
   `keys` and `vals`
 * Strings: `(str x...)` joins strings, and other values as they print
 * Math: `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `exp`, `log`, `(pow x y)`
-  and `(atan2 y x)` give floats; `floor`, `ceil`, `round` (half away from
+  and `(atan2 y x)` give floats; `(mod a b)` is the remainder with `b`'s sign,
+  so `(mod -1 4)` is 3 where `(% -1 4)` is -1; `floor`, `ceil`, `round` (half away from
   zero) and `int` (toward zero) give integers; `float`, `abs`, `min` and
   `max`; `(rand)` is a float from 0 up to 1 and `(rand n)` an integer from 0
   up to `n`, and `(rand-seed n)` starts them over, to repeat what they give

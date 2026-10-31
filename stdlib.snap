@@ -15,7 +15,7 @@
 ; (update! x k f args...) sets field (or key) k of x to (f (get x k) args...)
 ; and returns x, as put! does: (update! b :x + dx). x and k are evaluated once.
 (defmacro update! [x k f & args]
-  (let [o (gensym) kk (if (= (type k) Key) k (gensym))]
+  (let [o (gensym) kk (if (key? k) k (gensym))]
     `(let [~o ~x ~@(if (= kk k) [] [kk k])] (put! ~o ~kk (~f (get ~o ~kk) ~@args)))))
 
 ; (cond test1 expr1 test2 expr2...) is the expr of the first true test, or nil

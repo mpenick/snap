@@ -1,0 +1,16 @@
+6 10 "a" 9
+#P{:x 5} 7 8 3
+[:t 6] [:none 0]
+499500
+[3 7] 5
+5000
+<err :e "msg">
+<err :snap_arity_error "Invalid number of arguments"> <err :snap_type_error "Expected a vector or list as apply's last argument"> <err :snap_type_error "Value is not callable"> <err :snap_arity_error "Invalid number of arguments">
+2 -2 1 0 -1
+0.500000 -0.500000 3.000000 true
+<err :snap_arith_error "Division by zero"> <err :snap_type_error "Expected numbers"> <err :snap_arity_error "Invalid number of arguments">
+true false true false true true false
+true false true false true true false
+true true true true false false
+true false true true false
+<err :snap_arity_error "Invalid number of arguments"> <err :snap_arity_error "Invalid number of arguments">

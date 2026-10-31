@@ -1,0 +1,35 @@
+; vi: filetype=scheme
+; (apply f a b xs), (mod a b) and the type predicates
+
+; apply: fixed arguments, then a vector, list or nil's values
+(println (apply + [1 2 3]) (apply + 1 2 '(3 4)) (apply str "a" nil) (apply max [3 9 2]))
+; Anything callable: a type, a keyword, a method, a C function, apply itself
+(defstruct P [x])
+(definterface Area [area])
+(defmethod area [p P] (* 2 (:x p)))
+(println (apply P [5]) (apply :x [{:x 7}]) (apply area [(P 4)]) (apply apply + [[1 2]]))
+; Passing on rest arguments, and many of them
+(defn sum [& xs] (reduce + 0 xs))
+(defn total [label & xs] [label (apply sum xs)])
+(println (total :t 1 2 3) (total :none))
+(println (apply sum (loop [v [] i 0] (if (< i 1000) (recur (push! v i) (+ i 1)) v))))
+; As a value, and in recursion that doesn't use up the C stack
+(println (map (fn [v] (apply + v)) [[1 2] [3 4]]) (reduce apply + [[2 3]]))
+(defn deep [n] (if (= n 0) 0 (+ 1 (apply deep [(- n 1)]))))
+(println (deep 5000))
+; A function's error value is returned as usual
+(println (apply err [:e "msg"]))
+(println (recover (fn [] (apply +))) (recover (fn [] (apply + 1))) (recover (fn [] (apply 5 [1])))
+         (recover (fn [] (apply (fn [a] a) [1 2]))))
+
+; mod has the divisor's sign, % the dividend's
+(println (mod -7 3) (mod 7 -3) (mod 7 3) (mod -6 3) (% -7 3))
+(println (mod -7.5 2) (mod 7.5 -2) (mod -1 4.0) (= (type (mod 5 2)) Int))
+(println (recover (fn [] (mod 1 0))) (recover (fn [] (mod 1 :a))) (recover (fn [] (mod 1))))
+
+; Type predicates
+(println (int? 1) (int? 1.0) (float? 1.5) (float? 1) (number? 1) (number? 2.5) (number? "1"))
+(println (str? "a") (str? 'a) (key? :a) (key? "a") (bool? false) (bool? true) (bool? nil))
+(println (fn? inc) (fn? +) (fn? (fn [] 1)) (fn? area) (fn? :k) (fn? P))
+(println (struct? (P 1)) (struct? {}) (type? P) (type? Int) (type? (P 1)))
+(println (recover (fn [] (int?))) (recover (fn [] (int? 1 2))))
