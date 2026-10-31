@@ -173,7 +173,7 @@ Built-in functions:
   (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
-`defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `dotimes`,
+`defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,
 `(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map`,
 `filter`, `reduce` and `(sort-by key coll)` (which take a vector or list and
 make a vector), the
@@ -215,6 +215,7 @@ Maps are mutable hash maps that keep insertion order.
 (get m :a)          ; => 1
 (get m :z)          ; => nil
 (get m :z 0)        ; => 0, the default for a missing key
+(:a m)              ; => 1, a keyword called is get: (:z m 0) is (get m :z 0)
 (put! m :c 3)       ; => {:a 1 :b 2 :c 3}, adds or replaces and returns m
 (del! m :a)         ; => {:b 2 :c 3}, removes and returns m
 (keys m)            ; => [:b :c]
@@ -256,7 +257,9 @@ without saying so, like Go.
 
 (def a (Rect 3 4))      ; A value for each field, in order
 (get a :w)              ; => 3
+(:w a)                  ; => 3, the same
 (put! a :w 10)          ; => #Rect{:w 10 :h 4}
+(update! a :w + 1)      ; => #Rect{:w 11 :h 4}, (put! a :w (+ (get a :w) 1))
 (type a)                ; => Rect
 (= (Rect 1 2) (Rect 1 2)) ; => true, compared by contents
 
@@ -269,6 +272,11 @@ without saying so, like Go.
 (satisfies? Shape a)    ; => true
 (satisfies? Shape 5)    ; => false
 ```
+
+A keyword works anywhere a function does, as `get`: `(map :w rects)`.
+`(update! x k f args...)` sets field (or map key) `k` to `(f (get x k)
+args...)` and returns `x`; `x` and `k` are evaluated once. Both compile to the
+same instructions as the `get` and `put!` they stand for.
 
 `get` or `put!` with a field the struct doesn't have panics, as does calling
 a method on a type it has no implementation for. A method can have more

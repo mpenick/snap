@@ -1,0 +1,23 @@
+; vi: filetype=scheme
+; (:k x) is (get x :k), and (update! x k f args...) is
+; (put! x k (f (get x k) args...))
+
+(defstruct P [x y])
+(def p (P 1 2))
+(println (:x p) (:y p) (:z {:z 3}) (:w {} 9) (:w {:w nil} 9))
+; As a value: in a variable, or passed to a function
+(def k :y)
+(println (k p) (k {:y 7} 0) (map :x [p (P 5 6)]))
+; Errors: the wrong number of arguments, a missing field, not a map
+(println (compile "(:x)") (compile "(:x a b c)") (recover (fn [] (k))))
+(println (recover (fn [] (:q p))) (recover (fn [] (:x 5))))
+; update! returns what it updated, and works on maps
+(println (update! p :x + 10) (update! (P 1 2) :y * 3 2))
+(def m {:n 1})
+(println (update! m :n - 1 1) (update! m :n (fn [v] (* v 100))))
+; The thing and the key are evaluated once
+(def calls 0)
+(defn obj [] (set! calls (+ calls 1)) p)
+(defn key [] (set! calls (+ calls 1)) :y)
+(update! (obj) (key) + 1)
+(println p calls)

@@ -1190,6 +1190,23 @@ static inline int cached_field(SCode* code, int slot, SStruct* st, SValue key) {
   return i;
 }
 
+bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result);
+
+// A keyword called as a function: (:k x) is (get x :k), (:k x d) is
+// (get x :k d)
+static bool key_call(Snap* snap, SValue key, const SValue* args, int num_args, SValue* result) {
+  SValue get_args[3];
+  if (num_args < 1 || num_args > 2) {
+    *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "Expected (:%s m) or (:%s m default)",
+                                             as_key(key)->data, as_key(key)->data));
+    return false;
+  }
+  get_args[0] = args[0];
+  get_args[1] = key;
+  if (num_args == 2) get_args[2] = args[1];
+  return builtin_get(snap, get_args, num_args + 1, result);
+}
+
 // The function a method call runs, picked by its first argument's type, or
 // NULL if it doesn't have one
 static SValue* method_find(Snap* snap, SMethod* m, const SValue* args, int num_args) {
@@ -1898,6 +1915,12 @@ new_frame:
         } else if (is_type(*a)) {
           frame->stack_top = stack; // Keeps the arguments rooted (types are never freed)
           ok = struct_new(snap, as_type(*a), stack - arg, arg, &temp);
+          stack -= arg;
+          if (!ok) goto call_failed;
+          *stack++ = temp;
+        } else if (is_key(*a)) {
+          frame->stack_top = stack;
+          ok = key_call(snap, *a, stack - arg, arg, &temp);
           stack -= arg;
           if (!ok) goto call_failed;
           *stack++ = temp;
@@ -4051,6 +4074,25 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
     case STYPE_CFUNC: // From quasiquote
       compile_call(snap, fs, sexpr);
       break;
+    case STYPE_KEY: {
+      // (:k x) is (get x :k), and (:k x d) is (get x :k d): the same call,
+      // so the same instruction (see GET)
+      SnapList list = { NULL, NULL };
+      int n = list_length(args);
+      if (n < 1 || n > 2) {
+        raise(snap, "snap_compile_error", "Expected (:%s m) or (:%s m default)", as_key(sexpr->first)->data,
+              as_key(sexpr->first)->data);
+      }
+      *list_add(snap, &list) = create_obj(snap_sym_new(snap, "get"));
+      *list_add(snap, &list) = args->first;
+      *list_add(snap, &list) = sexpr->first;
+      if (n == 2) *list_add(snap, &list) = nth(args, 1);
+      form = list_done(snap, &list);
+      snap_anchor(snap, as_obj(form));
+      compile_call(snap, fs, as_cons(form));
+      snap_release(snap);
+      break;
+    }
     case STYPE_FORM:
       switch (as_form(sexpr->first)) {
         case TK_BEGIN:
@@ -4274,11 +4316,12 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
     if (!found) return create_obj(method_error(snap, as_method(fn), args, num_args));
     fn = *found;
   }
-  if (is_cfunc(fn) || is_type(fn)) {
+  if (is_cfunc(fn) || is_type(fn) || is_key(fn)) {
     result = create_nil();
     // On failure result is the error
     if (is_cfunc(fn)) as_cfunc(fn)(snap, args, num_args, &result);
-    else struct_new(snap, as_type(fn), args, num_args, &result);
+    else if (is_type(fn)) struct_new(snap, as_type(fn), args, num_args, &result);
+    else key_call(snap, fn, args, num_args, &result);
     return result;
   }
   if (!is_code(fn) && !is_closure(fn)) {
