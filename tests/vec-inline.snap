@@ -1,0 +1,30 @@
+; vi: filetype=scheme
+; Vectors small enough for a slot keep their values in it, and pushes past
+; that go in segments. Sizes on both sides of the slot's limit (28 values),
+; grown and shrunk, survive collections.
+
+(def finish (fn [] (if (gc-step 1000000) nil (recur))))
+(defn upto [n] (loop [v [] i 0] (if (< i n) (recur (push! v i) (+ i 1)) v)))
+(defn ok? [v n] (and (= (count v) n) (loop [i 0] (if (< i n) (if (= (nth v i) i) (recur (+ i 1)) false) true))))
+
+; Made with their size: keys makes a vector as big as the map
+(defn sized [n] (keys (loop [m {} i 0] (if (< i n) (recur (put! m i true) (+ i 1)) m))))
+(def made (loop [out [] n 0] (if (<= n 40) (recur (push! out (sized n)) (+ n 1)) out)))
+(finish) (finish)
+(println (loop [n 0] (if (<= n 40) (if (ok? (nth made n) n) (recur (+ n 1)) n) true)))
+
+; Small ones grown past their slot and shrunk back
+(def a [0 1 2])
+(dotimes [i 60] (push! a (+ i 3)))
+(finish)
+(println (ok? a 63))
+(dotimes [_ 50] (pop! a))
+(finish)
+(println (ok? a 13) (nth a 12))
+(push! a 13)
+(println (ok? a 14))
+
+; Garbage of every size, freed while live ones keep their values
+(dotimes [k 200] (sized (- k (* 50 (int (/ k 50))))) [k k k])
+(finish) (finish)
+(println (ok? (nth made 28) 28) (ok? (nth made 29) 29) (ok? a 14))

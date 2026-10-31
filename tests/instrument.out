@@ -1,9 +1,9 @@
 true true true <err :snap_arity_error "Invalid number of arguments">
 "pairs" :vector 300 true
+"outer/fn" :vector 100 true
+"area[P]" :vector 100 true
 "<freed>" :map 100 true
 "<freed>" :struct 100 true
-"area[P]" :vector 100 true
-"outer/fn" :vector 100 true
 "<freed>" :vector 10 true
 []
 []

@@ -162,7 +162,7 @@ Built-in functions:
   It returns an error if the code doesn't parse or compile (`:snap_eof_error`
   when it ends early), and `nil` if there's no code.
 * GC: `(gc-step work)` does about `work` units of collection (marking a value
-  or sweeping an object is one), starting a collection if none is running,
+  or sweeping an object is one, and freeing an array 8 more), starting a collection if none is running,
   and returns `true` when a collection finishes. `(gc-step 0)` just starts one.
   `(gc-stats)` is a map of what the collector has done: `:collections`
   finished, `:steps` (pauses, each starting a collection or doing a step of
@@ -546,8 +546,11 @@ it.
   all of them): they come from free lists of slots of 8 sizes, carved from
   16KB pages that are kept for reuse. Bigger objects get a page of their own.
   Sweeping walks the pages slot by slot, so objects need no list pointer and
-  their header is 8 bytes. Big objects (such as long strings) and the arrays
-  inside vectors and maps still come from `malloc`.
+  their header is 8 bytes. A vector made with up to 28 values keeps them in
+  its own slot. Big objects (such as long strings), maps' arrays, bigger
+  vectors' arrays and vectors' segments still come from `malloc`, and
+  sweeping counts each `free()` as 8 units, so a step that frees many of them
+  takes about as long as any other.
 * **Vectors** never copy their values to grow. A vector keeps the array it
   was made with (a literal's is exactly its size), and values pushed past it
   go in segments of 8, 16, 32 and so on. `nth` finds the segment with a

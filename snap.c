@@ -17,7 +17,9 @@
 // at least GC_MIN_STEP bytes. It then runs in steps: every GC_STEP_SIZE bytes
 // allocated does GC_STEP_MUL units of work (one is marking a value or
 // sweeping an object) per 8 bytes, so it keeps ahead of the program. A step
-// marks at most GC_CHUNK values of one object.
+// marks at most GC_CHUNK values of one object. Sweeping counts each free() an
+// object needs as GC_FREE_COST more units, so that a step freeing many
+// vectors takes about as long as any other.
 #ifndef GC_HEAP_GROWTH
 #define GC_HEAP_GROWTH 2
 #endif
@@ -35,6 +37,7 @@
 #endif
 
 #define GC_CHUNK 64
+#define GC_FREE_COST 8
 
 // Objects up to GC_MAX_SLOT bytes are allocated from free lists of slots of
 // a few sizes, carved from GC_PAGE_SIZE pages, so allocating and freeing take
@@ -493,13 +496,18 @@ static size_t code_extra_bytes(SCode* code) {
 
 #define map_bytes(cap) ((size_t)(cap) * 2 * (sizeof(SValue) + sizeof(int32_t)))
 
+// Where a small vector keeps its values (see snap_vec_new())
+#define vec_inline(v) ((SValue*)((SVec*)(v) + 1))
+
 // Counts memory that the heap took for objects or what's inside them
 static inline void heap_add(Snap* snap, size_t size) {
   snap->num_bytes_alloced += size;
   snap->gc_stats.allocated += size;
 }
 
-static void gc_free(Snap* snap, SObject* obj) {
+// Returns how many buffers it freed with free(), besides the object itself
+static int gc_free(Snap* snap, SObject* obj) {
+  int freed = 0;
   switch (obj->type) {
     case STYPE_FLOAT:
       snap->num_bytes_alloced -= sizeof(SFloat);
@@ -523,10 +531,14 @@ static void gc_free(Snap* snap, SObject* obj) {
       SVec* vec = (SVec*)obj;
       int k;
       snap->num_bytes_alloced -= sizeof(SVec) + snap_vec_cap(vec) * sizeof(SValue);
-      free(vec->data);
+      if (vec->data && vec->data != vec_inline(vec)) {
+        free(vec->data);
+        freed++;
+      }
       if (vec->segs) {
         for (k = 0; k < vec->num_segs; ++k) free(vec->segs[k]);
         free(vec->segs);
+        freed += vec->num_segs + 1;
       }
       break;
     }
@@ -534,6 +546,7 @@ static void gc_free(Snap* snap, SObject* obj) {
       snap->num_bytes_alloced -= sizeof(SMap) + map_bytes(((SMap*)obj)->cap);
       free(((SMap*)obj)->entries);
       free(((SMap*)obj)->index);
+      freed = 2;
       break;
     case STYPE_CODE:
       if (snap->alloc_sites_count > 0) profile_code_freed(snap, (SCode*)obj);
@@ -542,6 +555,7 @@ static void gc_free(Snap* snap, SObject* obj) {
       free(((SCode*)obj)->constants);
       free(((SCode*)obj)->upvals);
       free(((SCode*)obj)->caches);
+      freed = 4;
       break;
     case STYPE_CLOSURE:
       snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->num_upvals * sizeof(SUpval*));
@@ -562,6 +576,7 @@ static void gc_free(Snap* snap, SObject* obj) {
       assert(0 && "Not a GC object");
       break;
   }
+  return freed;
 }
 
 static void gc_add_page(Snap* snap, SnapPage* page) {
@@ -834,9 +849,10 @@ static bool gc_step(Snap* snap, size_t work) {
       done++;
       if (obj->type != SLOT_FREE && obj->mark == snap->gc_unmarked) {
         size_t before = snap->num_bytes_alloced;
-        gc_free(snap, obj);
+        done += gc_free(snap, obj) * GC_FREE_COST;
         snap->gc_live -= before - snap->num_bytes_alloced;
         if (page->num_slots == 1) { // An object's own page
+          done += GC_FREE_COST;
           *snap->gc_sweep = page->next;
           free(page);
           continue;
@@ -1048,14 +1064,22 @@ static SValue nth(SCons* list, int n) {
   return list->first;
 }
 
+// A vector that fits in a slot keeps its values right after itself, so
+// making and freeing it don't call malloc() and free(). Pushes past cap0 go
+// in segments either way.
 SVec* snap_vec_new(Snap* snap, int cap) {
-  SVec* v = (SVec*)gc_new(snap, STYPE_VEC, sizeof(SVec));
+  bool inl = cap > 0 && sizeof(SVec) + cap * sizeof(SValue) <= GC_MAX_SLOT;
+  SVec* v = (SVec*)gc_new(snap, STYPE_VEC, sizeof(SVec) + (inl ? cap * sizeof(SValue) : 0));
   v->num_segs = 0;
   v->len = 0;
   v->cap0 = cap;
-  v->data = cap > 0 ? (SValue*)malloc(cap * sizeof(SValue)) : NULL;
   v->segs = NULL;
-  heap_add(snap, cap * sizeof(SValue));
+  if (inl) {
+    v->data = vec_inline(v);
+  } else {
+    v->data = cap > 0 ? (SValue*)malloc(cap * sizeof(SValue)) : NULL;
+    heap_add(snap, cap * sizeof(SValue));
+  }
   return v;
 }
 
