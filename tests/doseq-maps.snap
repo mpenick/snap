@@ -1,0 +1,29 @@
+; vi: filetype=scheme
+; doseq walks a map's entries in insertion order. A [k v] pattern takes
+; each key and value with no pair made; a plain name gets a new [k v].
+
+(def m {:a 1 :b 2 :c 3})
+(doseq [[k v] m] (println k v))
+(doseq [[k] m] (println k))
+(doseq [[_ v] m] (println v))
+(doseq [e m] (println e))
+(println (nth m 1) (count m) (recover (fn [] (nth m 3))) (recover (fn [] (nth m -1))))
+; Deleted entries are skipped, and the order kept
+(def d {:a 1 :b 2 :c 3 :d 4})
+(del! d :b)
+(del! d :d)
+(put! d :e 5)
+(doseq [[k v] d] (println k v))
+; Values can change while walking
+(doseq [[k v] d] (put! d k (* v 10)))
+(println d)
+; Removing a key while walking skips an entry and ends in nth's error
+(def r {:a 1 :b 2 :c 3})
+(println (recover (fn [] (doseq [[k v] r] (println "saw" k) (del! r :b)))))
+; Empty maps, nested patterns and more names than an entry has
+(doseq [[k v] {}] (println "never"))
+(doseq [[k [x y]] {:p [1 2]}] (println k x y))
+(println (recover (fn [] (doseq [[k v z] {:a 1}] z))))
+; Vectors and lists are as before
+(doseq [[a b] [[1 2] [3 4]]] (println a b))
+(doseq [x '(5 6)] (println x))

@@ -174,8 +174,9 @@ Built-in functions:
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `dotimes`,
-`(doseq [x coll] ...)`, `inc`, `dec`, `map`, `filter`, `reduce` and
-`(sort-by key coll)` (which take a vector or list and make a vector), the
+`(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map`,
+`filter`, `reduce` and `(sort-by key coll)` (which take a vector or list and
+make a vector), the
 struct macros below, and `defgc`.
 
 `(defconst name expr)` defines a global that can't change: `def`, `set!` or
@@ -219,8 +220,23 @@ Maps are mutable hash maps that keep insertion order.
 (keys m)            ; => [:b :c]
 (vals m)            ; => [2 3]
 (count m)           ; => 2
+(nth m 0)           ; => [:b 2], the entry at that place in insertion order
 (= {:a 1 :b 2} {:b 2 :a 1}) ; => true, compared by contents
 ```
+
+`doseq` walks a map's entries in order. With a `[k v]` pattern it makes no
+pairs, so it's the cheap way to walk a map (cheaper than `(keys m)`, which
+makes a vector):
+
+```clojure
+(doseq [[k v] m] ...)   ; Each key and value
+(doseq [[k] m] ...)     ; Just the keys
+(doseq [e m] ...)       ; Each entry as a new [k v]
+```
+
+Changing values while walking a map is fine, but don't add or remove keys:
+added ones aren't visited, and removing one skips an entry and ends the walk
+with an index error.
 
 Any value can be a key. Vectors and maps are compared by contents, so don't
 change one after using it as a key.

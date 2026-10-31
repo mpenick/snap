@@ -1093,6 +1093,15 @@ bool snap_map_del(Snap* snap, SMap* map, SValue key) {
   return true;
 }
 
+// The i-th live entry (its key, then its value), in insertion order, or NULL
+// if there isn't one. After a deletion it first closes the gaps (which keeps
+// the order), so walking a map by index stays constant time per entry.
+static SValue* map_entry_at(Snap* snap, SMap* map, SnapInt i) {
+  if (i < 0 || i >= map->len) return NULL;
+  if (map->used != map->len) map_rebuild(snap, map);
+  return &map->entries[2 * i];
+}
+
 SClosure* snap_closure_new(Snap* snap, SCode* code) {
   int i;
   SClosure* cl = (SClosure*)gc_new(snap,
@@ -1697,6 +1706,18 @@ new_frame:
           *a = *snap_vec_at(as_vec(*a), (int)as_int(*b));
           stack--;
           DISPATCH();
+        }
+        // A map's i-th entry, to a pattern that takes its key and value
+        // (UNPACK 1 or 2 next): them, with no [k v] made
+        if (builtin_global(builtin_nth) && is_map(*a) && is_int(*b) && INST_OP(*pc) == UNPACK && INST_ARG(*pc) <= 2) {
+          SValue* e = map_entry_at(snap, as_map(*a), as_int(*b));
+          if (e) {
+            a[0] = e[0];
+            a[1] = e[1];
+            stack = a + INST_ARG(*pc);
+            pc++;
+            DISPATCH();
+          }
         }
         goto call_global;
       }
@@ -4671,6 +4692,18 @@ bool builtin_nth(Snap* snap, const SValue* args, int num_args, SValue* result) {
       return fail(snap, result, "snap_index_error", "Index out of range");
     }
     *result = nth(as_cons(args[0]), as_int(args[1]));
+    return true;
+  }
+  if (num_args == 2 && is_map(args[0]) && is_int(args[1])) {
+    // A map's i-th entry in insertion order, as [k v]
+    SValue* e = map_entry_at(snap, as_map(args[0]), as_int(args[1]));
+    SVec* vec;
+    if (!e) return fail(snap, result, "snap_index_error", "Index out of range");
+    vec = snap_vec_new(snap, 2); // Doesn't move the entries
+    vec->data[0] = e[0];
+    vec->data[1] = e[1];
+    vec->len = 2;
+    *result = create_obj(vec);
     return true;
   }
   if (!vec_args(snap, args, num_args, 2, result)) return false;

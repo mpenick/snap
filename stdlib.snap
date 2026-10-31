@@ -39,10 +39,12 @@
     `(let [~n ~(nth binding 1)]
        (loop [~i 0] (if (< ~i ~n) (begin ~@body (recur (+ ~i 1))) nil)))))
 
-; (doseq [x coll] body...) runs body with x as each item of a vector or list
+; (doseq [x coll] body...) runs body with x as each item of a vector or list,
+; or each entry of a map as [k v], in order: (doseq [[k v] m] ...) makes no
+; pairs. Don't add or remove a map's keys while walking it.
 (defmacro doseq [binding & body]
   (let [x (nth binding 0) v (gensym) i (gensym)]
-    `(let [~v ~(nth binding 1) ~v (if (vector? ~v) ~v (vec ~v))]
+    `(let [~v ~(nth binding 1) ~v (if (or (vector? ~v) (map? ~v)) ~v (vec ~v))]
        (dotimes [~i (count ~v)] (let [~x (nth ~v ~i)] ~@body)))))
 
 (defn inc [x] (+ x 1))
