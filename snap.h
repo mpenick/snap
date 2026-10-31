@@ -285,6 +285,9 @@ typedef struct {
   int pos;
 } SnapGray;
 
+// How many of the latest pauses' times are kept, for the median and percentiles
+#define SNAP_GC_RECENT 64
+
 // What the collector has done so far (see (gc-stats))
 typedef struct {
   size_t collections;  // Finished collections
@@ -292,6 +295,7 @@ typedef struct {
   uint64_t allocated;  // Bytes allocated for objects and what they hold
   double pause_total;  // Seconds spent collecting
   double pause_max;    // The longest pause, in seconds
+  double recent[SNAP_GC_RECENT]; // The latest pauses' seconds, at steps % SNAP_GC_RECENT
 } SnapGCStats;
 
 struct Snap_ {

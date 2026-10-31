@@ -99,8 +99,10 @@ Built-in functions:
   and returns `true` when a collection finishes. `(gc-step 0)` just starts one.
   `(gc-stats)` is a map of what the collector has done: `:collections`
   finished, `:steps` (pauses, each starting a collection or doing a step of
-  one), `:allocated` (bytes, in all), `:pause-total` and `:pause-max`
-  (seconds), and the heap now: `:heap` and `:next-gc` (bytes) and `:phase`
+  one), `:allocated` (bytes, in all), `:pause-total`, `:pause-max`,
+  `:pause-mean`, and `:pause-median`, `:pause-p75` and `:pause-p90` (the
+  50th, 75th and 90th percentiles of the latest 64 pauses), all in seconds,
+  and the heap now: `:heap` and `:next-gc` (bytes) and `:phase`
   (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has

@@ -760,6 +760,7 @@ static bool gc_pause(Snap* snap, bool start, size_t work) {
   if (work > 0) done = gc_step(snap, work);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   t = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
+  stats->recent[stats->steps % SNAP_GC_RECENT] = t;
   stats->steps++;
   stats->pause_total += t;
   if (t > stats->pause_max) stats->pause_max = t;
@@ -3941,10 +3942,33 @@ bool builtin_gc_step(Snap* snap, const SValue* args, int num_args, SValue* resul
   return true;
 }
 
+// Sorts the latest pauses into out (by insertion, as there are at most
+// SNAP_GC_RECENT). Returns how many there are.
+static size_t gc_recent_sorted(const SnapGCStats* stats, double* out) {
+  size_t n = stats->steps < SNAP_GC_RECENT ? stats->steps : SNAP_GC_RECENT, i, j;
+  for (i = 0; i < n; ++i) {
+    double t = stats->recent[i];
+    for (j = i; j > 0 && out[j - 1] > t; --j) out[j] = out[j - 1];
+    out[j] = t;
+  }
+  return n;
+}
+
+// The pth percentile (0 to 1) of n sorted times, between the two nearest
+static double percentile(const double* sorted, size_t n, double p) {
+  double pos = p * (double)(n - 1);
+  size_t i = (size_t)pos;
+  if (n == 0) return 0;
+  if (i + 1 >= n) return sorted[n - 1];
+  return sorted[i] + (sorted[i + 1] - sorted[i]) * (pos - (double)i);
+}
+
 // (gc-stats) is a map of what the collector has done, and the heap now
 bool builtin_gc_stats(Snap* snap, const SValue* args, int num_args, SValue* result) {
   static const char* phases[] = { "idle", "mark", "sweep" };
   const SnapGCStats* stats = &snap->gc_stats;
+  double sorted[SNAP_GC_RECENT];
+  size_t n = gc_recent_sorted(stats, sorted);
   SMap* m;
   if (num_args != 0) return arity_error(snap, result);
   m = (SMap*)snap_anchor(snap, (SObject*)snap_map_new(snap));
@@ -3957,6 +3981,10 @@ bool builtin_gc_stats(Snap* snap, const SValue* args, int num_args, SValue* resu
   PUT("allocated", create_int((SnapInt)stats->allocated));
   PUT("pause-total", create_float(snap, stats->pause_total));
   PUT("pause-max", create_float(snap, stats->pause_max));
+  PUT("pause-mean", create_float(snap, stats->steps ? stats->pause_total / stats->steps : 0));
+  PUT("pause-median", create_float(snap, percentile(sorted, n, 0.5)));
+  PUT("pause-p75", create_float(snap, percentile(sorted, n, 0.75)));
+  PUT("pause-p90", create_float(snap, percentile(sorted, n, 0.9)));
 #undef PUT
   snap_release(snap);
   *result = create_obj(m);
