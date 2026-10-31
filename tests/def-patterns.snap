@@ -1,0 +1,37 @@
+; vi: filetype=scheme
+; def takes a pattern: each name it binds is defined, a global at the top
+; level and a local inside a function
+
+(def [a b & more] [1 2 3 4])
+(println a b more)
+; Nested, and the value is evaluated once
+(def calls 0)
+(defn place [] (set! calls (+ calls 1)) [10 [20 30]])
+(def [x [y z]] (place))
+(println x y z calls)
+; Map patterns, with renames, :or and :as
+(def {:keys [near far] col :color :or {far 360} :as fog} {:near 1 :color "red"})
+(println near far col fog)
+; _ skips a position, and (def _ expr) runs expr and defines nothing
+(def [_ g] [5 6])
+(def _ (println "ran"))
+(println g)
+; Inside a function they're locals
+(defn f [v] (def [i j] v) (def {:keys [k] :or {k 9}} {}) (+ i j k))
+(println (f [1 2]))
+; A pattern that defines nth still takes its parts with the built-in
+(def real-nth nth)
+(def [nth q] [7 8])
+(println nth q)
+(set! nth real-nth)
+; Short is nth's error
+(println (recover (fn [] (def [s t] [1]) t)))
+
+; The hidden name holding the whole value lets go of it
+(def log [])
+(def finish (fn [] (if (gc-step 1000000) nil (recur))))
+(defstruct Res [name data])
+(defgc [r Res] (push! log (get r :name)))
+(def {:keys [name]} (Res :tmp nil))
+(finish) (gc-step 0) (finish)
+(println name log)

@@ -67,8 +67,8 @@ whether there are any. `nil` works as an empty list (`first`, `rest`,
 `let` and `loop` bindings alternate names and values, and are bound in order,
 so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
 
-In `let`, `loop` and `fn` (so `defn` and `doseq` too), a pattern can stand
-in for a name and bind the names in it to parts of the value:
+In `let`, `loop`, `fn` and `def` (so `defn` and `doseq` too), a pattern can
+stand in for a name and bind the names in it to parts of the value:
 
 ```clojure
 (let [[x z] p] ...)                  ; x = (nth p 0), z = (nth p 1)
@@ -76,6 +76,7 @@ in for a name and bind the names in it to parts of the value:
 (let [{:keys [x y] :as m} pt] ...)   ; x = (get pt :x), m = pt
 (defn dist [[ax az] [bx bz]] ...)
 (doseq [[k v] pairs] ...)
+(def [bree-x bree-z] BREE)           ; Defines both, as two defs would
 ```
 
 A map pattern can also bind a name (or a pattern) to any key, and give
@@ -91,6 +92,7 @@ evaluated when it's used:
 `_` binds nothing: in a pattern its position isn't read (`[_ _ z]` reads
 only `z`), and as a whole binding (`let`, `loop`, `fn`, `doseq`, `dotimes`)
 the value is still evaluated but can't be read, so `(fn [_ _ z] z)` is fine.
+`(def _ expr)` evaluates `expr` and defines nothing.
 
 Patterns nest. They compile to the `nth` and `get` calls they stand for, so
 they're as fast, and a vector too short for its pattern is `nth`'s error.

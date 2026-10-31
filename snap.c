@@ -2856,10 +2856,19 @@ static void compile_body(Snap* snap, SnapFnState* fs, SCons* body, bool tail) {
   }
 }
 
+static bool is_pattern(SValue v);
+static bool is_ignore(Snap* snap, SValue v);
+static void compile_def_pattern(Snap* snap, SnapFnState* fs, SValue pattern, SValue form);
+
 static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
   SSym* name;
-  if (list_length(args) != 2 || !is_sym(args->first)) {
-    raise(snap, "snap_compile_error", "Expected (def <id> <expr>)");
+  if (list_length(args) != 2 || !(is_sym(args->first) || is_pattern(args->first))) {
+    raise(snap, "snap_compile_error", "Expected (def <id or pattern> <expr>)");
+  }
+  if (!is_sym(args->first) || is_ignore(snap, args->first)) {
+    compile_def_pattern(snap, fs, args->first, nth(args, 1));
+    emit(fs, LOAD_NIL, 0);
+    return;
   }
   name = as_sym(args->first);
   compile(snap, fs, nth(args, 1), false);
@@ -3404,6 +3413,46 @@ static void compile_let_patterns(Snap* snap, SnapFnState* fs, SCons* args, bool 
   snap_anchor(snap, as_obj(form));
   compile(snap, fs, form, tail);
   snap_release(snap);
+  snap_release(snap);
+}
+
+// (def [x z] (place)) defines each name the pattern binds, as plain defs:
+//   (def #t (place)) (def x (nth #t 0)) (def z (nth #t 1))
+// (not a let around defs, where def makes locals). At the top level the
+// hidden names are globals, set back to nil after so they don't hold the
+// value. (def _ expr) runs expr and defines nothing.
+static void compile_def_pattern(Snap* snap, SnapFnState* fs, SValue pattern, SValue form) {
+  SVec* out;
+  int i, j;
+  if (is_ignore(snap, pattern)) {
+    compile_effect(snap, fs, form);
+    return;
+  }
+  out = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 1));
+  snap_vec_push(snap, out, pattern);
+  check_hidden_globals(snap, out, 1);
+  out->len = 0;
+  destructure(snap, fs, pattern, form, out);
+  for (i = 0; i < out->len; i += 2) {
+    SSym* name = as_sym(*snap_vec_at(out, i));
+    compile(snap, fs, *snap_vec_at(out, i + 1), false);
+    if (fs->depth > 0) {
+      // A name bound twice here (a default after its get) keeps its slot
+      for (j = 0; j < i && as_sym(*snap_vec_at(out, j)) != name; j += 2) {}
+      emit(fs, STORE_LOCAL, j < i ? resolve_local(fs, name) : add_local(snap, fs, name, false));
+    } else {
+      store_global(snap, fs, name);
+    }
+  }
+  if (fs->depth == 0) {
+    for (i = 0; i < out->len; i += 2) {
+      SSym* name = as_sym(*snap_vec_at(out, i));
+      if (!binds(snap, pattern, name)) {
+        emit(fs, LOAD_NIL, 0);
+        store_global(snap, fs, name);
+      }
+    }
+  }
   snap_release(snap);
 }
 
