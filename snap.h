@@ -353,6 +353,12 @@ struct Snap_ {
   int num_gensyms;
   SType* types[STYPE_METHOD + 1]; // The built-in type of each kind of value
   bool dump_code; // Print the bytecode from snap_compile() and snap_exec()
+  // The allocation profile, while on (see (alloc-profile! on)): counts and
+  // bytes by the function running and the kind of object
+  bool alloc_profile;
+  struct SnapAllocSite_* alloc_sites;
+  int alloc_sites_cap;
+  int alloc_sites_count;
 };
 
 #define is_int(v) ((v).bits & 1)

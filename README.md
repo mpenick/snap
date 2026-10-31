@@ -171,6 +171,18 @@ Built-in functions:
   50th, 75th and 90th percentiles of the latest 64 pauses), all in seconds,
   and the heap now: `:heap` and `:next-gc` (bytes) and `:phase`
   (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
+* Measuring: `(clock)` is seconds of wall time (from a start that doesn't
+  move, for timing) and `(cpu-time)` the seconds of CPU the process has used.
+  `(alloc-profile! true)` starts counting what's allocated, and
+  `(alloc-profile)` stops, returns it and clears it: `[function kind count
+  bytes]` rows, most bytes first, such as `["pairs" :vector 300 9600]`.
+  `(alloc-profile! false)` pauses it. An allocation counts against the snap
+  function running, so one in a built-in (a vector literal, `keys`, `str`)
+  counts against its caller. Functions are named by the global that holds
+  them: `"f/fn"` for one made in `f`, `"m[Type]"` for a method.
+  `"<anonymous>"` is top-level code or a function only data holds, and
+  `"<freed>"` code collected since (such as top-level forms, once run).
+  Compiling counts too. When it's off it costs one check per allocation.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,

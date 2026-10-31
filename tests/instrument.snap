@@ -1,0 +1,37 @@
+; vi: filetype=scheme
+; (clock), (cpu-time) and the allocation profile. Only the rows the test
+; makes are printed: compiling the test itself allocates too.
+
+(def t0 (clock))
+(def c0 (cpu-time))
+(println (= (type t0) Float) (>= (clock) t0) (>= (cpu-time) c0) (recover (fn [] (clock 1))))
+
+(defstruct P [x y])
+(defn pairs [m] (let [out []] (doseq [[k v] m] (push! out [k v])) out))
+(defn outer [] (let [g (fn [n] [n n])] (g 1)))
+(defmethod area [p P] [(get p :x)])
+(def finish (fn [] (if (gc-step 1000000) nil (recur))))
+(defn run-temp [] (let [f ((compile "(fn [] [1 2 3])"))] (dotimes [_ 10] (f)) nil))
+(defn show [rows names]
+  (doseq [[name kind count bytes] rows]
+    (when (some (fn [n] (= n name)) names) (println name kind count (> bytes 0)))))
+(defn some [f v] (loop [i 0] (if (< i (count v)) (if (f (nth v i)) true (recur (+ i 1))) false)))
+
+; By function and kind: a global, a function made in one, a method, and
+; code freed while profiling
+(alloc-profile! true)
+(dotimes [i 100] (pairs {:a 1 :b 2}) (outer) (area (P 1 2)))
+(run-temp)
+(finish) (gc-step 0) (finish)
+(show (alloc-profile) ["pairs" "outer/fn" "area[P]" "<freed>"])
+; Reading it stops and clears it, and nothing's counted while it's off
+(println (alloc-profile))
+(pairs {:a 1})
+(println (alloc-profile))
+; Paused, then started afresh
+(alloc-profile! true)
+(pairs {:a 1})
+(alloc-profile! false)
+(pairs {:a 1})
+(show (alloc-profile) ["pairs"])
+(println (recover (fn [] (alloc-profile! 1 2))) (recover (fn [] (alloc-profile 1))))

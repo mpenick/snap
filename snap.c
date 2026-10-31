@@ -410,6 +410,77 @@ void snap_hash_destroy(SnapHash* hash) {
   mhash_destroy(hash);
 }
 
+/* Allocation profile */
+
+// One row of the profile: what the code (NULL outside snap code, FREED_CODE
+// once its function was freed) made of one kind of object
+typedef struct SnapAllocSite_ {
+  SCode* code;
+  uint8_t type;
+  uint64_t count;
+  uint64_t bytes;
+} SnapAllocSite;
+
+#define FREED_CODE ((SCode*)1)
+
+static SnapAllocSite* alloc_site(Snap* snap, SCode* code, uint8_t type) {
+  int mask, i;
+  if (snap->alloc_sites_count * 4 >= snap->alloc_sites_cap * 3) {
+    // Grow, and put the rows back
+    SnapAllocSite* old = snap->alloc_sites;
+    int old_cap = snap->alloc_sites_cap, j;
+    snap->alloc_sites_cap = old_cap ? 2 * old_cap : 256;
+    snap->alloc_sites = (SnapAllocSite*)calloc(snap->alloc_sites_cap, sizeof(SnapAllocSite));
+    snap->alloc_sites_count = 0;
+    for (j = 0; j < old_cap; ++j) {
+      if (old[j].count) *alloc_site(snap, old[j].code, old[j].type) = old[j];
+    }
+    free(old);
+  }
+  mask = snap->alloc_sites_cap - 1;
+  for (i = (int)((((uintptr_t)code >> 4) * 31 + type) & mask); snap->alloc_sites[i].count; i = (i + 1) & mask) {
+    if (snap->alloc_sites[i].code == code && snap->alloc_sites[i].type == type) return &snap->alloc_sites[i];
+  }
+  snap->alloc_sites[i].code = code;
+  snap->alloc_sites[i].type = type;
+  snap->alloc_sites_count++;
+  return &snap->alloc_sites[i];
+}
+
+static void profile_alloc(Snap* snap, uint8_t type, size_t size) {
+  SnapAllocSite* site = alloc_site(snap, snap->frames.vsize > 0 ? mvec_back(&snap->frames).code : NULL, type);
+  site->count++;
+  site->bytes += size;
+}
+
+// A function's code is being freed: its rows go to "<freed>", so new code
+// at the same address doesn't take them
+static void profile_code_freed(Snap* snap, SCode* code) {
+  int i;
+  for (i = 0; i < snap->alloc_sites_cap; ++i) {
+    SnapAllocSite* site = &snap->alloc_sites[i];
+    if (site->count && site->code == code) {
+      SnapAllocSite moved = *site;
+      int j, mask = snap->alloc_sites_cap - 1;
+      // Take it out, then put back the rows after it in the same run
+      site->count = 0;
+      snap->alloc_sites_count--;
+      for (j = (i + 1) & mask; snap->alloc_sites[j].count; j = (j + 1) & mask) {
+        SnapAllocSite again = snap->alloc_sites[j];
+        snap->alloc_sites[j].count = 0;
+        snap->alloc_sites_count--;
+        *alloc_site(snap, again.code, again.type) = again;
+      }
+      {
+        SnapAllocSite* to = alloc_site(snap, FREED_CODE, moved.type);
+        to->count += moved.count;
+        to->bytes += moved.bytes;
+      }
+      i = -1; // Rows moved, so look again from the start
+    }
+  }
+}
+
 /* GC */
 
 // Bytes owned by a code object outside of its own allocation
@@ -465,6 +536,7 @@ static void gc_free(Snap* snap, SObject* obj) {
       free(((SMap*)obj)->index);
       break;
     case STYPE_CODE:
+      if (snap->alloc_sites_count > 0) profile_code_freed(snap, (SCode*)obj);
       snap->num_bytes_alloced -= sizeof(SCode) + code_extra_bytes((SCode*)obj);
       free(((SCode*)obj)->insts);
       free(((SCode*)obj)->constants);
@@ -809,9 +881,12 @@ bool snap_gc_step(Snap* snap, size_t work) {
   return gc_pause(snap, snap->gc_phase == GC_IDLE, work);
 }
 
+__attribute__((cold, noinline)) static void profile_alloc(Snap* snap, uint8_t type, size_t size);
+
 static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
   SObject* obj;
   assert(size > sizeof(SObject));
+  if (__builtin_expect(snap->alloc_profile, 0)) profile_alloc(snap, type, size);
   if (snap->gc_manual) {
     // The program collects with snap_gc_step()
   } else if (snap->gc_phase != GC_IDLE) {
@@ -4966,6 +5041,166 @@ static double percentile(const double* sorted, size_t n, double p) {
 }
 
 // (gc-stats) is a map of what the collector has done, and the heap now
+// (clock) is seconds of wall time, from an arbitrary start that doesn't
+// move: for timing. (cpu-time) is the seconds of CPU the process has used.
+static bool seconds(Snap* snap, clockid_t id, int num_args, SValue* result) {
+  struct timespec ts;
+  if (num_args != 0) return arity_error(snap, result);
+  clock_gettime(id, &ts);
+  *result = create_float(snap, (double)ts.tv_sec + ts.tv_nsec * 1e-9);
+  return true;
+}
+
+bool builtin_clock(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return seconds(snap, CLOCK_MONOTONIC, num_args, result);
+}
+
+bool builtin_cpu_time(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  return seconds(snap, CLOCK_PROCESS_CPUTIME_ID, num_args, result);
+}
+
+// (alloc-profile! true) starts the allocation profile afresh and
+// (alloc-profile! false) pauses it
+bool builtin_alloc_profile_set(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  if (!is_falsy(args[0]) && !snap->alloc_profile) {
+    free(snap->alloc_sites);
+    snap->alloc_sites = NULL;
+    snap->alloc_sites_cap = 0;
+    snap->alloc_sites_count = 0;
+  }
+  snap->alloc_profile = !is_falsy(args[0]);
+  *result = create_nil();
+  return true;
+}
+
+// The name of the global function (or method) code is, or is in, as "f",
+// "f/fn" for a function made in f, or "m[Type]" for a method's
+static bool code_name_in(SCode* c, SCode* target, const char* prefix, char* out, size_t n, int depth) {
+  int i;
+  if (c == target) {
+    snprintf(out, n, "%s", prefix);
+    return true;
+  }
+  if (depth >= 8) return false;
+  for (i = 0; i < c->num_constants; ++i) {
+    if (is_code(c->constants[i])) {
+      char inner[256];
+      snprintf(inner, sizeof(inner), "%.250s/fn", prefix);
+      if (code_name_in(as_code(c->constants[i]), target, inner, out, n, depth + 1)) return true;
+    }
+  }
+  return false;
+}
+
+static bool fn_name_in(SValue fn, SCode* target, const char* prefix, char* out, size_t n) {
+  if (is_closure(fn)) return code_name_in(as_closure(fn)->code, target, prefix, out, n, 0);
+  if (is_code(fn)) return code_name_in(as_code(fn), target, prefix, out, n, 0);
+  return false;
+}
+
+static void code_name(Snap* snap, SCode* target, char* out, size_t n) {
+  int i, j;
+  if (target == NULL) {
+    snprintf(out, n, "<outside snap code>");
+    return;
+  }
+  if (target == FREED_CODE) {
+    snprintf(out, n, "<freed>");
+    return;
+  }
+  for (i = 0; i < snap->symbols.hcapacity; ++i) {
+    SValue key = snap->symbols.hentries[i].hkey, val;
+    if (key.bits == snap->symbols.hempty.bits || key.bits == snap->symbols.hdeleted.bits) continue;
+    val = as_sym(key)->value;
+    if (fn_name_in(val, target, as_sym(key)->data, out, n)) return;
+    if (is_method(val)) {
+      SMap* table = as_method(val)->table;
+      for (j = 0; j < table->used; ++j) {
+        char prefix[256];
+        if (table->entries[2 * j].bits == SV_DELETED || !is_type(table->entries[2 * j])) continue;
+        snprintf(prefix, sizeof(prefix), "%s[%s]", as_sym(key)->data, as_type(table->entries[2 * j])->name->data);
+        if (fn_name_in(table->entries[2 * j + 1], target, prefix, out, n)) return;
+      }
+    }
+  }
+  snprintf(out, n, "<anonymous>"); // Top-level code, or a function only data holds
+}
+
+static const char* kind_name(uint8_t type) {
+  if (type == STYPE_CONS) return "list";
+  switch (type) {
+#define XX(type, id, name) case type: return name;
+    STYPE_MAPPING(XX)
+#undef XX
+    default: return "other";
+  }
+}
+
+typedef struct {
+  char name[256];
+  uint8_t type;
+  uint64_t count;
+  uint64_t bytes;
+} ProfileRow;
+
+// Most bytes first, then by name and kind, so the order doesn't depend on
+// where things are in memory
+static int row_by_bytes(const void* a, const void* b) {
+  const ProfileRow* x = (const ProfileRow*)a;
+  const ProfileRow* y = (const ProfileRow*)b;
+  int c;
+  if (x->bytes != y->bytes) return x->bytes < y->bytes ? 1 : -1;
+  if ((c = strcmp(x->name, y->name)) != 0) return c;
+  return strcmp(kind_name(x->type), kind_name(y->type));
+}
+
+// (alloc-profile) stops the profile and returns what it saw, most bytes
+// first, as [function kind count bytes] rows, then clears it
+bool builtin_alloc_profile(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  ProfileRow* rows;
+  SVec* out;
+  int i, j, n = 0;
+  if (num_args != 0) return arity_error(snap, result);
+  snap->alloc_profile = false;
+  rows = (ProfileRow*)malloc((snap->alloc_sites_count + 1) * sizeof(ProfileRow));
+  for (i = 0; i < snap->alloc_sites_cap; ++i) {
+    SnapAllocSite* site = &snap->alloc_sites[i];
+    char name[256];
+    if (!site->count) continue;
+    code_name(snap, site->code, name, sizeof(name));
+    // Rows with the same name (two functions made in one) are added up
+    for (j = 0; j < n && !(rows[j].type == site->type && strcmp(rows[j].name, name) == 0); ++j) {}
+    if (j == n) {
+      memcpy(rows[n].name, name, sizeof(name));
+      rows[n].type = site->type;
+      rows[n].count = rows[n].bytes = 0;
+      n++;
+    }
+    rows[j].count += site->count;
+    rows[j].bytes += site->bytes;
+  }
+  free(snap->alloc_sites);
+  snap->alloc_sites = NULL;
+  snap->alloc_sites_cap = 0;
+  snap->alloc_sites_count = 0;
+  qsort(rows, n, sizeof(ProfileRow), row_by_bytes);
+  out = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, n));
+  for (i = 0; i < n; ++i) {
+    SVec* row = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 4));
+    snap_vec_push(snap, row, create_obj(snap_str_new(snap, rows[i].name)));
+    snap_vec_push(snap, row, create_obj(snap_key_new(snap, kind_name(rows[i].type))));
+    snap_vec_push(snap, row, create_int((SnapInt)rows[i].count));
+    snap_vec_push(snap, row, create_int((SnapInt)rows[i].bytes));
+    snap_vec_push(snap, out, create_obj(row));
+    snap_release(snap);
+  }
+  free(rows);
+  snap_release(snap);
+  *result = create_obj(out);
+  return true;
+}
+
 bool builtin_gc_stats(Snap* snap, const SValue* args, int num_args, SValue* result) {
   static const char* phases[] = { "idle", "mark", "sweep" };
   const SnapGCStats* stats = &snap->gc_stats;
@@ -5536,6 +5771,10 @@ void snap_init(Snap* snap) {
   mvec_init(&snap->anchors, SObject*, 32);
   mvec_init(&snap->pins, SValue, 8);
   snap->num_bytes_alloced = 0;
+  snap->alloc_profile = false;
+  snap->alloc_sites = NULL;
+  snap->alloc_sites_cap = 0;
+  snap->alloc_sites_count = 0;
   snap->next_gc = GC_MIN_STEP;
   snap->pages = NULL;
   memset(snap->free_slots, 0, sizeof(snap->free_slots));
@@ -5589,6 +5828,10 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "compile", builtin_compile);
   snap_def_cfunc(snap, "gc-step", builtin_gc_step);
   snap_def_cfunc(snap, "gc-stats", builtin_gc_stats);
+  snap_def_cfunc(snap, "clock", builtin_clock);
+  snap_def_cfunc(snap, "cpu-time", builtin_cpu_time);
+  snap_def_cfunc(snap, "alloc-profile!", builtin_alloc_profile_set);
+  snap_def_cfunc(snap, "alloc-profile", builtin_alloc_profile);
   snap_def_cfunc(snap, "set-const!", builtin_set_const);
   snap_def_cfunc(snap, "list", builtin_list);
   snap_def_cfunc(snap, "cons", builtin_cons);
@@ -5670,6 +5913,10 @@ void snap_destroy(Snap* snap) {
   }
   snap->finobj.vsize = 0;
   snap_run_finalizers(snap);
+  snap->alloc_profile = false;
+  free(snap->alloc_sites);
+  snap->alloc_sites = NULL;
+  snap->alloc_sites_count = 0;
 
   page = snap->pages;
   while (page) {
