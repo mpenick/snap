@@ -297,7 +297,7 @@ typedef struct {
 } SnapGray;
 
 // How many of the latest pauses' times are kept, for the median and percentiles
-#define SNAP_GC_RECENT 64
+#define SNAP_GC_RECENT 1024
 
 // What the collector has done so far (see (gc-stats))
 typedef struct {
@@ -342,6 +342,9 @@ struct Snap_ {
   struct { MVEC_FIELDS(SObject*); } finobj;
   struct { MVEC_FIELDS(SValue); } tobefnz;
   bool gc_separated;   // This collection has moved finobj's unmarked structs to tobefnz
+  int gc_fin_pos;      // Moving them goes through finobj in steps: the next one to look at,
+  int gc_fin_kept;     // how many marked ones are kept at its front so far,
+  struct { MVEC_FIELDS(SObject*); } gc_dying; // and the unmarked ones, in order
   bool fin_pending;    // tobefnz has structs to finalize
   bool fin_running;    // In snap_run_finalizers(), which doesn't nest
   bool gc_closing;     // In snap_destroy(), where new structs don't get finalizers

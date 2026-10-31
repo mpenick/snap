@@ -167,8 +167,8 @@ Built-in functions:
   `(gc-stats)` is a map of what the collector has done: `:collections`
   finished, `:steps` (pauses, each starting a collection or doing a step of
   one), `:allocated` (bytes, in all), `:pause-total`, `:pause-max`,
-  `:pause-mean`, and `:pause-median`, `:pause-p75` and `:pause-p90` (the
-  50th, 75th and 90th percentiles of the latest 64 pauses), all in seconds,
+  `:pause-mean`, and `:pause-median`, `:pause-p75`, `:pause-p90` and
+  `:pause-p99` (percentiles of the latest 1,024 pauses), all in seconds,
   and the heap now: `:heap` and `:next-gc` (bytes) and `:phase`
   (`:idle`, `:mark` or `:sweep`). In C they're in `snap->gc_stats`.
 * Measuring: `(clock)` is seconds of wall time (from a start that doesn't
@@ -525,8 +525,11 @@ it.
 * **The GC** is incremental mark and sweep, so pauses stay short however big
   the heap is. A collection starts once the heap has grown to twice what was
   live after the last one, then runs in small steps that allocation pays for.
-  Allocating 4KB does a step of about 2,000 units, which takes well under a
-  millisecond. Marking uses a snapshot-at-the-beginning write barrier: while
+  Allocating 4KB does a step of about 2,000 units, and a step also stops
+  after 15µs (looking at the clock every 256 units), carrying what's left
+  into the next one, since units cost more when what they touch isn't in the
+  cache. It carries at most 8 steps' worth, so the collector can't fall
+  behind. `(gc-step n)` isn't timed. Marking uses a snapshot-at-the-beginning write barrier: while
   marking, a value removed from the heap (by `set!`, `put!`, `pop!` or
   `del!`) is marked first, so changes to the heap can't hide a live object.
   The stack is marked all at once when a collection starts, so stack writes,
@@ -541,7 +544,10 @@ it.
   carries on before the sweep. The VM runs the second list's finalizers after
   its next C call, through the check it already makes for C functions that
   ran snap code, so it costs nothing when there aren't any. Moving them goes
-  through the first list in one step, rather than incrementally.
+  through the first list 256 structs a step. Once marking has reached
+  everything nothing can reach an unmarked struct, so that's safe, and they're
+  only marked once all have moved, so a struct only reachable from another
+  dying one is finalized in the same collection, as in Lua.
 * **Allocation** takes constant time for objects up to 256 bytes (nearly
   all of them): they come from free lists of slots of 8 sizes, carved from
   16KB pages that are kept for reuse. Bigger objects get a page of their own.

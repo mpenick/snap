@@ -20,6 +20,13 @@
 // marks at most GC_CHUNK values of one object. Sweeping counts each free() an
 // object needs as GC_FREE_COST more units, so that a step freeing many
 // vectors takes about as long as any other.
+//
+// Units still cost different amounts (a value pointing at an object that's
+// not in the cache costs more than a number), so the steps that allocation
+// makes also stop after GC_STEP_BUDGET nanoseconds, looking at the clock every
+// GC_CLOCK_UNITS units. The work left over is carried into the next step,
+// unless more than GC_MAX_CARRY units would be, so the collector can't fall
+// behind. 0 turns the budget off. (gc-step n) always does n units.
 #ifndef GC_HEAP_GROWTH
 #define GC_HEAP_GROWTH 2
 #endif
@@ -38,6 +45,13 @@
 
 #define GC_CHUNK 64
 #define GC_FREE_COST 8
+
+#ifndef GC_STEP_BUDGET
+#define GC_STEP_BUDGET 15000
+#endif
+
+#define GC_CLOCK_UNITS 256
+#define GC_MAX_CARRY (8 * GC_STEP_SIZE * GC_STEP_MUL / sizeof(SValue))
 
 // Objects up to GC_MAX_SLOT bytes are allocated from free lists of slots of
 // a few sizes, carved from GC_PAGE_SIZE pages, so allocating and freeing take
@@ -758,6 +772,7 @@ static void gc_start(Snap* snap) {
   snap->gc_unmarked ^= 1;
   snap->gc_sym = 0;
   snap->gc_separated = false;
+  snap->gc_fin_pos = snap->gc_fin_kept = 0;
   snap->gc_debt = 0;
   snap->gc_live = snap->num_bytes_alloced; // Less what the sweep frees
 
@@ -788,31 +803,59 @@ static void gc_start(Snap* snap) {
 // it didn't reach from finobj to tobefnz, in the order they were made, and
 // marks them. They (and what they reach) live until their finalizers have run,
 // which happens at the VM's next safe point, as allocation can't run snap
-// code. Like Lua, this goes through finobj in one step. Returns the work done.
+// code. This looks at GC_CHUNK * 4 of finobj per call, keeping the marked
+// ones at its front and gathering the unmarked ones in gc_dying, until it
+// reaches the end. That's safe across steps: once marking has reached
+// everything, nothing can reach an unmarked struct, and structs made since are
+// marked (and pushed on the end, so they're looked at too). Returns the work
+// done.
 static size_t gc_separate(Snap* snap) {
-  int i, kept = 0, n = snap->finobj.vsize, first = snap->tobefnz.vsize;
-  for (i = 0; i < n; ++i) {
+  int i, end = snap->gc_fin_pos + GC_CHUNK * 4, first;
+  size_t done;
+  if (end > snap->finobj.vsize) end = snap->finobj.vsize;
+  for (i = snap->gc_fin_pos; i < end; ++i) {
     SObject* obj = snap->finobj.vitems[i];
-    if (obj->mark == snap->gc_unmarked) *mvec_push(&snap->tobefnz, SValue) = create_object(obj);
-    else snap->finobj.vitems[kept++] = obj;
+    if (obj->mark == snap->gc_unmarked) *mvec_push(&snap->gc_dying, SObject*) = obj;
+    else snap->finobj.vitems[snap->gc_fin_kept++] = obj;
   }
-  snap->finobj.vsize = kept;
+  done = end - snap->gc_fin_pos + 1;
+  snap->gc_fin_pos = end;
+  if (end < snap->finobj.vsize) return done;
+  snap->finobj.vsize = snap->gc_fin_kept;
   // Marking them after moving them all finalizes a struct that's only
   // reachable from another one's too, as in Lua
+  first = snap->tobefnz.vsize;
+  for (i = 0; i < snap->gc_dying.vsize; ++i) {
+    *mvec_push(&snap->tobefnz, SValue) = create_object(snap->gc_dying.vitems[i]);
+  }
   for (i = first; i < snap->tobefnz.vsize; ++i) gc_mark_val(snap, snap->tobefnz.vitems[i]);
+  done += snap->gc_dying.vsize;
+  snap->gc_dying.vsize = 0;
+  snap->gc_fin_pos = snap->gc_fin_kept = 0;
   if (snap->tobefnz.vsize > first) {
     snap->fin_pending = true;
     snap->reentered = true; // Gets the VM to look at fin_pending after its next C call
   }
   snap->gc_separated = true;
-  return n + 1;
+  return done;
 }
 
 // Does about `work` units of marking or sweeping. Returns true when it
-// finishes the collection.
-static bool gc_step(Snap* snap, size_t work) {
-  size_t done = 0;
+// finishes the collection. With a start time it stops once the step has taken
+// GC_STEP_BUDGET, and sets *left to the units it didn't do.
+static bool gc_step(Snap* snap, size_t work, const struct timespec* t0, size_t* left) {
+  size_t done = 0, check = GC_CLOCK_UNITS;
   while (done < work) {
+    if (GC_STEP_BUDGET > 0 && t0 && done >= check) {
+      struct timespec t;
+      check = done + GC_CLOCK_UNITS;
+      clock_gettime(CLOCK_MONOTONIC, &t);
+      if ((t.tv_sec - t0->tv_sec) * 1000000000L + (t.tv_nsec - t0->tv_nsec) > GC_STEP_BUDGET &&
+          work - done <= GC_MAX_CARRY) {
+        *left = work - done;
+        return false;
+      }
+    }
     if (snap->gc_phase == GC_MARK) {
       if (snap->gc_sym < snap->symbols.hcapacity) {
         // Symbols and keywords are never freed (GC_FIXED), but symbols hold
@@ -874,15 +917,16 @@ static bool gc_step(Snap* snap, size_t work) {
   return false;
 }
 
-// Starts a collection and/or does a step of one, timing it for the stats
-static bool gc_pause(Snap* snap, bool start, size_t work) {
+// Starts a collection and/or does a step of one, timing it for the stats.
+// With left, the step keeps to GC_STEP_BUDGET (see gc_step()).
+static bool gc_pause(Snap* snap, bool start, size_t work, size_t* left) {
   SnapGCStats* stats = &snap->gc_stats;
   struct timespec t0, t1;
   bool done = false;
   double t;
   clock_gettime(CLOCK_MONOTONIC, &t0);
   if (start) gc_start(snap);
-  if (work > 0) done = gc_step(snap, work);
+  if (work > 0) done = gc_step(snap, work, left ? &t0 : NULL, left);
   clock_gettime(CLOCK_MONOTONIC, &t1);
   t = (double)(t1.tv_sec - t0.tv_sec) + (double)(t1.tv_nsec - t0.tv_nsec) * 1e-9;
   stats->recent[stats->steps % SNAP_GC_RECENT] = t;
@@ -894,7 +938,7 @@ static bool gc_pause(Snap* snap, bool start, size_t work) {
 }
 
 bool snap_gc_step(Snap* snap, size_t work) {
-  return gc_pause(snap, snap->gc_phase == GC_IDLE, work);
+  return gc_pause(snap, snap->gc_phase == GC_IDLE, work, NULL);
 }
 
 __attribute__((cold, noinline)) static void profile_alloc(Snap* snap, uint8_t type, size_t size);
@@ -910,11 +954,12 @@ static SObject* gc_new(Snap* snap, uint8_t type, size_t size) {
     // finishes before the heap grows much
     snap->gc_debt += size;
     if (snap->gc_debt >= GC_STEP_SIZE) {
-      gc_pause(snap, false, snap->gc_debt * GC_STEP_MUL / sizeof(SValue));
-      snap->gc_debt = 0;
+      size_t left = 0;
+      gc_pause(snap, false, snap->gc_debt * GC_STEP_MUL / sizeof(SValue), &left);
+      snap->gc_debt = left * sizeof(SValue) / GC_STEP_MUL; // What the budget left over
     }
   } else if (snap->num_bytes_alloced + size > snap->next_gc) {
-    gc_pause(snap, true, 0);
+    gc_pause(snap, true, 0, NULL);
   }
   obj = gc_alloc(snap, size);
   obj->type = type;
@@ -5043,15 +5088,16 @@ bool builtin_gc_step(Snap* snap, const SValue* args, int num_args, SValue* resul
   return true;
 }
 
-// Sorts the latest pauses into out (by insertion, as there are at most
-// SNAP_GC_RECENT). Returns how many there are.
+static int compare_doubles(const void* a, const void* b) {
+  double x = *(const double*)a, y = *(const double*)b;
+  return (x > y) - (x < y);
+}
+
+// Sorts the latest pauses into out. Returns how many there are.
 static size_t gc_recent_sorted(const SnapGCStats* stats, double* out) {
-  size_t n = stats->steps < SNAP_GC_RECENT ? stats->steps : SNAP_GC_RECENT, i, j;
-  for (i = 0; i < n; ++i) {
-    double t = stats->recent[i];
-    for (j = i; j > 0 && out[j - 1] > t; --j) out[j] = out[j - 1];
-    out[j] = t;
-  }
+  size_t n = stats->steps < SNAP_GC_RECENT ? stats->steps : SNAP_GC_RECENT;
+  memcpy(out, stats->recent, n * sizeof(double));
+  qsort(out, n, sizeof(double), compare_doubles);
   return n;
 }
 
@@ -5246,6 +5292,7 @@ bool builtin_gc_stats(Snap* snap, const SValue* args, int num_args, SValue* resu
   PUT("pause-median", create_float(snap, percentile(sorted, n, 0.5)));
   PUT("pause-p75", create_float(snap, percentile(sorted, n, 0.75)));
   PUT("pause-p90", create_float(snap, percentile(sorted, n, 0.9)));
+  PUT("pause-p99", create_float(snap, percentile(sorted, n, 0.99)));
 #undef PUT
   snap_release(snap);
   *result = create_obj(m);
@@ -5814,7 +5861,9 @@ void snap_init(Snap* snap) {
   mvec_init(&snap->gray, SnapGray, 64);
   mvec_init(&snap->finobj, SObject*, 16);
   mvec_init(&snap->tobefnz, SValue, 16);
+  mvec_init(&snap->gc_dying, SObject*, 16);
   snap->gc_separated = false;
+  snap->gc_fin_pos = snap->gc_fin_kept = 0;
   snap->fin_pending = false;
   snap->fin_running = false;
   snap->gc_closing = false;
@@ -5932,10 +5981,18 @@ void snap_destroy(Snap* snap) {
   // Nothing collects meanwhile, and structs made by finalizers don't get one.
   snap->gc_manual = true;
   snap->gc_closing = true;
-  for (i = 0; i < snap->finobj.vsize; ++i) {
+  // A collection may be partway through moving finobj's unmarked structs
+  for (i = 0; i < snap->gc_fin_kept; ++i) {
     *mvec_push(&snap->tobefnz, SValue) = create_object(snap->finobj.vitems[i]);
   }
-  snap->finobj.vsize = 0;
+  for (i = 0; i < snap->gc_dying.vsize; ++i) {
+    *mvec_push(&snap->tobefnz, SValue) = create_object(snap->gc_dying.vitems[i]);
+  }
+  for (i = snap->gc_fin_pos; i < snap->finobj.vsize; ++i) {
+    *mvec_push(&snap->tobefnz, SValue) = create_object(snap->finobj.vitems[i]);
+  }
+  snap->finobj.vsize = snap->gc_dying.vsize = 0;
+  snap->gc_fin_pos = snap->gc_fin_kept = 0;
   snap_run_finalizers(snap);
   snap->alloc_profile = false;
   free(snap->alloc_sites);
@@ -5960,6 +6017,7 @@ void snap_destroy(Snap* snap) {
   mvec_destroy(&snap->gray);
   mvec_destroy(&snap->finobj);
   mvec_destroy(&snap->tobefnz);
+  mvec_destroy(&snap->gc_dying);
   snap_hash_destroy(&snap->symbols);
   snap_hash_destroy(&snap->keywords);
   assert(snap->num_bytes_alloced == 0);

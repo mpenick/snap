@@ -102,6 +102,22 @@
 (collect)
 (println total)
 
+; Separating the unreachable ones goes over many steps when there are many:
+; live and dead are mixed, and structs made meanwhile are kept
+(defstruct Tag [i])
+(def tagged [])
+(defgc [t Tag] (push! tagged (get t :i)))
+(defn odd? [i] (not (= i (* 2 (int (/ i 2))))))
+(def evens (loop [v [] i 0]
+  (if (< i 2000) (let [t (Tag i)] (recur (if (odd? i) v (push! v t)) (+ i 1))) v)))
+(def during [])
+(finish)
+(gc-step 0)
+(loop [] (push! during (Tag (+ 10000 (count during)))) (if (gc-step 50) nil (recur)))
+(finish)
+(println (count tagged) (reduce (fn [ok i] (and ok (odd? i) (< i 2000))) true tagged)
+         (count evens) (> (count during) 10))
+
 ; Live structs are finalized when the program ends
 (defstruct AtExit [msg])
 (defgc [a AtExit] (println (get a :msg)))

@@ -114,4 +114,4 @@
          (not (nil? (get {:idle 1 :mark 1 :sweep 1} (get s2 :phase)))) (> (get s2 :heap) 0))
 (println (> (get s2 :pause-mean) 0.0) (> (get s2 :pause-median) 0.0)
          (<= (get s2 :pause-mean) (get s2 :pause-max))
-         (<= (get s2 :pause-median) (get s2 :pause-p75) (get s2 :pause-p90) (get s2 :pause-max)))
+         (<= (get s2 :pause-median) (get s2 :pause-p75) (get s2 :pause-p90) (get s2 :pause-p99) (get s2 :pause-max)))
