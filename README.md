@@ -301,6 +301,25 @@ code that supervises other code, like the REPL:
 C functions return `false` to panic, with `*result` set to the error. To
 return an error as a value, set `*result` to it and return `true`.
 
+## Holding values in C
+
+The collector sees the stack, the globals, and what they reach, but not C
+variables. A C function's arguments are safe for the whole call. A value C
+keeps after the call returns, such as a callback it calls every frame or a
+map in a C global, needs a pin:
+
+```c
+SValue on_frame = snap_pin(snap, args[0]); // Kept until unpinned
+...
+snap_unpin(snap, on_frame);
+```
+
+Pins can be unpinned in any order, and a value pinned twice needs two unpins.
+Errors don't undo them. Inside snap.c, `snap_anchor()` and `snap_release()`
+do the short-lived version of this: they keep an object alive while C is
+still building it (filling a new map allocates), and they come undone, last
+first, by the end of the call or when an error unwinds.
+
 ## Implementation
 
 Everything is in `snap.c`. The lexer is in `snap_lex.rh`, and `main.c` runs a

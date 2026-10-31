@@ -34,8 +34,13 @@ snap_lex.h: snap_lex.rh
 %_snap.h: %.snap
 	sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
 
-test: $(TARGET)
+# tests/api.c tests the C API, which scripts can't reach
+test: $(TARGET) tests/api
 	@tests/run.sh ./$(TARGET)
+	@tests/api
+
+tests/api: tests/api.c snap.c snap.h stdlib_snap.h snap_lex.h
+	$(CC) $(CFLAGS) -I. -o $@ tests/api.c snap.c -lm
 
 # Collect constantly, a few units of work per allocation, under ASan/UBSan to
 # shake out missing GC roots and barriers. Each object gets its own malloc()
@@ -44,13 +49,15 @@ STRESS_FLAGS=-g -O0 -fsanitize=address,undefined -DGC_HEAP_GROWTH=1 -DGC_MIN_STE
 stress: snap_lex.h repl_snap.h stdlib_snap.h
 	$(CC) $(STRESS_FLAGS) -DGC_POOL=0 -o snap_stress $(SOURCES) $(LDFLAGS)
 	$(CC) $(STRESS_FLAGS) -o snap_stress_pool $(SOURCES) $(LDFLAGS)
+	$(CC) $(STRESS_FLAGS) -DGC_POOL=0 -I. -o tests/api_stress tests/api.c snap.c -lm
 	@for f in test.snap closure.snap loop.snap new.snap; do \
 		echo "== $$f"; ./snap_stress $$f > /dev/null || exit 1; \
 	done
 	@tests/run.sh ./snap_stress
 	@tests/run.sh ./snap_stress_pool
+	@tests/api_stress
 
 .PHONY: clean test stress
 clean:
 	rm -rf $(TARGET).dSYM .depends
-	rm -f $(TARGET) snap_stress snap_stress_pool snap_lex.h repl_snap.h stdlib_snap.h *.o a.out
+	rm -f $(TARGET) snap_stress snap_stress_pool tests/api tests/api_stress snap_lex.h repl_snap.h stdlib_snap.h *.o a.out

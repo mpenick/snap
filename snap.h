@@ -308,6 +308,7 @@ struct Snap_ {
   bool reentered; // Set by snap_call(), which can move the stack and the frames
   int c_depth; // Counted up to SNAP_MAX_C_DEPTH
   struct { MVEC_FIELDS(SObject*); } anchors;
+  struct { MVEC_FIELDS(SValue); } pins; // See snap_pin()
   size_t num_bytes_alloced;
   size_t next_gc; // Start a collection when num_bytes_alloced reaches this
   SnapPage* pages;
@@ -456,6 +457,11 @@ bool snap_map_del(Snap* snap, SMap* map, SValue key);
 
 SObject* snap_anchor(Snap* snap, SObject* obj);
 void snap_release(Snap* snap);
+// Keeps val alive while C holds it, between calls, until snap_unpin().
+// Unlike anchors, pins can be unpinned in any order and errors don't undo
+// them. Pinning a value twice takes two unpins. Returns val.
+SValue snap_pin(Snap* snap, SValue val);
+void snap_unpin(Snap* snap, SValue val);
 
 void snap_def(Snap* snap, const char* name, SValue val);
 void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);

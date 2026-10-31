@@ -668,6 +668,7 @@ static void gc_start(Snap* snap) {
   mvec_foreach(&snap->anchors, obj) {
     gc_mark(snap, *obj);
   }
+  gc_mark_vals(snap, snap->pins.vitems, snap->pins.vsize);
 
   gc_mark(snap, (SObject*)snap->cause);
 
@@ -1139,6 +1140,25 @@ SObject* snap_anchor(Snap* snap, SObject* obj) {
 
 void snap_release(Snap* snap) {
   mvec_pop(&snap->anchors);
+}
+
+// Pins are roots, marked when a collection starts. A value pinned during the
+// mark needs no barrier: it was either reachable then, so it gets marked, or
+// it's new, and new objects are already marked.
+SValue snap_pin(Snap* snap, SValue val) {
+  if (is_obj(val)) *mvec_push(&snap->pins, SValue) = val;
+  return val;
+}
+
+// Removes the latest pin of val, by identity, moving the last pin into its place
+void snap_unpin(Snap* snap, SValue val) {
+  int i;
+  for (i = snap->pins.vsize - 1; i >= 0; --i) {
+    if (snap->pins.vitems[i].bits == val.bits) {
+      snap->pins.vitems[i] = snap->pins.vitems[--snap->pins.vsize];
+      return;
+    }
+  }
 }
 
 void snap_def(Snap* snap, const char* name, SValue val) {
@@ -4424,6 +4444,7 @@ void snap_init(Snap* snap) {
   snap->stack_end = snap->stack + snap->stack_size;
   mvec_init(&snap->frames, SnapFrame, 32);
   mvec_init(&snap->anchors, SObject*, 32);
+  mvec_init(&snap->pins, SValue, 8);
   snap->num_bytes_alloced = 0;
   snap->next_gc = GC_MIN_STEP;
   snap->pages = NULL;
@@ -4536,6 +4557,7 @@ void snap_destroy(Snap* snap) {
   free((void*)snap->stack);
   mvec_destroy(&snap->frames);
   mvec_destroy(&snap->anchors);
+  mvec_destroy(&snap->pins);
   mvec_destroy(&snap->gray);
   snap_hash_destroy(&snap->symbols);
   snap_hash_destroy(&snap->keywords);

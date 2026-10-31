@@ -11,3 +11,5 @@ snap_stress
 snap_stress_pool
 repl_snap.h
 stdlib_snap.h
+tests/api
+tests/api_stress
