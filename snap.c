@@ -2858,10 +2858,24 @@ static void compile_body(Snap* snap, SnapFnState* fs, SCons* body, bool tail) {
 
 static bool is_pattern(SValue v);
 static bool is_ignore(Snap* snap, SValue v);
+static const char* form_name(int token);
+
+// Special forms (if, or, not, + ...) are read as forms, not symbols, so they
+// can't be bound. A map pattern can still take their key under another name.
+static void check_bindable(Snap* snap, SValue name, bool in_map) {
+  if (!is_form(name)) return;
+  if (in_map) {
+    raise(snap, "snap_compile_error", "'%s' is a special form and can't be bound; use {x :%s} to rename it",
+          form_name(as_form(name)), form_name(as_form(name)));
+  }
+  raise(snap, "snap_compile_error", "'%s' is a special form and can't be bound", form_name(as_form(name)));
+}
+
 static void compile_def_pattern(Snap* snap, SnapFnState* fs, SValue pattern, SValue form);
 
 static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
   SSym* name;
+  if (args) check_bindable(snap, args->first, false);
   if (list_length(args) != 2 || !(is_sym(args->first) || is_pattern(args->first))) {
     raise(snap, "snap_compile_error", "Expected (def <id or pattern> <expr>)");
   }
@@ -3153,6 +3167,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
     push_binding(snap, out, pattern, form);
     return;
   }
+  check_bindable(snap, pattern, false);
   if (!is_pattern(pattern)) {
     raise(snap, "snap_compile_error", "Expected a name, a [pattern] or a {:keys [names]} pattern");
   }
@@ -3175,6 +3190,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
           raise(snap, "snap_compile_error", "Expected only :as after & <pattern>");
         }
       } else if (is_obj(p) && as_obj(p) == (SObject*)as) {
+        if (i + 1 < v->len) check_bindable(snap, *snap_vec_at(v, i + 1), false);
         if (i + 2 != v->len || !is_sym(*snap_vec_at(v, i + 1))) {
           raise(snap, "snap_compile_error", "Expected :as <name> at the end of the pattern");
         }
@@ -3195,6 +3211,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
     SValue* ors = snap_map_get(m, create_obj(snap_key_new(snap, "or")));
     SMap* dflts = NULL;
     if (keys && !is_vec(*keys)) raise(snap, "snap_compile_error", "Expected :keys [names]");
+    if (as) check_bindable(snap, *as, false);
     if (as && !is_sym(*as)) raise(snap, "snap_compile_error", "Expected :as <name>");
     if (ors) {
       if (!is_map(*ors)) raise(snap, "snap_compile_error", "Expected :or {name default ...}");
@@ -3204,6 +3221,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
       for (i = 0; i < as_vec(*keys)->len; ++i) {
         SValue name = *snap_vec_at(as_vec(*keys), i);
         SValue* d;
+        check_bindable(snap, name, true);
         if (!is_sym(name) || is_ignore(snap, name)) raise(snap, "snap_compile_error", "Expected :keys [names]");
         push_binding(snap, out, name,
                      call2(snap, global_fn(fs, "get", builtin_get, snap), tmp,
@@ -3217,6 +3235,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
           is_key_named(snap, target, "or")) {
         continue;
       }
+      check_bindable(snap, target, false);
       if (!is_sym(target) && !is_pattern(target)) {
         raise(snap, "snap_compile_error", "Expected :keys, :as, :or or <name or pattern> <key> in a map pattern");
       }
@@ -3321,6 +3340,7 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   amp = snap_sym_new(snap, "&");
   for (i = 0; i < params->len; ++i) {
     SValue param = *snap_vec_at(params, i);
+    check_bindable(snap, param, false);
     if (!is_sym(param)) {
       raise(snap, "snap_compile_error", "Expected symbol");
     }
@@ -3480,6 +3500,7 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
     return;
   }
   for (i = 0; i < count; ++i) {
+    check_bindable(snap, *snap_vec_at(bindings, 2 * i), false);
     if (!is_sym(*snap_vec_at(bindings, 2 * i))) {
       raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
     }
@@ -3871,7 +3892,6 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
 
 // `tail` is whether expr is in tail position relative to its recur target
 static bool op_value(int token, SValue* val);
-static const char* form_name(int token);
 
 static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   int stack = fs->stack;

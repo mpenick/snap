@@ -66,6 +66,9 @@ whether there are any. `nil` works as an empty list (`first`, `rest`,
 
 `let` and `loop` bindings alternate names and values, and are bound in order,
 so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
+The special forms (`begin def defmacro if fn let loop quote recur set! panic
+try recover < <= > >= = not and or + - * / %`) can't be bound, anywhere a name
+is; a map pattern can take their key under another name: `{o :or}`.
 
 In `let`, `loop`, `fn` and `def` (so `defn` and `doseq` too), a pattern can
 stand in for a name and bind the names in it to parts of the value:

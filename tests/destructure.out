@@ -30,3 +30,5 @@ false true
 [6 3]
 <err :snap_compile_error "'b' in :or isn't a name this pattern binds from a key"> <err :snap_compile_error "'x' in :or isn't a name this pattern binds from a key"> <err :snap_compile_error "Expected :or {name default ...}">
 <err :snap_compile_error "Expected a keyword, string or int to look up after a name in a map pattern"> <err :snap_compile_error "Expected :keys, :as, :or or <name or pattern> <key> in a map pattern">
+<err :snap_compile_error "'or' is a special form and can't be bound"> <err :snap_compile_error "'not' is a special form and can't be bound"> <err :snap_compile_error "'-' is a special form and can't be bound">
+<err :snap_compile_error "'or' is a special form and can't be bound; use {x :or} to rename it"> <err :snap_compile_error "'if' is a special form and can't be bound"> 5

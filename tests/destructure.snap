@@ -53,3 +53,6 @@
 ; Bad :or and rename entries
 (println (compile "(let [{:keys [a] :or {b 1}} {}] a)") (compile "(let [{[x] :p :or {x 1}} {}] x)") (compile "(let [{:keys [a] :or [a 1]} {}] a)"))
 (println (compile "(let [{a b} {}] a)") (compile "(let [{1 :a} {}] 1)"))
+; Special forms (or, not, + ...) can't be bound, but a map pattern can rename their key
+(println (compile "(let [or 1] or)") (compile "(defn f [a not] a)") (compile "(def [x -] [1 2])"))
+(println (compile "(let [{:keys [or]} {}] 1)") (compile "(let [{* :x :as if} {}] 1)") (let [{o :or} {:or 5}] o))
