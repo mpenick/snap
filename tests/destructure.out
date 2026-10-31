@@ -13,5 +13,20 @@
 1 2 3 4 5
 <err :snap_index_error "Index out of range"> <err :snap_type_error "Expected a vector">
 (2 3) nil (3) nil nil
-<err :snap_compile_error "Expected :as <name> at the end of the pattern"> <err :snap_compile_error "Expected a pattern after &"> <err :snap_compile_error "Expected only :keys and :as in a map pattern">
+<err :snap_compile_error "Expected :as <name> at the end of the pattern"> <err :snap_compile_error "Expected a pattern after &"> <err :snap_compile_error "Expected :keys, :as, :or or <name or pattern> <key> in a map pattern">
 <err :snap_compile_error "Expected a name, a [pattern] or a {:keys [names]} pattern"> <err :snap_compile_error "Expected :keys [names]"> <err :snap_compile_error "Expected only :as after & <pattern>">
+1 2 3 4
+1 2 0.500000 3
+"pony" :zero
+9 #Pt{:x 9 :y 10}
+:plaster :planks
+1.600000 0.300000
+false true
+1 2 0.000000 {:x 1 :y 2}
+1
+<err :boom "evaluated">
+14
+[1.000000 2.000000] [3 2.000000]
+[6 3]
+<err :snap_compile_error "'b' in :or isn't a name this pattern binds from a key"> <err :snap_compile_error "'x' in :or isn't a name this pattern binds from a key"> <err :snap_compile_error "Expected :or {name default ...}">
+<err :snap_compile_error "Expected a keyword, string or int to look up after a name in a map pattern"> <err :snap_compile_error "Expected :keys, :as, :or or <name or pattern> <key> in a map pattern">

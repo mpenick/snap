@@ -3034,18 +3034,27 @@ static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
 
 static bool is_pattern(SValue v) { return is_vec(v) || is_map(v); }
 
+static bool is_key_named(Snap* snap, SValue v, const char* name) {
+  return is_obj(v) && as_obj(v) == (SObject*)snap_key_new(snap, name);
+}
+
 // Whether a pattern (or a name) binds name
-static bool binds(SValue pattern, SSym* name) {
+static bool binds(Snap* snap, SValue pattern, SSym* name) {
   int i;
   if (is_sym(pattern)) return as_sym(pattern) == name;
   if (is_vec(pattern)) {
     for (i = 0; i < as_vec(pattern)->len; ++i) {
-      if (binds(*snap_vec_at(as_vec(pattern), i), name)) return true;
+      if (binds(snap, *snap_vec_at(as_vec(pattern), i), name)) return true;
     }
   } else if (is_map(pattern)) {
+    // {:keys [names] :as name :or {defaults} target key...}
     SMap* m = as_map(pattern);
     for (i = 0; i < m->used; ++i) {
-      if (m->entries[2 * i].bits != SV_DELETED && binds(m->entries[2 * i + 1], name)) return true;
+      SValue k = m->entries[2 * i], v = m->entries[2 * i + 1];
+      if (k.bits == SV_DELETED || is_key_named(snap, k, "or")) continue;
+      if (is_key_named(snap, k, "keys") || is_key_named(snap, k, "as") ? binds(snap, v, name) : binds(snap, k, name)) {
+        return true;
+      }
     }
   }
   return false;
@@ -3060,7 +3069,7 @@ static void check_hidden_globals(Snap* snap, SVec* names, int step) {
   rewrite_hides_globals = false;
   for (i = 0; i < names->len; i += step) {
     for (j = 0; j < 3; ++j) {
-      if (binds(*snap_vec_at(names, i), snap_sym_new(snap, globals[j]))) rewrite_hides_globals = true;
+      if (binds(snap, *snap_vec_at(names, i), snap_sym_new(snap, globals[j]))) rewrite_hides_globals = true;
     }
   }
 }
@@ -3089,6 +3098,24 @@ static SValue new_gensym(Snap* snap) {
   SValue sym;
   builtin_gensym(snap, NULL, 0, &sym); // Interned, so it lives forever
   return sym;
+}
+
+// (if (= name nil) default name), for a map pattern's :or
+static SValue or_default(Snap* snap, SValue name, SValue dflt) {
+  SnapList test = { NULL, NULL }, form = { NULL, NULL };
+  SValue t;
+  *list_add(snap, &test) = create_form(TK_EQ);
+  *list_add(snap, &test) = name;
+  *list_add(snap, &test) = create_nil();
+  t = list_done(snap, &test);
+  snap_anchor(snap, as_obj(t));
+  *list_add(snap, &form) = create_form(TK_IF);
+  *list_add(snap, &form) = t;
+  *list_add(snap, &form) = dflt; // Rooted by the pattern
+  *list_add(snap, &form) = name;
+  t = list_done(snap, &form);
+  snap_release(snap);
+  return t;
 }
 
 static void push_binding(Snap* snap, SVec* out, SValue name, SValue form) {
@@ -3136,27 +3163,68 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
       }
     }
   } else {
+    // {:keys [a b] c :k [d e] :v :or {a 1 c 2} :as m}: a = (get m :a),
+    // c = (get m :k), [d e] from (get m :v), and a and c, when nil, their
+    // defaults (evaluated only then)
     SMap* m = as_map(pattern);
-    SValue keys_key = create_obj(snap_key_new(snap, "keys")), as_key = create_obj(snap_key_new(snap, "as"));
-    SValue* keys = snap_map_get(m, keys_key);
-    SValue* as = snap_map_get(m, as_key);
-    if (m->len != (keys != NULL) + (as != NULL)) {
-      raise(snap, "snap_compile_error", "Expected only :keys and :as in a map pattern");
+    SValue* keys = snap_map_get(m, create_obj(snap_key_new(snap, "keys")));
+    SValue* as = snap_map_get(m, create_obj(snap_key_new(snap, "as")));
+    SValue* ors = snap_map_get(m, create_obj(snap_key_new(snap, "or")));
+    SMap* dflts = NULL;
+    if (keys && !is_vec(*keys)) raise(snap, "snap_compile_error", "Expected :keys [names]");
+    if (as && !is_sym(*as)) raise(snap, "snap_compile_error", "Expected :as <name>");
+    if (ors) {
+      if (!is_map(*ors)) raise(snap, "snap_compile_error", "Expected :or {name default ...}");
+      dflts = as_map(*ors);
     }
     if (keys) {
-      if (!is_vec(*keys)) raise(snap, "snap_compile_error", "Expected :keys [names]");
       for (i = 0; i < as_vec(*keys)->len; ++i) {
         SValue name = *snap_vec_at(as_vec(*keys), i);
+        SValue* d;
         if (!is_sym(name)) raise(snap, "snap_compile_error", "Expected :keys [names]");
         push_binding(snap, out, name,
                      call2(snap, global_fn(fs, "get", builtin_get, snap), tmp,
                            create_obj(snap_key_new(snap, as_sym(name)->data))));
+        if (dflts && (d = snap_map_get(dflts, name))) push_binding(snap, out, name, or_default(snap, name, *d));
       }
     }
-    if (as) {
-      if (!is_sym(*as)) raise(snap, "snap_compile_error", "Expected :as <name>");
-      push_binding(snap, out, *as, tmp);
+    for (i = 0; i < m->used; ++i) {
+      SValue target = m->entries[2 * i], key = m->entries[2 * i + 1], get;
+      if (target.bits == SV_DELETED || is_key_named(snap, target, "keys") || is_key_named(snap, target, "as") ||
+          is_key_named(snap, target, "or")) {
+        continue;
+      }
+      if (!is_sym(target) && !is_pattern(target)) {
+        raise(snap, "snap_compile_error", "Expected :keys, :as, :or or <name or pattern> <key> in a map pattern");
+      }
+      if (!is_key(key) && !is_str(key) && !is_int(key)) {
+        raise(snap, "snap_compile_error", "Expected a keyword, string or int to look up after a name in a map pattern");
+      }
+      get = call2(snap, global_fn(fs, "get", builtin_get, snap), tmp, key);
+      if (is_sym(target)) {
+        SValue* d;
+        push_binding(snap, out, target, get);
+        if (dflts && (d = snap_map_get(dflts, target))) push_binding(snap, out, target, or_default(snap, target, *d));
+      } else {
+        snap_anchor(snap, as_obj(get));
+        destructure(snap, fs, target, get, out);
+        snap_release(snap);
+      }
     }
+    if (dflts) {
+      // Every default is for a name bound straight from a key here
+      for (i = 0; i < dflts->used; ++i) {
+        SValue name = dflts->entries[2 * i];
+        bool found = false;
+        int j;
+        if (name.bits == SV_DELETED) continue;
+        if (!is_sym(name)) raise(snap, "snap_compile_error", "Expected :or {name default ...}");
+        for (j = 0; keys && j < as_vec(*keys)->len && !found; ++j) found = as_sym(*snap_vec_at(as_vec(*keys), j)) == as_sym(name);
+        for (j = 0; j < m->used && !found; ++j) found = m->entries[2 * j].bits == name.bits;
+        if (!found) raise(snap, "snap_compile_error", "'%s' in :or isn't a name this pattern binds from a key", as_sym(name)->data);
+      }
+    }
+    if (as) push_binding(snap, out, *as, tmp);
   }
 }
 

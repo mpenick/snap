@@ -78,9 +78,19 @@ in for a name and bind the names in it to parts of the value:
 (doseq [[k v] pairs] ...)
 ```
 
+A map pattern can also bind a name (or a pattern) to any key, and give
+defaults, by the name, for values that are `nil` (missing). A default is only
+evaluated when it's used:
+
+```clojure
+(let [{a0 :a w0 :w} g0 {a1 :a w1 :w} g1] ...)        ; a0 = (get g0 :a)
+(let [{[x z] :pos} spec] ...)
+(let [{:keys [wall floor] :or {wall :plaster}} room] ...)
+```
+
 Patterns nest. They compile to the `nth` and `get` calls they stand for, so
 they're as fast, and a vector too short for its pattern is `nth`'s error.
-`{:keys [...]}` works on structs too, and a missing key is `nil`. In a `loop`,
+Map patterns work on structs too, and a missing key is `nil`. In a `loop`,
 `recur` takes one value for each binding, as usual: `(recur [b (+ a b)] ...)`.
 
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,

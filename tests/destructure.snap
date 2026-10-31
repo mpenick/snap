@@ -32,3 +32,24 @@
 ; Bad patterns
 (println (compile "(let [[a :as] [1]] a)") (compile "(let [[a & ] [1]] a)") (compile "(let [{:k [a]} {}] a)"))
 (println (compile "(let [[1] [1]] 1)") (compile "(let [{:keys [1]} {}] 1)") (compile "(let [[a & b c] [1]] a)"))
+; Renaming: name (or pattern) on the left, the key to look up on the right
+(let [{a0 :a w0 :w} {:a 1 :w 2} {a1 :a w1 :w} {:a 3 :w 4}] (println a0 w0 a1 w1))
+(let [{[x z] :pos yaw :yaw {:keys [r]} :size} {:pos [1 2] :yaw 0.5 :size {:r 3}}] (println x z yaw r))
+(let [{s "name" n 0} {"name" "pony" 0 :zero}] (println s n))
+(let [{px :x :as p} (Pt 9 10)] (println px p))
+; :or defaults, by the name bound: for :keys and renames, when the value is nil
+(let [{:keys [wall floor] :or {wall :plaster}} {:floor :planks}] (println wall floor))
+(let [{sw :swing th :thick :or {sw 1.6 th 0.15}} {:thick 0.3}] (println sw th))
+(let [{:keys [open shut] :or {open true shut true}} {:open false :shut nil}] (println open shut))
+(let [{:keys [x y] yaw :yaw :or {yaw 0.0} :as spec} {:x 1 :y 2}] (println x y yaw spec))
+; Defaults are only evaluated when needed
+(let [{:keys [a] :or {a (panic :boom "evaluated")}} {:a 1}] (println a))
+(println (recover (fn [] (let [{:keys [a] :or {a (panic :boom "evaluated")}} {}] a))))
+; Defaults can use names from outside the pattern, and work in fn params and loops
+(let [d 7 {:keys [q] :or {q (* d 2)}} {}] (println q))
+(defn door-size [{w :width h :height :or {w 1.0 h 2.0}}] [w h])
+(println (door-size {}) (door-size {:width 3}))
+(println (loop [{:keys [n acc] :or {acc 0}} {:n 3} i 0] (if (> n 0) (recur {:n (- n 1) :acc (+ acc n)} (+ i 1)) [acc i])))
+; Bad :or and rename entries
+(println (compile "(let [{:keys [a] :or {b 1}} {}] a)") (compile "(let [{[x] :p :or {x 1}} {}] x)") (compile "(let [{:keys [a] :or [a 1]} {}] a)"))
+(println (compile "(let [{a b} {}] a)") (compile "(let [{1 :a} {}] 1)"))
