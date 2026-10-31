@@ -51,7 +51,7 @@ make stress   # The same under ASan/UBSan, collecting all the time
 
 Special forms: `def`, `defmacro`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
 `quote`, `and`, `or`, `not`, `try`, `panic`, `recover`, and the operators
-`+ - * / %` and `< <= > >= =`.
+`+ - * / %` and `< <= > >= =`. `(- x)` negates.
 
 The operators and `not` can be used as values too, as in `(reduce + 0 v)` or
 `(map not v)`: there they're C functions that do the same thing (a call like

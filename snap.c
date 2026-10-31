@@ -3026,6 +3026,10 @@ static void compile_try(Snap* snap, SnapFnState* fs, SCons* args) {
 
 static void compile_arith(Snap* snap, SnapFnState* fs, int opcode, SCons* args) {
   SCons* curr;
+  if (opcode == SUB && list_length(args) == 1) { // (- x) is (- 0 x)
+    compile_binary(snap, fs, opcode, create_int(0), args->first);
+    return;
+  }
   if (list_length(args) < 2) {
     raise(snap, "snap_compile_error", "Expected expressions");
   }
@@ -4116,9 +4120,9 @@ bool builtin_macroexpand(Snap* snap, const SValue* args, int num_args, SValue* r
 static bool arith(Snap* snap, int op, const SValue* args, int num_args, SValue* result) {
   SValue acc;
   int i;
-  if (num_args < 2) return arity_error(snap, result);
-  acc = args[0];
-  for (i = 1; i < num_args; ++i) {
+  if (num_args < 2 && !(op == TK_SUB && num_args == 1)) return arity_error(snap, result);
+  acc = num_args == 1 ? create_int(0) : args[0]; // (- x) is (- 0 x)
+  for (i = num_args == 1 ? 0 : 1; i < num_args; ++i) {
     const SValue* a = &acc, * b = &args[i];
     if (!is_num_p(a) || !is_num_p(b)) return fail(snap, result, "snap_type_error", "Expected numbers");
     if ((op == TK_DIV || op == TK_MOD) && int_zero_divisor()) {

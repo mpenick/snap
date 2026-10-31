@@ -7,3 +7,6 @@
 (println ((fn [f] (f 1.5 2)) *) ((fn [f] (f 1e300 1e300)) *) ((fn [f] (f 7.5 2)) %))
 (println (recover (fn [] ((fn [f] (f 1 0)) /))) (recover (fn [] ((fn [f] (f 1)) +))) (recover (fn [] ((fn [f] (f 1 "a")) +))))
 (println (compile "(map and [1])") (compile "(def x if)"))
+; (- x) negates
+(let [x 2.5 y 3] (println (- y) (- x) (- (- y)) (- 1.5) ((fn [f] (f 4)) -) (map - [1 -2.5])))
+(println (recover (fn [] (- "a"))) (recover (fn [] ((fn [f] (f 1)) *))))

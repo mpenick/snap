@@ -5,3 +5,5 @@ true false true true
 3.000000 inf 1.500000
 <err :snap_arith_error "Division by zero"> <err :snap_arity_error "Invalid number of arguments"> <err :snap_type_error "Expected numbers">
 <err :snap_compile_error "and can't be used as a value"> <err :snap_compile_error "if can't be used as a value">
+-3 -2.500000 3 -1.500000 -4 [-1 2.500000]
+<err :snap_type_error "Expected numbers"> <err :snap_arity_error "Invalid number of arguments">
