@@ -1,0 +1,34 @@
+; Destructuring: patterns in place of names in let, loop and fn
+
+; Vectors, lists, nesting, and names after a pattern seeing its names
+(let [[x z] [1 2] [a [b c]] [3 [4 5]] [p q] '(6 7) s (+ x z a b c p q)] (println x z a b c p q s))
+; & rest (nil when there's none) and :as
+(let [[a & more] [1 2 3] [b & none] [1] [c d :as all] [4 5] [e & r :as w] '(6 7 8)]
+  (println a more b none c d all e r w))
+; Maps and structs by :keys, with :as
+(defstruct Pt [x y])
+(let [{:keys [x y]} {:x 1 :y 2} {:keys [x2 missing] :as m} {:x2 3} {:keys [px py] :as pt} {:px 5 :py 6}]
+  (println x y x2 missing m px py pt))
+(let [{:keys [x y]} (Pt 7 8)] (println x y))
+; Patterns in fn, defn and doseq; arity is one per pattern
+(defn dist2 [[ax az] [bx bz]] (+ (* (- bx ax) (- bx ax)) (* (- bz az) (- bz az))))
+(println (dist2 [0 0] [3 4]) ((fn [{:keys [a]} [b] & [c]] (list a b c)) {:a 1} [2] 3))
+(doseq [[k v] [[:a 1] [:b 2]]] (println k v))
+(println (recover (fn [] (dist2 [0 0]))))
+; recur in a fn with patterns, and in a loop: one value per binding
+(defn walk [[x & xs] acc] (if xs (recur xs (+ acc x)) (+ acc x)))
+(println (walk [1 2 3 4] 0))
+(println (loop [[a b] [0 1] i 0] (if (< i 10) (recur [b (+ a b)] (+ i 1)) a)))
+; A loop's later values see its earlier names, patterns included
+(println (loop [[a b] [1 2] c (+ a b) i 0] (if (< i 2) (recur [b c] (+ b c) (+ i 1)) [a b c])))
+; Closures over destructured names
+(let [[f g] (let [[a b] [10 20]] [(fn [] a) (fn [] b)])] (println (f) (g)))
+; A local named nth or get doesn't break patterns
+(let [nth 1 get 2 [a b] [3 4] {:keys [k]} {:k 5}] (println nth get a b k))
+; Too short is nth's error; a non-vector is too
+(println (recover (fn [] (let [[a b c] [1 2]] a))) (recover (fn [] (let [[a] nil] a))))
+; nthnext
+(println (nthnext [1 2 3] 1) (nthnext [1 2] 2) (nthnext '(1 2 3) 2) (nthnext nil 0) (nthnext [1] 5))
+; Bad patterns
+(println (compile "(let [[a :as] [1]] a)") (compile "(let [[a & ] [1]] a)") (compile "(let [{:k [a]} {}] a)"))
+(println (compile "(let [[1] [1]] 1)") (compile "(let [{:keys [1]} {}] 1)") (compile "(let [[a & b c] [1]] a)"))

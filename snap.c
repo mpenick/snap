@@ -1528,6 +1528,8 @@ bool builtin_min(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_max(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_count(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_get(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_nthnext(Snap* snap, const SValue* args, int num_args, SValue* result);
+bool builtin_gensym(Snap* snap, const SValue* args, int num_args, SValue* result);
 static bool builtin_int(Snap* snap, const SValue* args, int num_args, SValue* result);
 
 // Unwinds a panic to the innermost frame called by recover and pushes the
@@ -3022,6 +3024,154 @@ static void compile_if(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
   compile_branches(snap, fs, args, tail, false);
 }
 
+/* Destructuring. A pattern in place of a name in let, loop or fn binds the
+ * names in it to parts of the value:
+ *   [a b & more :as all]  (nth v 0), (nth v 1), (nthnext v 2) and v itself
+ *   {:keys [a b] :as m}   (get m :a), (get m :b) and m itself
+ * Patterns nest. The compiler rewrites them into plain bindings of those
+ * calls before compiling, so they run as fast as the calls written out (and
+ * a vector too short for its pattern is nth's error). */
+
+static bool is_pattern(SValue v) { return is_vec(v) || is_map(v); }
+
+// Whether a pattern (or a name) binds name
+static bool binds(SValue pattern, SSym* name) {
+  int i;
+  if (is_sym(pattern)) return as_sym(pattern) == name;
+  if (is_vec(pattern)) {
+    for (i = 0; i < as_vec(pattern)->len; ++i) {
+      if (binds(*snap_vec_at(as_vec(pattern), i), name)) return true;
+    }
+  } else if (is_map(pattern)) {
+    SMap* m = as_map(pattern);
+    for (i = 0; i < m->used; ++i) {
+      if (m->entries[2 * i].bits != SV_DELETED && binds(m->entries[2 * i + 1], name)) return true;
+    }
+  }
+  return false;
+}
+
+// Set while rewriting bindings that themselves bind nth, get or nthnext
+static bool rewrite_hides_globals;
+
+static void check_hidden_globals(Snap* snap, SVec* names, int step) {
+  static const char* globals[] = { "nth", "get", "nthnext" };
+  int i, j;
+  rewrite_hides_globals = false;
+  for (i = 0; i < names->len; i += step) {
+    for (j = 0; j < 3; ++j) {
+      if (binds(*snap_vec_at(names, i), snap_sym_new(snap, globals[j]))) rewrite_hides_globals = true;
+    }
+  }
+}
+
+// A global function, for the rewritten calls: its name, so the call gets the
+// instruction for it, unless a local of that name hides it
+static SValue global_fn(SnapFnState* fs, const char* name, SCFunc fn, Snap* snap) {
+  SSym* sym = snap_sym_new(snap, name);
+  if (rewrite_hides_globals) return create_cfunc(fn);
+  for (; fs; fs = fs->up) {
+    if (resolve_local(fs, sym) >= 0) return create_cfunc(fn);
+  }
+  return create_obj(sym);
+}
+
+// (f a b), with a and b already rooted (symbols, keywords and ints are)
+static SValue call2(Snap* snap, SValue f, SValue a, SValue b) {
+  SnapList list = { NULL, NULL };
+  *list_add(snap, &list) = f;
+  *list_add(snap, &list) = a;
+  *list_add(snap, &list) = b;
+  return list_done(snap, &list);
+}
+
+static SValue new_gensym(Snap* snap) {
+  SValue sym;
+  builtin_gensym(snap, NULL, 0, &sym); // Interned, so it lives forever
+  return sym;
+}
+
+static void push_binding(Snap* snap, SVec* out, SValue name, SValue form) {
+  if (is_obj(form)) snap_anchor(snap, as_obj(form));
+  snap_vec_push(snap, out, name);
+  snap_vec_push(snap, out, form);
+  if (is_obj(form)) snap_release(snap);
+}
+
+// Appends the plain bindings (name, form, ...) for binding pattern to the
+// value of form, to out (which the caller roots)
+static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form, SVec* out) {
+  SValue tmp;
+  int i, n;
+  if (is_sym(pattern)) {
+    push_binding(snap, out, pattern, form);
+    return;
+  }
+  if (!is_pattern(pattern)) {
+    raise(snap, "snap_compile_error", "Expected a name, a [pattern] or a {:keys [names]} pattern");
+  }
+  // The whole value, once, in a name the parts are taken from
+  tmp = is_sym(form) ? form : new_gensym(snap);
+  if (!is_sym(form)) push_binding(snap, out, tmp, form);
+  if (is_vec(pattern)) {
+    SVec* v = as_vec(pattern);
+    SSym* amp = snap_sym_new(snap, "&");
+    SKeyword* as = snap_key_new(snap, "as");
+    for (i = 0, n = 0; i < v->len; ++i) {
+      SValue p = *snap_vec_at(v, i);
+      if (is_sym(p) && as_sym(p) == amp) {
+        if (i + 1 >= v->len) raise(snap, "snap_compile_error", "Expected a pattern after &");
+        destructure(snap, fs, *snap_vec_at(v, ++i),
+                    call2(snap, global_fn(fs, "nthnext", builtin_nthnext, snap), tmp, create_int(n)), out);
+        if (i + 1 < v->len && !(is_obj(*snap_vec_at(v, i + 1)) && as_obj(*snap_vec_at(v, i + 1)) == (SObject*)as)) {
+          raise(snap, "snap_compile_error", "Expected only :as after & <pattern>");
+        }
+      } else if (is_obj(p) && as_obj(p) == (SObject*)as) {
+        if (i + 2 != v->len || !is_sym(*snap_vec_at(v, i + 1))) {
+          raise(snap, "snap_compile_error", "Expected :as <name> at the end of the pattern");
+        }
+        push_binding(snap, out, *snap_vec_at(v, ++i), tmp);
+      } else {
+        destructure(snap, fs, p, call2(snap, global_fn(fs, "nth", builtin_nth, snap), tmp, create_int(n++)), out);
+      }
+    }
+  } else {
+    SMap* m = as_map(pattern);
+    SValue keys_key = create_obj(snap_key_new(snap, "keys")), as_key = create_obj(snap_key_new(snap, "as"));
+    SValue* keys = snap_map_get(m, keys_key);
+    SValue* as = snap_map_get(m, as_key);
+    if (m->len != (keys != NULL) + (as != NULL)) {
+      raise(snap, "snap_compile_error", "Expected only :keys and :as in a map pattern");
+    }
+    if (keys) {
+      if (!is_vec(*keys)) raise(snap, "snap_compile_error", "Expected :keys [names]");
+      for (i = 0; i < as_vec(*keys)->len; ++i) {
+        SValue name = *snap_vec_at(as_vec(*keys), i);
+        if (!is_sym(name)) raise(snap, "snap_compile_error", "Expected :keys [names]");
+        push_binding(snap, out, name,
+                     call2(snap, global_fn(fs, "get", builtin_get, snap), tmp,
+                           create_obj(snap_key_new(snap, as_sym(name)->data))));
+      }
+    }
+    if (as) {
+      if (!is_sym(*as)) raise(snap, "snap_compile_error", "Expected :as <name>");
+      push_binding(snap, out, *as, tmp);
+    }
+  }
+}
+
+// (head first body...), rooted by the caller once made
+static SValue make_form(Snap* snap, SValue head, SValue first, SValue body) {
+  SCons* c = (SCons*)snap_anchor(snap, (SObject*)snap_cons_new(snap));
+  SCons* d = snap_cons_new(snap);
+  c->first = head;
+  c->rest = create_obj(d);
+  d->first = first;
+  d->rest = body;
+  snap_release(snap);
+  return create_obj(c);
+}
+
 static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   int i;
   SSym* amp;
@@ -3037,6 +3187,41 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   }
 
   params = as_vec(args->first);
+  // Patterns: (fn [[x y] r] body...) is (fn [#p r] (let [[x y] #p] body...))
+  for (i = 0; i < params->len && !is_pattern(*snap_vec_at(params, i)); ++i) {}
+  if (i < params->len) {
+    SVec* names;
+    check_hidden_globals(snap, params, 1);
+    names = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, params->len));
+    SVec* pats = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
+    SValue body, form;
+    SCons* fargs;
+    for (i = 0; i < params->len; ++i) {
+      SValue p = *snap_vec_at(params, i);
+      if (is_pattern(p)) {
+        SValue g = new_gensym(snap);
+        snap_vec_push(snap, names, g);
+        snap_vec_push(snap, pats, p);
+        snap_vec_push(snap, pats, g);
+      } else {
+        snap_vec_push(snap, names, p);
+      }
+    }
+    body = make_form(snap, create_form(TK_LET), create_obj(pats), args->rest);
+    snap_anchor(snap, as_obj(body));
+    fargs = snap_cons_new(snap);
+    fargs->first = create_obj(names);
+    form = create_obj(snap_cons_new(snap));
+    as_cons(form)->first = body;
+    fargs->rest = form;
+    snap_anchor(snap, (SObject*)fargs);
+    compile_fn(snap, up, fargs);
+    snap_release(snap);
+    snap_release(snap);
+    snap_release(snap);
+    snap_release(snap);
+    return;
+  }
   fs = fn_state_new(snap);
   fs->depth = 1; // def inside a fn makes locals
 
@@ -3075,6 +3260,70 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   }
 }
 
+static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail);
+
+// A let or loop with patterns among its names. A let becomes plain bindings:
+// (let [[x y] p] ...) is (let [x (nth p 0) y (nth p 1)] ...). A loop needs a
+// slot for each of its bindings, for recur, so
+//   (loop [[x y] p i 0] body...)
+// is
+//   (let [#t p [x y] #t i 0] (loop [#s #t i i] (let [[x y] #s] body...)))
+// where the outer let lets later values use earlier names, as in any loop.
+static void compile_let_patterns(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail) {
+  SVec* bindings = as_vec(args->first);
+  SVec* outer = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
+  SValue form;
+  int i;
+  check_hidden_globals(snap, bindings, 2);
+  if (!loop) {
+    for (i = 0; i < bindings->len; i += 2) {
+      destructure(snap, fs, *snap_vec_at(bindings, i), *snap_vec_at(bindings, i + 1), outer);
+    }
+    form = make_form(snap, create_form(TK_LET), create_obj(outer), args->rest);
+  } else {
+    SVec* slots = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
+    SVec* pats = (SVec*)snap_anchor(snap, (SObject*)snap_vec_new(snap, 0));
+    SValue body, inner;
+    for (i = 0; i < bindings->len; i += 2) {
+      SValue name = *snap_vec_at(bindings, i);
+      if (is_pattern(name)) {
+        SValue t = new_gensym(snap), s = new_gensym(snap);
+        push_binding(snap, outer, t, *snap_vec_at(bindings, i + 1));
+        destructure(snap, fs, name, t, outer);
+        snap_vec_push(snap, slots, s);
+        snap_vec_push(snap, slots, t);
+        snap_vec_push(snap, pats, name);
+        snap_vec_push(snap, pats, s);
+      } else {
+        push_binding(snap, outer, name, *snap_vec_at(bindings, i + 1));
+        snap_vec_push(snap, slots, name);
+        snap_vec_push(snap, slots, name);
+      }
+    }
+    body = make_form(snap, create_form(TK_LET), create_obj(pats), args->rest);
+    snap_anchor(snap, as_obj(body));
+    inner = create_obj(snap_cons_new(snap));
+    as_cons(inner)->first = body;
+    inner = make_form(snap, create_form(TK_LOOP), create_obj(slots), inner);
+    snap_anchor(snap, as_obj(inner));
+    form = create_obj(snap_cons_new(snap));
+    as_cons(form)->first = inner;
+    form = make_form(snap, create_form(TK_LET), create_obj(outer), form);
+    snap_release(snap);
+    snap_release(snap);
+    snap_release(snap);
+    snap_release(snap);
+    snap_anchor(snap, as_obj(form)); // In place of outer, which it holds
+    compile(snap, fs, form, tail);
+    snap_release(snap);
+    return;
+  }
+  snap_anchor(snap, as_obj(form));
+  compile(snap, fs, form, tail);
+  snap_release(snap);
+  snap_release(snap);
+}
+
 // Bindings alternate names and values: (let [a 1 b 2] ...)
 static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, bool tail) {
   int i, base, count;
@@ -3092,6 +3341,11 @@ static void compile_let(Snap* snap, SnapFnState* fs, SCons* args, bool loop, boo
   count = bindings->len / 2;
   if (bindings->len % 2 != 0) {
     raise(snap, "snap_compile_error", "Expected bindings [<id> <expr> ...]");
+  }
+  for (i = 0; i < count && !is_pattern(*snap_vec_at(bindings, 2 * i)); ++i) {}
+  if (i < count) {
+    compile_let_patterns(snap, fs, args, loop, tail);
+    return;
   }
   for (i = 0; i < count; ++i) {
     if (!is_sym(*snap_vec_at(bindings, 2 * i))) {
@@ -4355,6 +4609,28 @@ bool builtin_next(Snap* snap, const SValue* args, int num_args, SValue* result) 
   return true;
 }
 
+// (nthnext coll i) is a list of the values of a list or vector from index i
+// on, or nil if there are none
+bool builtin_nthnext(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SnapList out = { NULL, NULL };
+  SnapInt i, n;
+  if (num_args != 2) return arity_error(snap, result);
+  if (!is_int(args[1]) || as_int(args[1]) < 0) return fail(snap, result, "snap_type_error", "Expected an index of 0 or more");
+  n = as_int(args[1]);
+  if (is_vec(args[0])) {
+    SVec* v = as_vec(args[0]);
+    for (i = n; i < v->len; ++i) *list_add(snap, &out) = *snap_vec_at(v, (int)i);
+    *result = out.head ? list_done(snap, &out) : create_nil();
+  } else if (is_nil(args[0]) || is_cons(args[0])) {
+    SCons* list = is_nil(args[0]) ? NULL : as_cons(args[0]);
+    for (i = 0; list && i < n; ++i) list = as_cons(list->rest);
+    *result = list ? create_obj(list) : create_nil();
+  } else {
+    return fail(snap, result, "snap_type_error", "Expected a vector or list");
+  }
+  return true;
+}
+
 // (concat a b...) is a new list of the values in the lists or vectors
 bool builtin_concat(Snap* snap, const SValue* args, int num_args, SValue* result) {
   int i, j;
@@ -4866,6 +5142,7 @@ void snap_init(Snap* snap) {
   snap_def_cfunc(snap, "first", builtin_first);
   snap_def_cfunc(snap, "rest", builtin_rest);
   snap_def_cfunc(snap, "next", builtin_next);
+  snap_def_cfunc(snap, "nthnext", builtin_nthnext);
   snap_def_cfunc(snap, "concat", builtin_concat);
   snap_def_cfunc(snap, "vec", builtin_vec);
   snap_def_cfunc(snap, "list?", builtin_islist);

@@ -1,0 +1,17 @@
+1 2 3 4 5 6 7 28
+1 (2 3) 1 nil 4 5 [4 5] 6 (7 8) (6 7 8)
+1 2 3 nil {:x2 3} 5 6 {:px 5 :py 6}
+7 8
+25 (1 2 3)
+:a 1
+:b 2
+<err :snap_arity_error "Invalid number of arguments">
+10
+55
+[3 5 8]
+10 20
+1 2 3 4 5
+<err :snap_index_error "Index out of range"> <err :snap_type_error "Expected a vector">
+(2 3) nil (3) nil nil
+<err :snap_compile_error "Expected :as <name> at the end of the pattern"> <err :snap_compile_error "Expected a pattern after &"> <err :snap_compile_error "Expected only :keys and :as in a map pattern">
+<err :snap_compile_error "Expected a name, a [pattern] or a {:keys [names]} pattern"> <err :snap_compile_error "Expected :keys [names]"> <err :snap_compile_error "Expected only :as after & <pattern>">

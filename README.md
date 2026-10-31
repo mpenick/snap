@@ -67,6 +67,22 @@ whether there are any. `nil` works as an empty list (`first`, `rest`,
 `let` and `loop` bindings alternate names and values, and are bound in order,
 so each value can use the names before it: `(let [a 1 b (+ a 1)] ...)`.
 
+In `let`, `loop` and `fn` (so `defn` and `doseq` too), a pattern can stand
+in for a name and bind the names in it to parts of the value:
+
+```clojure
+(let [[x z] p] ...)                  ; x = (nth p 0), z = (nth p 1)
+(let [[a b & more :as all] v] ...)   ; more = (nthnext v 2), all = v
+(let [{:keys [x y] :as m} pt] ...)   ; x = (get pt :x), m = pt
+(defn dist [[ax az] [bx bz]] ...)
+(doseq [[k v] pairs] ...)
+```
+
+Patterns nest. They compile to the `nth` and `get` calls they stand for, so
+they're as fast, and a vector too short for its pattern is `nth`'s error.
+`{:keys [...]}` works on structs too, and a missing key is `nil`. In a `loop`,
+`recur` takes one value for each binding, as usual: `(recur [b (+ a b)] ...)`.
+
 Values are 63-bit integers, floats, strings, keywords (`:name`), symbols,
 vectors, maps, lists, structs, types, `nil`, `true`, `false`, functions and
 errors. `nil` and `false` are false, everything else is true. Integer
@@ -83,7 +99,8 @@ Built-in functions:
 * Predicates: `nil?`, `vector?`, `map?`, `list?` and `sym?`
 * Errors: `err`, `err?`, `err-kind` and `err-msg`
 * Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
-  instead of `()` at the end), `concat` (of lists and vectors)
+  instead of `()` at the end), `nthnext` (the values from an index on, of a
+  list or vector, or `nil`), `concat` (of lists and vectors)
   and `vec` (a list to a vector). `count` and `nth` work on lists too. `nil`
   counts as an empty list.
 * Macros: `gensym` and `macroexpand` (see below)
