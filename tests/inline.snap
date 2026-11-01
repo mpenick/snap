@@ -1,0 +1,69 @@
+; vi: filetype=scheme
+; Calls to small global functions are inlined, guarded so that they act as
+; calls would
+
+(defn clamp [x lo hi] (if (< x lo) lo (if (> x hi) hi x)))
+(defn sq [x] (* x x))
+(defn dist2 [ax az bx bz] (+ (sq (- bx ax)) (sq (- bz az))))
+(defn use [] [(clamp 5 0 3) (clamp -1 0 3) (clamp 1.5 0.0 3.0) (dist2 0 0 3 4)])
+(println (use))
+
+; Redefining a function is seen by code it was inlined in
+(defn sq [x] (+ x x))
+(println (use))
+(defn sq [x] (* x x))
+
+; The body's names mean what they do in the function, not in the caller
+(def scale 10)
+(defn scaled [x] (* x scale))
+(defn caller [scale x] [scale (scaled x)])
+(println (caller 2 3))
+
+; Arguments are evaluated once, in order, before the body
+(def log [])
+(defn note [x] (push! log x) x)
+(defn add3 [a b c] (+ a b c))
+(println (add3 (note 1) (note 2) (note 3)) log)
+
+; A parameter that's set! doesn't change the caller's variable
+(defn bump [n] (set! n (+ n 1)) n)
+(defn keeps [] (let [k 5] [(bump k) k]))
+(println (keeps))
+
+; Nor does a macro's set! of it
+(defmacro inc! [v] `(set! ~v (+ ~v 1)))
+(defn bump2 [n] (inc! n) n)
+(defn keeps2 [] (let [k 7] [(bump2 k) k]))
+(println (keeps2))
+
+; A caller's variable that's set! is read when the call happens
+(defn first-of [a b] a)
+(defn order [] (let [x 1] [(first-of x (begin (set! x 2) x)) x]))
+(println (order))
+
+; Recursion, wrong arity and errors act as calls do
+(defn fact [n] (if (< n 2) 1 (* n (fact (- n 1)))))
+(defn fact5 [] (fact 5))
+(println (fact5))
+(defn wrong [] (sq 1 2))
+(println (recover wrong))
+(defn bad [] (sq :x))
+(println (recover bad))
+
+; Functions using try (which returns from the function) aren't inlined
+(defn checked [x] (try (if (< x 0) (err :neg x) nil)) (* x 2))
+(defn use-checked [x] [(checked x) :after])
+(println (use-checked 2) (use-checked -1))
+
+; Functions with loops and lets inside
+(defn sum-to [n] (let [s 0] (dotimes [i n] (set! s (+ s i))) s))
+(defn sums [] [(sum-to 4) (sum-to 10)])
+(println (sums))
+(defn mid [a b] (let [d (- b a)] (+ a (/ d 2))))
+(defn mids [d] [(mid 0 d) (mid 10 20)])
+(println (mids 8))
+
+; Calls in tail position and as conditions
+(defn pos? [x] (> x 0))
+(defn sign [x] (cond (pos? x) 1 (pos? (- x)) -1 true 0))
+(println (sign 5) (sign -5) (sign 0))

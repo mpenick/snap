@@ -216,8 +216,11 @@ The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,
 `(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map` (over
 one collection or several, as in `(map + xs ys)`, stopping at the shortest),
-`filter`, `reduce` and `(sort-by key coll)` (which make a vector), and `(some f
-coll)` (the first truthy `(f x)`, or `nil`) and `(every? f coll)` (whether
+`filter`, `reduce`, `(keep f coll)` (each `(f x)` that isn't `nil`), `(remove
+f coll)` (each `x` where `(f x)` is falsy), `(map-indexed f coll)` (each `(f i
+x)`), `(mapcat f coll)` (the items of each `(f x)`, one after another) and
+`(sort-by key coll)` (which make a vector), `(index-of coll x)` (the position
+of the first item `=` to `x`, or `nil`), and `(some f coll)` (the first truthy `(f x)`, or `nil`) and `(every? f coll)` (whether
 `(f x)` is truthy for all of them), which stop as soon as they know. All of
 these take a vector, list or map; a map's items are its `[k v]` entries, each
 a new pair (`doseq` with a `[k v]` pattern makes none). It also has the
@@ -639,12 +642,29 @@ it.
   returns. The compiler finds the `set!`s by looking through the function
   first. If a macro makes one after a closure copied the variable, the forms
   are compiled again, with that name shared.
-* **Inline loops:** `some`, `every?`, `map` (of one collection), `filter` and
-  `reduce` called with a literal `fn` run the loop in place: no closure is
+* **Inline loops:** `some`, `every?`, `map` (of one collection), `filter`,
+  `reduce`, `keep`, `remove`, `map-indexed` and `mapcat` called with a literal `fn` run the loop in place: no closure is
   made and the fn isn't called, so `(some (fn [x] (= x k)) v)` is about as
   fast as a hand-written `loop`. When it runs, a check falls back to the call
   as written if the collection isn't a vector or map, or the global no longer
   holds the stdlib function. The fn mustn't take `& rest` or use `recur`.
+* **Inline functions:** a call to a global that holds a small function (at
+  most 8 parameters, 40 values of source and 40 instructions, no `& rest`,
+  closed-over variables, `fn`, `recur`, `def`, `defmacro` or `try`) compiles
+  its body in place. A `GUARD_GLOBAL` instruction checks the global still
+  holds that function and otherwise jumps to the call as written, so
+  redefining it still works. The arguments go into new locals, except that a
+  literal, or a local the caller never assigns, is used where it is; if the
+  body assigns or closes over such a parameter, the caller is compiled again
+  without that shortcut. While the body compiles the caller's locals are
+  hidden, so its names mean what they mean in the function. Inlining goes 2
+  deep and never into a function's own body, and a function keeps its own
+  name in profiles. It makes `(defn dot [a b] ...)`-style helpers in numeric
+  loops about as fast as writing them out.
+* **Peephole:** an instruction that makes a value (`nth`, `count`, `get`,
+  `int`, `min`, `max`, a C call) followed by a store to a local writes the
+  local itself and skips the store, and a jump to a jump goes straight to
+  where the second one goes.
 * **The stack** is one array for every frame, which grows (by reallocating
   and fixing the pointers into it) up to `SNAP_MAX_STACK`. It only moves when
   a function is called, so the VM reloads its pointers after a C function

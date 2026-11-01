@@ -8,4 +8,5 @@ true true true <err :snap_arity_error "Invalid number of arguments">
 []
 []
 "pairs" :vector 2 true
+"wrap" :vector 1 true
 <err :snap_arity_error "Invalid number of arguments"> <err :snap_arity_error "Invalid number of arguments">

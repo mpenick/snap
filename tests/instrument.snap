@@ -11,27 +11,37 @@
 (defn outer [] (let [g (fn [n] [n n])] (g 1)))
 (defmethod area [p P] [(get p :x)])
 (def finish (fn [] (if (gc-step 1000000) nil (recur))))
-(defn run-temp [] (let [f ((compile "(fn [] [1 2 3])"))] (dotimes [_ 10] (f)) nil))
+(defn run-temp [_] (let [f ((compile "(fn [] [1 2 3])"))] (dotimes [_ 10] (f)) nil))
 (defn show [rows names]
   (doseq [[name kind count bytes] rows]
     (when (some (fn [n] (= n name)) names) (println name kind count (> bytes 0)))))
 (defn some [f v] (loop [i 0] (if (< i (count v)) (if (f (nth v i)) true (recur (+ i 1))) false)))
 
+; A small function called by name is inlined (its allocations count in
+; its caller's), so these call through call, as a local
+(defn call [f x] (f x))
+(defn pair-of [x] [x x])
+(defn wrap [_] (pair-of 1))
+
 ; By function and kind: a global, a function made in one, a method, and
 ; code freed while profiling
 (alloc-profile! true)
-(dotimes [i 100] (pairs {:a 1 :b 2}) (outer) (area (P 1 2)))
-(run-temp)
+(dotimes [i 100] (call pairs {:a 1 :b 2}) (outer) (area (P 1 2)))
+(call run-temp nil)
 (finish) (gc-step 0) (finish)
 (show (alloc-profile) ["pairs" "outer/fn" "area[P]" "<freed>"])
 ; Reading it stops and clears it, and nothing's counted while it's off
 (println (alloc-profile))
-(pairs {:a 1})
+(call pairs {:a 1})
 (println (alloc-profile))
 ; Paused, then started afresh
 (alloc-profile! true)
-(pairs {:a 1})
+(call pairs {:a 1})
 (alloc-profile! false)
-(pairs {:a 1})
+(call pairs {:a 1})
 (show (alloc-profile) ["pairs"])
+; pair-of inlined in wrap
+(alloc-profile! true)
+(call wrap nil)
+(show (alloc-profile) ["pair-of" "wrap"])
 (println (recover (fn [] (alloc-profile! 1 2))) (recover (fn [] (alloc-profile 1))))

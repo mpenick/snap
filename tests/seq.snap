@@ -53,3 +53,18 @@
 (defn bigm [n] (let [m {}] (dotimes [i n] (put! m i (* 1.5e300 i))) m))
 (def bm (bigm 3000))
 (println (count (vec bm)) (nth (nth (vec bm) 2999) 0) (count (filter (fn [[k v]] (= (% k 2) 0)) bm)))
+
+; keep, remove, map-indexed, mapcat and index-of, inline with a literal fn and
+; as calls
+(def big (fn [x] (when (> x 1) (* x 10))))
+(println (keep (fn [x] (when (> x 1) (* x 10))) [1 2 3]) (keep (fn [x] x) [1 nil false 2]) (keep big '(1 2 3)) (keep big nil))
+(println (remove (fn [x] (> x 1)) [1 2 3 0]) (remove (fn [[k v]] (= v 2)) {:a 1 :b 2}) (remove nil? '(1 nil 2)))
+(println (map-indexed (fn [i x] [i x]) [:a :b]) (map-indexed vector '(:a :b)) (map-indexed (fn [i [k v]] [i k]) {:a 1}))
+(println (mapcat (fn [x] [x x]) [1 2]) (mapcat (fn [x] (list x)) [1 2]) (mapcat (fn [x] nil) [1 2]) (mapcat (fn [x] {:k x}) [1]) (mapcat vector [1 2]))
+(println (index-of [1 2 3] 2) (index-of [1 2] 5) (index-of '(:a :b) :b) (index-of [[1 2]] [1 2]) (index-of {:a 1} [:a 1]) (index-of nil 1))
+(defn odd [x] (= (% x 2) 1))
+(defn kinds [v] [(keep (fn [x] (when (odd x) x)) v) (remove (fn [x] (odd x)) v) (map-indexed (fn [i x] (* i x)) v)])
+(println (kinds (range 5)) (kinds '(1 2)))
+(println (recover (fn [] (mapcat (fn [x] 5) [1]))) (recover (fn [] (keep (fn [x] (+ x 1)) [:a]))))
+(def keep (fn [f c] :mine))
+(println (keep (fn [x] x) [1]))

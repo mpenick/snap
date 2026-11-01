@@ -90,6 +90,44 @@
   (let [v (if (or (vector? coll) (map? coll)) coll (vec coll)) n (count v)]
     (loop [acc init i 0] (if (< i n) (recur (f acc (nth v i)) (+ i 1)) acc))))
 
+; keep, remove, map-indexed and mapcat take a vector, list or map (as [k v]
+; entries) like map and make a vector. (keep f coll) is each (f x) that isn't
+; nil, (remove f coll) each x where (f x) is falsy, (map-indexed f coll) each
+; (f i x) with i from 0, and (mapcat f coll) the items of each (f x) (a
+; vector, list or map) one after another.
+(defn keep [f coll]
+  (let [v (if (or (vector? coll) (map? coll)) coll (vec coll)) n (count v) out []]
+    (loop [i 0]
+      (if (< i n)
+        (let [r (f (nth v i))] (if (= r nil) nil (push! out r)) (recur (+ i 1)))
+        out))))
+
+(defn remove [f coll]
+  (let [v (if (or (vector? coll) (map? coll)) coll (vec coll)) n (count v) out []]
+    (loop [i 0]
+      (if (< i n)
+        (let [x (nth v i)] (if (f x) nil (push! out x)) (recur (+ i 1)))
+        out))))
+
+(defn map-indexed [f coll]
+  (let [v (if (or (vector? coll) (map? coll)) coll (vec coll)) n (count v) out []]
+    (loop [i 0] (if (< i n) (begin (push! out (f i (nth v i))) (recur (+ i 1))) out))))
+
+(defn mapcat [f coll]
+  (let [v (if (or (vector? coll) (map? coll)) coll (vec coll)) n (count v) out []]
+    (loop [i 0]
+      (if (< i n)
+        (let [r (f (nth v i)) r (if (vector? r) r (vec r)) m (count r)]
+          (loop [j 0] (if (< j m) (begin (push! out (nth r j)) (recur (+ j 1))) nil))
+          (recur (+ i 1)))
+        out))))
+
+; (index-of coll x) is the position of the first item of a vector, list or map
+; (as [k v] entries) that's = x, or nil
+(defn index-of [coll x]
+  (let [v (if (or (vector? coll) (map? coll)) coll (vec coll)) n (count v)]
+    (loop [i 0] (if (< i n) (if (= (nth v i) x) i (recur (+ i 1))) nil))))
+
 ; (some f coll) is the first truthy (f x) for x in a vector, list or map (as
 ; [k v] entries), or nil. (every? f coll) is whether (f x) is truthy for every
 ; x, so true for none. Both stop as soon as they know.

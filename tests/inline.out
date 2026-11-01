@@ -1,0 +1,14 @@
+[3 0 1.500000 25]
+[3 0 1.500000 14]
+[2 30]
+6 [1 2 3]
+[6 5]
+[8 7]
+[1 2]
+120
+<err :snap_arity_error "Invalid number of arguments">
+<err :snap_type_error "Expected numbers">
+[4 :after] [<err :neg -1> :after]
+[6 45]
+[4 15]
+1 -1 0

@@ -130,7 +130,7 @@ typedef struct SStr_ {
 } SStr;
 
 // Symbols are interned and hold their global binding (undef when unbound)
-#define SNAP_NUM_INLINE_FNS 5
+#define SNAP_NUM_INLINE_FNS 9
 
 typedef struct SSym_ {
   SOBJECT_FIELDS
@@ -257,6 +257,8 @@ struct SCode_ {
   int max_stack_size;
   struct SFieldCache_* caches; // One for each (get x :k) and (put! x :k v) (see GET)
   int num_caches;
+  int inline_form; // The constant holding its ([params] body...), for calls to
+                   // inline it in their place, or -1 (see inline_global)
 };
 
 // Where a call site last found a struct field: for structs of type, key is

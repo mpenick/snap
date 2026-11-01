@@ -8,6 +8,9 @@
 
 #define MAX_LOCALS 256
 #define MAX_UPVALS 256
+#define MAX_INLINE_ARGS 8 // Functions inline_global() inlines: up to this many parameters
+#define INLINE_SIZE 40    // and values in their body (as written, and
+                          // instructions once compiled, macros expanded)
 
 static void print_code(SCode* code, int indent);
 
@@ -21,6 +24,9 @@ typedef struct SnapLocal_ {
   bool captured; // Closed over by an inner fn, through an upvalue
   bool copied;   // Closed over by an inner fn, by value
   bool assigned; // A set! of it (maybe), so it can't be copied
+  int alias;     // The local it names instead of its own slot, or -1: an
+                 // inlined function's parameter, passed a local
+  int constant;  // Or the constant it names, passed a literal, or -1
 } SnapLocal;
 
 // The target of a recur: a loop, or the whole fn
@@ -57,6 +63,10 @@ typedef struct SnapFnState_ {
   int num_caches;  // Field caches for GET and PUT
   SnapLoop* loop;  // Innermost recur target, NULL at the top-level
   SnapLoop fn_loop;
+  int inline_form; // See SCode
+  int barrier;     // Locals below it can't be seen: an inlined function's
+  int inlining;    // body is being compiled (inside this many)
+  SCode* inlined[2]; // and these are the functions
 } SnapFnState;
 
 void gc_mark_fn_states(Snap* snap) {
@@ -71,6 +81,7 @@ static SnapFnState* fn_state_new(Snap* snap) {
   mvec_init(&fs->insts, SnapInst, 16);
   mvec_init(&fs->constants, SValue, 8);
   fs->last_target = -1;
+  fs->inline_form = -1;
   fs->snap = snap;
   fs->up = snap->fn_state;
   snap->fn_state = fs;
@@ -124,9 +135,28 @@ static void return_vectors(SnapFnState* fs) {
   }
 }
 
+// A jump to a JUMP goes straight to where that one goes, as the branches of
+// an if that's a value do (each jumps past the other, often to another jump)
+static void thread_jumps(SnapFnState* fs) {
+  int i;
+  for (i = 0; i < fs->insts.vsize; ++i) {
+    SnapInst* inst = &fs->insts.vitems[i];
+    int op = INST_OP(*inst), target, steps;
+    if (op != JUMP && op != JUMP_FALSE && op != JUMP_TRUE && op != JUMP_FALSE_OR_POP && op != JUMP_TRUE_OR_POP) continue;
+    target = i + 1 + INST_ARG(*inst);
+    for (steps = 0; steps < 8 && target < fs->insts.vsize && INST_OP(fs->insts.vitems[target]) == JUMP; ++steps) {
+      int next = target + 1 + INST_ARG(fs->insts.vitems[target]);
+      if (next == target) break;
+      target = next;
+    }
+    *inst = INST(op, target - (i + 1));
+  }
+}
+
 static SCode* code_new(Snap* snap, SnapFnState* fs) {
   SCode* c = (SCode*)gc_new(snap, STYPE_CODE, sizeof(SCode));
   return_vectors(fs);
+  thread_jumps(fs);
   specialize(fs);
   c->insts = fs->insts.vitems;
   c->insts_count = fs->insts.vsize;
@@ -141,6 +171,7 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   c->max_stack_size = fs->max_stack + 2; /* Add enough room for raising errors */
   c->num_caches = fs->num_caches;
   c->caches = (SFieldCache*)calloc(fs->num_caches > 0 ? fs->num_caches : 1, sizeof(SFieldCache));
+  c->inline_form = fs->inline_form;
   heap_add(snap, code_extra_bytes(c));
 
   // The code object owns the buffers now
@@ -423,18 +454,43 @@ static int add_local(Snap* snap, SnapFnState* fs, SSym* name, bool shadow) {
   local->captured = false;
   local->copied = false;
   local->assigned = name->assigned || is_set(fs, name);
+  local->alias = -1;
+  local->constant = -1;
   if (fs->num_locals > fs->max_locals) {
     fs->max_locals = fs->num_locals;
   }
   return fs->num_locals - 1;
 }
 
-static int resolve_local(SnapFnState* fs, SSym* name) {
+// The entry for a local name, or -1; inside an inlined function, only its
+// own (see inline_global)
+static int local_entry(SnapFnState* fs, SSym* name) {
   int i;
-  for (i = fs->num_locals - 1; i >= 0; --i) {
+  for (i = fs->num_locals - 1; i >= fs->barrier; --i) {
     if (fs->locals[i].name == name) return i;
   }
   return -1;
+}
+
+// The slot of a local name, or -1 (for a name that's a constant too)
+static int resolve_local(SnapFnState* fs, SSym* name) {
+  int i = local_entry(fs, name);
+  if (i < 0 || fs->locals[i].constant >= 0) return -1;
+  return fs->locals[i].alias >= 0 ? fs->locals[i].alias : i;
+}
+
+// The constant a local name stands for, or -1
+static int constant_local(SnapFnState* fs, SSym* name) {
+  int i = local_entry(fs, name);
+  return i >= 0 ? fs->locals[i].constant : -1;
+}
+
+// An inlined function's parameter that can't be used the way it was passed
+// (see inline_global): compile again, with the name never passed that way
+static void unalias(Snap* snap, SSym* name) {
+  name->assigned = true;
+  snap->compile_restart = true;
+  longjmp(snap->jmp, 1);
 }
 
 static int add_upval(Snap* snap, SnapFnState* fs, int index, bool copied, bool islocal) {
@@ -452,7 +508,8 @@ static int add_upval(Snap* snap, SnapFnState* fs, int index, bool copied, bool i
 
 static int resolve_upval(Snap* snap, SnapFnState* fs, SSym* name) {
   int index;
-  if (fs->top) return -1;
+  if (fs->top || fs->inlining) return -1;
+  if (constant_local(fs->up, name) >= 0) unalias(snap, name); // Can't be closed over
   index = resolve_local(fs->up, name);
   if (index >= 0) {
     SnapLocal* local = &fs->up->locals[index];
@@ -486,7 +543,9 @@ static int add_global_constant(Snap* snap, SnapFnState* fs, SValue val) {
 
 static void load_variable(Snap* snap, SnapFnState* fs, SSym* name) {
   int index;
-  if ((index = resolve_local(fs, name)) >= 0) {
+  if ((index = constant_local(fs, name)) >= 0) {
+    emit(fs, LOAD_CONSTANT, index);
+  } else if ((index = resolve_local(fs, name)) >= 0) {
     emit(fs, LOAD_LOCAL, index);
   } else if ((index = resolve_upval(snap, fs, name)) >= 0) {
     emit(fs, (fs->upvals[index] & 2) ? LOAD_COPIED : LOAD_CLOSED, index);
@@ -528,7 +587,10 @@ static SnapLocal* upval_local(SnapFnState* fs, int index) {
 }
 
 static void store_variable(Snap* snap, SnapFnState* fs, SSym* name) {
-  int index;
+  int index = local_entry(fs, name);
+  // An inlined function's parameter that names the caller's local or a
+  // constant can't be stored to
+  if (index >= 0 && (fs->locals[index].alias >= 0 || fs->locals[index].constant >= 0)) unalias(snap, name);
   if ((index = resolve_local(fs, name)) >= 0) {
     assign_local(snap, &fs->locals[index]);
     emit(fs, STORE_LOCAL, index);
@@ -562,6 +624,20 @@ static bool contains_form(SValue expr, int form) {
     }
   }
   return false;
+}
+
+// How many values make up expr, counting up to limit
+static int form_size(SValue expr, int limit) {
+  int n = 1, i;
+  if (is_cons(expr)) {
+    SCons* curr;
+    for (curr = as_cons(expr); curr && n < limit; curr = as_cons(curr->rest)) n += form_size(curr->first, limit - n);
+  } else if (is_vec(expr)) {
+    for (i = 0; i < as_vec(expr)->len && n < limit; ++i) n += form_size(*snap_vec_at(as_vec(expr), i), limit - n);
+  } else if (is_map(expr)) {
+    for (i = 0; i < 2 * as_map(expr)->used && n < limit; ++i) n += form_size(as_map(expr)->entries[i], limit - n);
+  }
+  return n;
 }
 
 // Conservative check for a use of a variable (shadowing gives false positives)
@@ -609,6 +685,7 @@ static int direct_operand(Snap* snap, SnapFnState* fs, SValue expr) {
   int index;
   switch (snap_type(expr)) {
     case STYPE_SYM:
+      if ((index = constant_local(fs, as_sym(expr))) >= 0) return index + 1 <= MAX_OPERAND + 1 ? -(index + 1) : 0;
       index = resolve_local(fs, as_sym(expr));
       return index >= 0 && index + 1 <= MAX_OPERAND ? index + 1 : 0;
     case STYPE_INT: case STYPE_FLOAT: case STYPE_STR:
@@ -708,8 +785,8 @@ static void compile_defmacro(Snap* snap, SnapFnState* fs, SCons* args) {
 static bool find_macro(SnapFnState* fs, SValue name, SValue* macro) {
   SValue val;
   for (; fs; fs = fs->up) {
-    if (resolve_local(fs, as_sym(name)) >= 0) return false;
-    if (fs->top) break;
+    if (local_entry(fs, as_sym(name)) >= 0) return false;
+    if (fs->top || fs->inlining) break;
   }
   val = as_sym(name)->value;
   if (!is_obj(val) || !as_obj(val)->macro) return false;
@@ -911,7 +988,7 @@ static SValue global_fn(SnapFnState* fs, const char* name, SCFunc fn, Snap* snap
   SSym* sym = snap_sym_new(snap, name);
   if (rewrite_hides_globals) return create_cfunc(fn);
   for (; fs; fs = fs->up) {
-    if (resolve_local(fs, sym) >= 0) return create_cfunc(fn);
+    if (local_entry(fs, sym) >= 0) return create_cfunc(fn);
   }
   return create_obj(sym);
 }
@@ -1225,6 +1302,16 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
 
   compile_body(snap, fs, as_cons(args->rest), true);
   emit(fs, RETURN, 0);
+
+  // A small function keeps its source, for calls to it to inline (see
+  // inline_global). What it closes over or defines, a recur to the function
+  // itself, or a try (which returns from it), can't be inlined.
+  if (!fs->variadic && fs->num_upvals == 0 && params->len <= MAX_INLINE_ARGS &&
+      form_size(args->rest, INLINE_SIZE + 1) <= INLINE_SIZE && !contains_form(args->rest, TK_FN) &&
+      !contains_form(args->rest, TK_RECUR) && !contains_form(args->rest, TK_DEF) &&
+      !contains_form(args->rest, TK_DEFMACRO) && !contains_form(args->rest, TK_TRY)) {
+    fs->inline_form = add_global_constant(snap, fs, create_obj(args));
+  }
 
   code = code_new(snap, fs);
   fn_state_free(snap);
@@ -1682,8 +1769,8 @@ static void compile_effect(Snap* snap, SnapFnState* fs, SValue expr) {
   snap->c_depth--;
 }
 
-static const char* const inline_names[SNAP_NUM_INLINE_FNS] = { "some", "every?", "map", "filter", "reduce" };
-enum { INLINE_SOME, INLINE_EVERY, INLINE_MAP, INLINE_FILTER, INLINE_REDUCE };
+static const char* const inline_names[SNAP_NUM_INLINE_FNS] = { "some", "every?", "map", "filter", "reduce", "keep", "remove", "map-indexed", "mapcat" };
+enum { INLINE_SOME, INLINE_EVERY, INLINE_MAP, INLINE_FILTER, INLINE_REDUCE, INLINE_KEEP, INLINE_REMOVE, INLINE_MAP_INDEXED, INLINE_MAPCAT };
 
 // Called once stdlib.snap has run: the functions inline_seq() inlines
 void compile_init_inline(Snap* snap) {
@@ -1698,8 +1785,8 @@ void compile_init_inline(Snap* snap) {
 // Whether name is a global here, not a local or closed over variable
 static bool is_global_name(SnapFnState* fs, SSym* name) {
   for (; fs; fs = fs->up) {
-    if (resolve_local(fs, name) >= 0) return false;
-    if (fs->top) break;
+    if (local_entry(fs, name) >= 0) return false;
+    if (fs->top || fs->inlining) break;
   }
   return true;
 }
@@ -1728,7 +1815,7 @@ static SValue make_vec(Snap* snap, int n, ...) {
 }
 
 // (some (fn [x] body...) coll), and the same with every?, map (of one
-// collection), filter and reduce, runs the loop in place, with the fn's
+// collection), filter, reduce, keep, remove, map-indexed and mapcat, runs the loop in place, with the fn's
 // parameters bound by a let, so there's no closure to make and no calls:
 //   (let [#c coll]
 //     (if (#inline k #c)
@@ -1744,11 +1831,13 @@ static SValue make_vec(Snap* snap, int n, ...) {
 // the fn is made, which nothing can tell. A fn that takes the rest of its
 // arguments or has a recur stays a call.
 static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
-  static const int num_params[SNAP_NUM_INLINE_FNS] = { 1, 1, 1, 1, 2 };
+  static const int num_params[SNAP_NUM_INLINE_FNS] = { 1, 1, 1, 1, 2, 1, 1, 2, 1 };
   SSym* name = as_sym(sexpr->first);
   SSym* count = snap_sym_new(snap, "count");
   SSym* nth = snap_sym_new(snap, "nth");
   SSym* push = snap_sym_new(snap, "push!");
+  SSym* is_vector = snap_sym_new(snap, "vector?");
+  SSym* to_vec = snap_sym_new(snap, "vec");
   SSym* amp = snap_sym_new(snap, "&");
   SCons* args = as_cons(sexpr->rest);
   SCons* fn_args;
@@ -1771,9 +1860,11 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   if (params->len != num_params[k] || contains_form(fn_args->rest, TK_RECUR)) return false;
   // The loop's own calls must reach the globals, from where they are
   if (!is_global_name(fs, count) || !is_global_name(fs, nth) || !is_global_name(fs, push)) return false;
+  if (k == INLINE_MAPCAT && (!is_global_name(fs, is_vector) || !is_global_name(fs, to_vec))) return false;
   for (j = 0; j < params->len; ++j) {
     SValue p = *snap_vec_at(params, j);
     if (binds(snap, p, amp) || binds(snap, p, count) || binds(snap, p, nth) || binds(snap, p, push)) return false;
+    if (k == INLINE_MAPCAT && (binds(snap, p, is_vector) || binds(snap, p, to_vec))) return false;
   }
 
   c = new_gensym(snap);
@@ -1785,7 +1876,11 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   if (k == INLINE_REDUCE) {
     a = new_gensym(snap); // The initial value; call is made below
     call = create_nil();
-  } else if (k == INLINE_FILTER) {
+  } else if (k == INLINE_MAP_INDEXED) {
+    call = make_form(snap, create_form(TK_LET), make_vec(snap, 4, *snap_vec_at(params, 0), i, *snap_vec_at(params, 1), item),
+                     fn_args->rest);
+    anchor(snap, as_obj(call));
+  } else if (k == INLINE_FILTER || k == INLINE_REMOVE) {
     x = new_gensym(snap);
     call = make_form(snap, create_form(TK_LET), make_vec(snap, 2, *snap_vec_at(params, 0), x), fn_args->rest);
     anchor(snap, as_obj(call));
@@ -1812,7 +1907,7 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
                          make_list(snap, 4, create_form(TK_IF), call, next, create_bool(false)),
                          create_bool(true));
         break;
-      case INLINE_MAP:
+      case INLINE_MAP: case INLINE_MAP_INDEXED:
         loop = make_list(snap, 4, create_form(TK_IF), more,
                          make_list(snap, 3, create_form(TK_BEGIN), make_list(snap, 3, create_obj(push), out, call), next),
                          out);
@@ -1825,6 +1920,46 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
                                    next),
                          out);
         break;
+      case INLINE_REMOVE:
+        loop = make_list(snap, 4, create_form(TK_IF), more,
+                         make_list(snap, 4, create_form(TK_LET), make_vec(snap, 2, x, item),
+                                   make_list(snap, 4, create_form(TK_IF), call, create_nil(),
+                                             make_list(snap, 3, create_obj(push), out, x)),
+                                   next),
+                         out);
+        break;
+      case INLINE_KEEP: {
+        // (let [#r call] (if (= #r nil) nil (push! out #r)) (recur ...))
+        SValue r = new_gensym(snap);
+        loop = make_list(snap, 4, create_form(TK_IF), more,
+                         make_list(snap, 4, create_form(TK_LET), make_vec(snap, 2, r, call),
+                                   make_list(snap, 4, create_form(TK_IF), make_list(snap, 3, create_form(TK_EQ), r, create_nil()),
+                                             create_nil(), make_list(snap, 3, create_obj(push), out, r)),
+                                   next),
+                         out);
+        break;
+      }
+      case INLINE_MAPCAT: {
+        // (let [#r call #r (if (vector? #r) #r (vec #r)) #m (count #r)]
+        //   (loop [#j 0] (if (< #j #m) (begin (push! out (nth #r #j)) (recur (+ #j 1))) nil))
+        //   (recur ...))
+        SValue r = new_gensym(snap), m = new_gensym(snap), j = new_gensym(snap), inner;
+        inner = make_list(snap, 4, create_form(TK_IF), make_list(snap, 3, create_form(TK_LT), j, m),
+                          make_list(snap, 3, create_form(TK_BEGIN),
+                                    make_list(snap, 3, create_obj(push), out, make_list(snap, 3, create_obj(nth), r, j)),
+                                    make_list(snap, 2, create_form(TK_RECUR), make_list(snap, 3, create_form(TK_ADD), j, one))),
+                          create_nil());
+        inner = make_list(snap, 3, create_form(TK_LOOP), make_vec(snap, 2, j, zero), inner);
+        loop = make_list(snap, 4, create_form(TK_IF), more,
+                         make_list(snap, 4, create_form(TK_LET),
+                                   make_vec(snap, 6, r, call,
+                                            r, make_list(snap, 4, create_form(TK_IF), make_list(snap, 2, create_obj(is_vector), r), r,
+                                                         make_list(snap, 2, create_obj(to_vec), r)),
+                                            m, make_list(snap, 2, create_obj(count), r)),
+                                   inner, next),
+                         out);
+        break;
+      }
       default: { // INLINE_REDUCE
         SValue acc = new_gensym(snap);
         call = make_form(snap, create_form(TK_LET),
@@ -1841,7 +1976,7 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
     loop = make_list(snap, 3, create_form(TK_LOOP), bindings, loop);
   }
   fast = make_list(snap, 3, create_form(TK_LET),
-                   (k == INLINE_MAP || k == INLINE_FILTER)
+                   (k != INLINE_SOME && k != INLINE_EVERY && k != INLINE_REDUCE)
                      ? make_vec(snap, 4, n, make_list(snap, 2, create_obj(count), c), out, make_vec(snap, 0))
                      : make_vec(snap, 2, n, make_list(snap, 2, create_obj(count), c)),
                    loop);
@@ -1862,6 +1997,95 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   return true;
 }
 
+// Inlines a call to a global that holds a small function (see compile_fn):
+//   GUARD_GLOBAL f   skips the next instruction if f still holds the function
+//   JUMP slow
+//   ...              the arguments in new locals, then the body with them
+//                    as its parameters (an argument that's a literal, or a
+//                    local the caller never assigns, is used where it is)
+//   JUMP end
+//   slow: (f args...), called as written
+// While the body compiles, the caller's locals can't be seen, so its names
+// mean what they mean in the function: its parameters, its own lets and
+// globals. Inlining goes 2 deep, and not into a function's own body.
+static bool inline_global(Snap* snap, SnapFnState* fs, SCons* sexpr) {
+  SSym* name = as_sym(sexpr->first);
+  SValue fn = name->value;
+  SCode* code = is_closure(fn) ? as_closure(fn)->code : is_code(fn) ? as_code(fn) : NULL;
+  SCons *form, *body, *arg;
+  SVec* params;
+  SnapLoop* loop;
+  bool sets;
+  int k, sym_k, fn_k, slow, end, stack, first, barrier;
+
+  if (!code || code->inline_form < 0 || code->insts_count > INLINE_SIZE || as_obj(fn)->macro || name->read_only) {
+    return false;
+  }
+  if (fs->inlining >= 2 || !is_global_name(fs, name)) return false;
+  for (k = 0; k < fs->inlining; ++k) {
+    if (fs->inlined[k] == code) return false;
+  }
+  form = as_cons(code->constants[code->inline_form]);
+  params = as_vec(form->first);
+  body = as_cons(form->rest);
+  if (list_length(as_cons(sexpr->rest)) != params->len) return false;
+  sym_k = add_constant(snap, fs, create_obj(name));
+  fn_k = add_global_constant(snap, fs, fn);
+  if (sym_k >= 2048 || fn_k >= 4096) return false;
+
+  emit(fs, GUARD_GLOBAL, sym_k | fn_k << 11);
+  slow = emit_jump(fs, JUMP);
+  stack = fs->stack;
+  sets = contains_form(create_obj(body), TK_SET);
+  begin_scope(fs);
+  first = fs->num_locals;
+  // The arguments, in the caller's scope, then named as the parameters
+  for (k = 0, arg = as_cons(sexpr->rest); arg; arg = as_cons(arg->rest), ++k) {
+    SSym* p = binding_name(snap, *snap_vec_at(params, k));
+    int index = is_sym(arg->first) ? resolve_local(fs, as_sym(arg->first)) : -1;
+    int type = snap_type(arg->first);
+    bool literal = type == STYPE_INT || type == STYPE_FLOAT || type == STYPE_STR || type == STYPE_BOOL ||
+                   type == STYPE_KEY || type == STYPE_NIL;
+    if (is_sym(arg->first) && constant_local(fs, as_sym(arg->first)) >= 0) {
+      index = constant_local(fs, as_sym(arg->first)); // A parameter that's a constant, inlined again
+      literal = true;
+    } else if (literal) {
+      index = add_constant(snap, fs, arg->first);
+    }
+    if ((literal || (index >= 0 && !fs->locals[index].assigned)) && !p->assigned && !sets) {
+      SnapLocal* local = &fs->locals[add_local(snap, fs, as_sym(new_gensym(snap)), true)];
+      if (literal) local->constant = index;
+      else local->alias = index;
+    } else {
+      compile(snap, fs, arg->first, false);
+      emit(fs, STORE_LOCAL, add_local(snap, fs, as_sym(new_gensym(snap)), true));
+    }
+  }
+  for (k = 0; k < params->len; ++k) {
+    SnapLocal* local = &fs->locals[first + k];
+    local->name = binding_name(snap, *snap_vec_at(params, k));
+    local->assigned = local->name->assigned || sets;
+  }
+  scan_sets(fs, create_obj(body)); // So locals the body assigns aren't used in place either
+  barrier = fs->barrier;
+  loop = fs->loop;
+  fs->barrier = first;
+  fs->loop = NULL;
+  fs->inlined[fs->inlining++] = code;
+  compile_body(snap, fs, body, false);
+  fs->inlining--;
+  fs->loop = loop;
+  fs->barrier = barrier;
+  end_scope(fs);
+  end = emit_jump(fs, JUMP);
+
+  patch_jump(snap, fs, slow);
+  fs->stack = stack;
+  compile_call(snap, fs, sexpr);
+  patch_jump(snap, fs, end);
+  return true;
+}
+
 static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   SCons* args = as_cons(sexpr->rest);
   SValue macro, form;
@@ -1879,6 +2103,7 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
         break;
       }
       if (sexpr != fs->plain_call && inline_seq(snap, fs, sexpr, tail)) break;
+      if (inline_global(snap, fs, sexpr)) break;
       compile_call(snap, fs, sexpr);
       break;
     case STYPE_CONS:
@@ -2209,6 +2434,10 @@ static void print_code(SCode* code, int indent) {
       case LOAD_LOCAL: case STORE_LOCAL: case LOAD_CLOSED: case STORE_CLOSED: case LOAD_COPIED:
       case CALL: case CLOSE_UPVALS: case RETURN_VEC: case UNPACK: case INLINE_GUARD:
         printf(" %d", arg);
+        break;
+      case GUARD_GLOBAL:
+        printf(" %-6d ", arg >> 11);
+        print_val(stdout, code->constants[arg & 2047]);
         break;
       case CALL_GLOBAL: case NTH: case COUNT: case GET: case PUT: case INT: case MIN: case MAX:
         printf(" %-6d ", arg & 0xff);

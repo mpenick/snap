@@ -245,6 +245,17 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
   compare_variant(name, op, L, S) compare_variant(name, op, L, L) compare_variant(name, op, L, K) \
   compare_variant(name, op, K, S) compare_variant(name, op, K, L) compare_variant(name, op, K, K)
 
+// The result of an instruction that has popped its operands: stored straight
+// into a local when a STORE_LOCAL comes next (as in every let binding),
+// which is then skipped, or else pushed
+#define push_or_store(val) \
+  if (INST_OP(*pc) == STORE_LOCAL) { \
+    locals[INST_ARG(*pc)] = (val); \
+    pc++; \
+  } else { \
+    *stack++ = (val); \
+  }
+
 // Each handler ends in its own indirect jump (DISPATCH), so the branch
 // predictor can learn opcode sequences
 #define INDIRECT_DISPATCH 1
@@ -664,8 +675,9 @@ new_frame:
         b = stack - 1;
         if (builtin_global(builtin_nth) && is_vec(*a) && is_int(*b) &&
             (uint64_t)as_int(*b) < (uint64_t)as_vec(*a)->len) {
-          *a = *snap_vec_at(as_vec(*a), (int)as_int(*b));
-          stack--;
+          temp = *snap_vec_at(as_vec(*a), (int)as_int(*b));
+          stack = a;
+          push_or_store(temp)
           DISPATCH();
         }
         // A map's i-th entry, to a pattern that takes its key and value
@@ -685,7 +697,9 @@ new_frame:
       OP(COUNT) {
         a = stack - 1;
         if (builtin_global(builtin_count) && (is_vec(*a) || is_map(*a))) {
-          *a = create_int(is_vec(*a) ? as_vec(*a)->len : as_map(*a)->len);
+          temp = create_int(is_vec(*a) ? as_vec(*a)->len : as_map(*a)->len);
+          stack = a;
+          push_or_store(temp)
           DISPATCH();
         }
         goto call_global;
@@ -699,14 +713,16 @@ new_frame:
         b = stack - 1;
         if (builtin_global(builtin_get)) {
           if (is_struct(*a) && (i = cached_field(frame->code, arg & 0xff, as_struct(*a), *b)) >= 0) {
-            *a = as_struct(*a)->vals[i];
-            stack--;
+            temp = as_struct(*a)->vals[i];
+            stack = a;
+            push_or_store(temp)
             DISPATCH();
           }
           if (is_map(*a)) {
             val = map_get(as_map(*a), *b);
-            *a = val ? *val : create_nil();
-            stack--;
+            temp = val ? *val : create_nil();
+            stack = a;
+            push_or_store(temp)
             DISPATCH();
           }
         }
@@ -732,7 +748,8 @@ new_frame:
         if (builtin_global(builtin_int) && is_imm_float(*a)) {
           x = snap_imm_float_val(*a);
           if (in_int_range(x)) {
-            *a = create_int((SnapInt)x);
+            stack = a;
+            push_or_store(create_int((SnapInt)x))
             DISPATCH();
           }
         }
@@ -752,8 +769,9 @@ new_frame:
               best = a + i; \
             } \
           } \
-          *a = *best; \
-          stack = a + 1; \
+          temp = *best; \
+          stack = a; \
+          push_or_store(temp) \
           DISPATCH(); \
         } \
         goto call_global;
@@ -793,8 +811,8 @@ new_frame:
           frame->stack_top = stack; // Keep the arguments rooted during the call
           ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
           if (ok && !snap->reentered) {
-            stack -= arg; // Pop arguments
-            *stack++ = temp;
+            stack -= arg; // Pop the arguments
+            push_or_store(temp)
             DISPATCH();
           }
           frame->pc = pc;
@@ -814,6 +832,12 @@ new_frame:
         SValue coll = *(stack - 1);
         *(stack - 1) = create_bool((is_vec(coll) || is_map(coll)) &&
                                    snap->inline_syms[arg]->value.bits == snap->inline_fns[arg].bits);
+        DISPATCH();
+      }
+      // A function inlined in place of a call to a global (see inline_global):
+      // if the global still holds it, skip the jump to the call
+      OP(GUARD_GLOBAL) {
+        if (as_sym(constants[arg & 2047])->value.bits == constants[arg >> 11].bits) pc++;
         DISPATCH();
       }
       OP(CLOSE_UPVALS) {

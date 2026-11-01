@@ -644,7 +644,7 @@ static bool code_name_in(SCode* c, SCode* target, const char* prefix, char* out,
     snprintf(out, n, "%s", prefix);
     return true;
   }
-  if (depth >= 8) return false;
+  if (depth >= 8 || depth < 0) return false; // depth -1: only c itself
   for (i = 0; i < c->num_constants; ++i) {
     if (is_code(c->constants[i])) {
       char inner[256];
@@ -655,14 +655,14 @@ static bool code_name_in(SCode* c, SCode* target, const char* prefix, char* out,
   return false;
 }
 
-static bool fn_name_in(SValue fn, SCode* target, const char* prefix, char* out, size_t n) {
-  if (is_closure(fn)) return code_name_in(as_closure(fn)->code, target, prefix, out, n, 0);
-  if (is_code(fn)) return code_name_in(as_code(fn), target, prefix, out, n, 0);
+static bool fn_name_in(SValue fn, SCode* target, const char* prefix, char* out, size_t n, int depth) {
+  if (is_closure(fn)) return code_name_in(as_closure(fn)->code, target, prefix, out, n, depth);
+  if (is_code(fn)) return code_name_in(as_code(fn), target, prefix, out, n, depth);
   return false;
 }
 
 static void code_name(Snap* snap, SCode* target, char* out, size_t n) {
-  int i, j;
+  int i, j, pass;
   if (target == NULL) {
     snprintf(out, n, "<outside snap code>");
     return;
@@ -671,18 +671,22 @@ static void code_name(Snap* snap, SCode* target, char* out, size_t n) {
     snprintf(out, n, "<freed>");
     return;
   }
-  for (i = 0; i < snap->symbols.hcapacity; ++i) {
-    SValue key = snap->symbols.hentries[i].hkey, val;
-    if (key.bits == snap->symbols.hempty.bits || key.bits == snap->symbols.hdeleted.bits) continue;
-    val = as_sym(key)->value;
-    if (fn_name_in(val, target, as_sym(key)->data, out, n)) return;
-    if (is_method(val)) {
-      SMap* table = as_method(val)->table;
-      for (j = 0; j < table->used; ++j) {
-        char prefix[256];
-        if (table->entries[2 * j].bits == SV_DELETED || !is_type(table->entries[2 * j])) continue;
-        snprintf(prefix, sizeof(prefix), "%s[%s]", as_sym(key)->data, as_type(table->entries[2 * j])->name->data);
-        if (fn_name_in(table->entries[2 * j + 1], target, prefix, out, n)) return;
+  // First the globals' functions themselves, then the functions in them: a
+  // function inlined in another (see inline_global) is among its constants
+  for (pass = 0; pass < 2; ++pass) {
+    for (i = 0; i < snap->symbols.hcapacity; ++i) {
+      SValue key = snap->symbols.hentries[i].hkey, val;
+      if (key.bits == snap->symbols.hempty.bits || key.bits == snap->symbols.hdeleted.bits) continue;
+      val = as_sym(key)->value;
+      if (fn_name_in(val, target, as_sym(key)->data, out, n, pass - 1)) return;
+      if (is_method(val)) {
+        SMap* table = as_method(val)->table;
+        for (j = 0; j < table->used; ++j) {
+          char prefix[256];
+          if (table->entries[2 * j].bits == SV_DELETED || !is_type(table->entries[2 * j])) continue;
+          snprintf(prefix, sizeof(prefix), "%s[%s]", as_sym(key)->data, as_type(table->entries[2 * j])->name->data);
+          if (fn_name_in(table->entries[2 * j + 1], target, prefix, out, n, pass - 1)) return;
+        }
       }
     }
   }
