@@ -17,3 +17,4 @@ true false false
 5 0
 "before"
 <err :div-by-zero "can't divide by zero">
+  at tests/errs.snap:67

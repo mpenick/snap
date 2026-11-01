@@ -1,0 +1,6 @@
+; vi: filetype=scheme
+; An error a top-level form gives back (from try) stops the file
+(def ok :yes)
+
+(try (err :gave-back "at the top"))
+(def never :no)

@@ -11,7 +11,9 @@
   at tests/errors/uncaught.snap:3 in f
   at tests/errors/uncaught.snap:3 in f
   at tests/errors/uncaught.snap:3 in f
+  ... 35 more
   at tests/errors/uncaught.snap:3 in f
   at tests/errors/uncaught.snap:3 in f
   at tests/errors/uncaught.snap:3 in f
-  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f (inlined)
+  at tests/errors/uncaught.snap:4

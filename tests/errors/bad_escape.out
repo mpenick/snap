@@ -1,1 +1,2 @@
 <err :snap_parse_error "Unknown escape '\\q' on line 3">
+  at tests/errors/bad_escape.snap:3

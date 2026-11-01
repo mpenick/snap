@@ -4,11 +4,20 @@ nil
 {:a 1 :b [1 2 3]}
 "a string with ) in it"
 <err :snap_arith_error "Division by zero">
+  at <repl>:1
 9
 <err :snap_compile_error "Expected (if <cond> <then> <else>)">
+  at <repl>:1
 <err :oops "a value">
 nil
 1
 2
 []
+nil
+<err :snap_type_error "Expected numbers">
+  at <repl>:2 in first-plus (inlined)
+  at <repl>:1
+<err :snap_compile_error "Expected bindings [<id> <expr> ...]">
+  at <repl>:1
 <err :snap_eof_error "Premature end of file on line 2">
+  at <repl>:2

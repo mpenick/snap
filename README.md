@@ -27,8 +27,8 @@ make
 ```
 
 Without a file, `snap` starts a REPL. A form can span several lines, and
-definitions carry over. Errors and panics are printed without ending the
-session. Line editing and history come from readline. Ctrl-D exits. The REPL
+definitions carry over. Errors and panics are printed, with where they
+happened, without ending the session. Line editing and history come from readline. Ctrl-D exits. The REPL
 is written in snap, in `repl.snap` (see below).
 
 `-d` prints the byte code before running it. The script's arguments are a
@@ -152,7 +152,7 @@ Built-in functions:
   (1 if not given, and it can be negative): `(range 2 8 2)` is `[2 4 6]`.
   They're ints if every argument is, otherwise floats. The whole vector is
   made at once, so `dotimes` is still the way to count in a loop.
-* Errors: `err`, `err?`, `err-kind`, `err-msg` and `err-where`
+* Errors: `err`, `err?`, `err-kind`, `err-msg`, `err-where` and `err-trace`
 * Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
   instead of `()` at the end), `nthnext` (the values from an index on, of a
   list or vector, or `nil`), `concat` (of lists and vectors)
@@ -184,11 +184,12 @@ Built-in functions:
 * Files: `(load "file")` runs a file and gives its last value, or an error
   (`:snap_io_error` if it can't be read). A relative path is from the
   directory of the file doing the loading, so a program can be split into
-  files that load each other. An error from a file loaded by another file
-  starts with the file's path. In C it's `snap_load()`.
+  files that load each other. An error's places (see Errors) say which file
+  it's from. In C it's `snap_load()`.
 * Code: `(compile src)` compiles a string into a function without arguments.
   It returns an error if the code doesn't parse or compile (`:snap_eof_error`
-  when it ends early), and `nil` if there's no code.
+  when it ends early), and `nil` if there's no code. `(compile src name)`
+  gives its code `name` as the file in error places.
 * GC: `(gc-step work)` does about `work` units of collection (marking a value
   or sweeping an object is one, and freeing an array 8 more), starting a collection if none is running,
   and returns `true` when a collection finishes. `(gc-step 0)` just starts one.
@@ -497,25 +498,31 @@ code that supervises other code, like the REPL:
 C functions return `false` to panic, with `*result` set to the error. To
 return an error as a value, set `*result` to it and return `true`.
 
-A panic, or a compile error, remembers where it happened, and a script that
-stops prints it, innermost first:
+A panic, or a compile or read error, remembers where it happened, and a
+script that stops (or the REPL) prints it, innermost first:
 
 ```
-<err :snap_type_error "lib/world.snap: Expected numbers">
+<err :snap_type_error "Expected numbers">
   at lib/world.snap:12 in grid-at (inlined)
   at lib/world.snap:40 in fill-grid
   at main.snap:7
 ```
 
 `(err-where e)` gives the same as `[[file line name] ...]`, or `nil` for an
-error that was only returned. `file` is `nil` for code compiled from a string
-and `name` is `nil` for top-level code. A small function compiled into its
-caller (see Implementation) has `:inlined` and the line its code starts on;
-the line in its caller is the call's. Code a macro made has the line of the
-macro call. An error raised in snap code that a C function called keeps its
-places when the C function passes it on, and the trace stops at the
-`recover` that caught it, at most 16 places. In C, `snap_err_where()` gives
-the same vector and `snap_print_err()` prints an error with its places.
+error that was only returned, and `(err-trace e)` the "at" lines as a
+string. `file` is `nil` for code compiled from a string and `name` is `nil`
+for top-level code. A small function compiled into its caller (see
+Implementation) has `:inlined` and the line its code starts on; the line in
+its caller is the call's. Code a macro made has the line of the macro call,
+and a read error the line the reader got to. An error raised in snap code
+that a C function called keeps its places when the C function passes it on,
+and the trace stops at the `recover` that caught it. An error a top-level
+form gives as its value rather than raising it (from `try`, or one `load`
+gave back) adds that form's place, so an error from a file loaded by another
+says the `load` forms it came through. Past 16 places it keeps the innermost
+12 and the outermost 4, with `[:skipped n]` between. In C,
+`snap_err_where()` and `snap_err_trace()` give the same, and
+`snap_print_err()` prints an error with its trace.
 
 ## Holding values in C
 
@@ -601,7 +608,9 @@ such as `gc_new()`, `map_get()` and `cached_field()`, so splitting the core
 costs no calls. `make libsnap.a` builds the core for embedding,
 and `main.c` runs a file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
 string in `repl_snap.h`: it reads lines until `compile` stops returning
-`:snap_eof_error`, then calls the result with `recover` and prints it.
+`:snap_eof_error`, then calls the result with `recover` and prints it, with
+`repl-print`, which `main.c` defines (as it does `read-line`) to print an
+error's trace.
 `stdlib.snap` is built in the same way, as `stdlib_snap.h`, and `snap_init()` runs
 it.
 

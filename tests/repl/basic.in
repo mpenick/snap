@@ -17,4 +17,8 @@ m
 (counter)
 (counter)
 args
+(defn first-plus [v]
+  (+ (nth v 0) 1))
+(first-plus [:a])
+(let [x] 1)
 [1 2

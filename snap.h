@@ -678,6 +678,9 @@ void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
 // Compiles the forms in str into a function without arguments. Returns an
 // error value if they don't parse or compile, or nil if there aren't any.
 SValue snap_compile(Snap* snap, const char* str);
+// The same, with file (a string, kept alive by the caller, or nil) as the
+// file in its errors' places
+SValue snap_compile_as(Snap* snap, const char* str, SValue file);
 // Runs a function from snap_compile()
 SValue snap_run(Snap* snap, SValue fn);
 // Calls a function. Returns an error value if it panics. The arguments must be
@@ -699,9 +702,12 @@ void snap_print(SValue value);
 // unknown and name is nil for top-level code. A function inlined in another
 // adds :inlined, with the line its code starts on.
 SValue snap_err_where(Snap* snap, SValue err);
-// Prints an error, then a line "  at file:line in name" for each place in
-// snap_err_where(). Prints any other value as snap_print() does.
+// Prints an error, then its trace (see snap_err_trace()). Prints any other
+// value as snap_print() does.
 void snap_print_err(Snap* snap, FILE* out, SValue value);
+// A line "\n  at file:line in name" for each place in snap_err_where(), as a
+// string, or "" if there are none (or it isn't an error)
+SValue snap_err_trace(Snap* snap, SValue err);
 
 // Does about `work` units of collection (one is marking a value or sweeping an
 // object), starting a collection if none is running. Returns true when a

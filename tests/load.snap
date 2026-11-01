@@ -18,6 +18,8 @@
 ; The forms before a failing one have run
 (println before-panic)
 (println (recover (fn [] (load 1))))
-; An error says which file it came from, and the files it was loaded through
-(println (err-msg (load "load/bad-parse.snap")))
-(println (err-msg (load "load/loads-bad.snap")))
+; An error's places say which file it came from, and the load forms it came
+; out through
+(println (err-msg (load "load/bad-parse.snap")) (err-where (load "load/bad-parse.snap")))
+(println (err-where (load "load/loads-bad.snap")))
+(println (err-where (load "load/panics.snap")))

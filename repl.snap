@@ -5,17 +5,19 @@
 ;
 ; Input is read until it compiles: an incomplete form fails with
 ; :snap_eof_error, so another line is read. Each input is compiled into a
-; function and called by recover, so a panic prints its error instead of
-; ending the session. Definitions carry over because globals do.
+; function and called by recover, so a panic prints its error, and where it
+; happened, instead of ending the session. Definitions carry over because
+; globals do. Code typed in is from the file "<repl>", with lines counted
+; from the start of each input.
 
 (loop [input ""]
   (let [line (read-line (if (= input "") "snap> " "...   "))]
     (if (nil? line)
-      (if (= input "") nil (println (compile input))) ; Show why the rest didn't parse
+      (if (= input "") nil (repl-print (compile input "<repl>"))) ; Show why the rest didn't parse
       (let [src (str input line "\n")
-            code (compile src)]
+            code (compile src "<repl>")]
         (if (err? code :snap_eof_error)
           (recur src)
           (begin
-            (if (nil? code) nil (println (if (err? code) code (recover code))))
+            (if (nil? code) nil (repl-print (if (err? code) code (recover code))))
             (recur "")))))))

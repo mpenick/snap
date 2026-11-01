@@ -1,1 +1,2 @@
 <err :snap_parse_error "Integer literal is out of range on line 1">
+  at tests/errors/int_range.snap:1

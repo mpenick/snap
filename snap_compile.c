@@ -2311,12 +2311,13 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
 }
 
 // A compile error says the file and line of the form it's in, after where
-// it was raised if it was (in a macro), unless it's from the reader, whose
-// messages give the line
-static void compile_error_where(Snap* snap, SErr* e) {
+// it was raised if it was (in a macro). The reader's errors say the line
+// it got to.
+static void compile_error_where(Snap* snap, SErr* e, int read_line) {
   SVec* where;
   const char* kind = is_key(e->err) ? as_key(e->err)->data : "";
-  if (snap->line <= 0 || strcmp(kind, "snap_parse_error") == 0 || strcmp(kind, "snap_eof_error") == 0) return;
+  int line = strcmp(kind, "snap_parse_error") == 0 || strcmp(kind, "snap_eof_error") == 0 ? read_line : snap->line;
+  if (line <= 0) return;
   if (is_vec(e->where)) {
     where = as_vec(e->where);
   } else {
@@ -2324,7 +2325,7 @@ static void compile_error_where(Snap* snap, SErr* e) {
     e->where = create_obj(where);
   }
   vec_push(snap, where, snap->source);
-  vec_push(snap, where, create_int(snap->line));
+  vec_push(snap, where, create_int(line));
 }
 
 // Compiles the forms from lex into a function without arguments: all of
@@ -2358,7 +2359,7 @@ start:
       goto start;
     }
     result = create_obj(snap->cause);
-    compile_error_where(snap, snap->cause);
+    compile_error_where(snap, snap->cause, lex->line);
     goto done;
   }
 

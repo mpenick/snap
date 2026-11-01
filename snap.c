@@ -23,15 +23,42 @@ static void lex_init(SnapLex* lex, const char* str) {
   lex->line = 1;
 }
 
-// Code compiled from a string isn't from the file being loaded
-SValue snap_compile(Snap* snap, const char* str) {
+// Code compiled from a string isn't from the file being loaded: its places
+// (see snap_err_where()) have file, a string the caller keeps alive, or nil
+SValue snap_compile_as(Snap* snap, const char* str, SValue file) {
   SnapLex lex;
   SValue source = snap->source, result;
   lex_init(&lex, str);
-  snap->source = create_nil();
+  snap->source = file;
   result = compile_forms(snap, &lex, true);
   snap->source = source;
   return result;
+}
+
+SValue snap_compile(Snap* snap, const char* str) {
+  return snap_compile_as(snap, str, create_nil());
+}
+
+// An error a top-level form gave as its value, rather than one raised in it
+// (from try, or one load gave back), adds the form's place to its places
+// (see snap_err_where()), so it says which forms it came out through
+static void returned_where(Snap* snap, SCode* form, SErr* e) {
+  SVec* old = is_vec(e->where) ? as_vec(e->where) : NULL;
+  SVec* where;
+  SValue file;
+  int i, line;
+  if (old && old->len >= 2 && snap_vec_at(old, old->len - 2)->bits == create_obj(form).bits) return; // Raised in it
+  if (form->num_lines == 0) return;
+  file = form->file; // Before allocating: nothing roots the form now (the file is pinned)
+  line = form->lines[0].line;
+  snap_pin(snap, create_obj(e));
+  where = snap_vec_new(snap, (old ? old->len : 0) + 2);
+  gc_barrier(snap, e->where); // Its contents move to the new vector
+  for (i = 0; old && i < old->len; ++i) vec_push(snap, where, *snap_vec_at(old, i));
+  e->where = create_obj(where);
+  vec_push(snap, where, file);
+  vec_push(snap, where, create_int(line));
+  snap_unpin(snap, create_obj(e));
 }
 
 // Runs each form as soon as it's compiled, so that a macro can be used by
@@ -46,7 +73,10 @@ SValue snap_exec(Snap* snap, const char* str) {
     if (!is_code(fn)) break;
     snap->anchors.vsize = num_anchors; // Releases the last result
     result = snap_run(snap, fn);
-    if (is_err(result)) break;
+    if (is_err(result)) {
+      returned_where(snap, as_code(fn), as_err(result));
+      break;
+    }
     if (is_obj(result)) anchor(snap, as_obj(result));
     if (snap->fin_pending) snap_run_finalizers(snap);
   }
@@ -91,16 +121,6 @@ SValue snap_load(Snap* snap, const char* path) {
     snap->load_file = outer;
     snap_unpin(snap, snap->source);
     snap->source = source;
-  }
-  // Says which file an error is from, when it was loaded by another file
-  // (each file it was loaded through adds its name)
-  if (outer && is_err(result) && is_str(as_err(result)->msg)) {
-    SValue old = snap_pin(snap, result);
-    SValue msg = snap_pin(snap, create_obj(snap_str_new_format(snap, "%s: %s", full, as_str(as_err(old)->msg)->data)));
-    result = create_obj(snap_err_new(snap, as_err(old)->err, msg));
-    as_err(result)->where = as_err(old)->where;
-    snap_unpin(snap, msg);
-    snap_unpin(snap, old);
   }
   free(full);
   free(src);

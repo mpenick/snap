@@ -54,3 +54,19 @@
 
 ; An error that wasn't raised, and other values
 (println (err-where (err :made "not raised")) (recover (fn [] (err-where 1))))
+
+; err-trace is the trace as text; compile can name the file
+(println (err-trace (recover (fn [] (caller [1 :x])))))
+(println (err-trace (compile "\n(let [x] 1)" "made.snap")) (err-trace (err :a "b")) (err-trace (recover (fn [] (oops 5)))))
+
+; Reader errors say the line they got to
+(println (err-where (compile "(+ 1\n2\n" "short.snap")) (err-where (compile "\n{:a}" "odd.snap")))
+
+; An error a loaded file's top-level form gives back, rather than raises,
+; says that form
+(println (err-where (load "load/returns-err.snap")))
+
+; Past 16 places, the innermost 12 and the outermost 4, and how many between
+(defn down [n] (if (= n 0) (panic :bottom "deep") (+ 1 (down (- n 1)))))
+(let [w (err-where (recover (fn [] (down 30))))]
+  (println (count w) (nth w 0) (nth w 12) (nth w 16)))

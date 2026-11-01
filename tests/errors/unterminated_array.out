@@ -1,1 +1,2 @@
 <err :snap_eof_error "Premature end of file on line 4">
+  at tests/errors/unterminated_array.snap:4

@@ -564,10 +564,14 @@ bool builtin_name(Snap* snap, const SValue* args, int num_args, SValue* result) 
 
 // (compile <str>) compiles code into a function without arguments, or returns
 // an error if it doesn't parse or compile, or nil if there's no code
+// (compile <src>) or (compile <src> <name>), name being the file its places
+// say (see err-where)
 bool builtin_compile(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  if (num_args != 1) return arity_error(snap, result);
-  if (!is_str(args[0])) return fail(snap, result, "snap_type_error", "Expected a string");
-  *result = snap_compile(snap, as_str(args[0])->data);
+  if (num_args != 1 && num_args != 2) return arity_error(snap, result);
+  if (!is_str(args[0]) || (num_args == 2 && !is_str(args[1]))) {
+    return fail(snap, result, "snap_type_error", "Expected (compile <src> [<name>]) with strings");
+  }
+  *result = snap_compile_as(snap, as_str(args[0])->data, num_args == 2 ? args[1] : create_nil());
   return true;
 }
 
@@ -735,7 +739,12 @@ SValue snap_err_where(Snap* snap, SValue err) {
   for (i = 0; i + 1 < where->len; i += 2) {
     SValue x = *snap_vec_at(where, i);
     int n = (int)as_int(*snap_vec_at(where, i + 1));
-    if (is_code(x)) {
+    if (is_key(x)) { // :skipped and how many
+      SVec* gap = snap_vec_new(snap, 2);
+      vec_push(snap, out, create_obj(gap));
+      vec_push(snap, gap, x);
+      vec_push(snap, gap, create_int(n));
+    } else if (is_code(x)) {
       SCode* code = as_code(x);
       SnapLineRun* run = line_run(code, n);
       // Inlined functions, innermost first, at the line their code starts on
@@ -753,30 +762,75 @@ SValue snap_err_where(Snap* snap, SValue err) {
   return create_obj(out);
 }
 
-void snap_print_err(Snap* snap, FILE* out, SValue value) {
-  SValue where;
-  int i;
-  print_val(out, value);
-  if (!is_err(value)) return;
-  snap_pin(snap, value);
-  where = snap_pin(snap, snap_err_where(snap, value));
-  for (i = 0; is_vec(where) && i < as_vec(where)->len; ++i) {
-    SVec* place = as_vec(*snap_vec_at(as_vec(where), i));
-    SValue file = *snap_vec_at(place, 0), name = *snap_vec_at(place, 2);
-    SnapInt line = as_int(*snap_vec_at(place, 1));
-    fprintf(out, "\n  at %s", is_str(file) ? as_str(file)->data : "<string>");
-    if (line > 0) fprintf(out, ":%d", (int)line);
-    if (is_str(name)) fprintf(out, " in %s", as_str(name)->data);
-    if (place->len > 3) fprintf(out, " (inlined)");
+// Appends printf output to a malloc()ed buffer
+typedef struct {
+  char* data;
+  size_t len, cap;
+} SnapBuf;
+
+static void buf_printf(SnapBuf* b, const char* format, ...) {
+  va_list args;
+  int n;
+  va_start(args, format);
+  n = vsnprintf(NULL, 0, format, args);
+  va_end(args);
+  if (b->len + n + 1 > b->cap) {
+    b->cap = 2 * (b->len + n + 1);
+    b->data = (char*)realloc(b->data, b->cap);
   }
-  snap_unpin(snap, where);
-  snap_unpin(snap, value);
+  va_start(args, format);
+  vsnprintf(b->data + b->len, n + 1, format, args);
+  va_end(args);
+  b->len += n;
+}
+
+SValue snap_err_trace(Snap* snap, SValue err) {
+  SnapBuf b = { NULL, 0, 0 };
+  SValue where, result;
+  int i;
+  buf_printf(&b, "%s", "");
+  if (is_err(err)) {
+    where = snap_pin(snap, snap_err_where(snap, err));
+    for (i = 0; is_vec(where) && i < as_vec(where)->len; ++i) {
+      SVec* place = as_vec(*snap_vec_at(as_vec(where), i));
+      if (place->len == 2) { // [:skipped n]
+        buf_printf(&b, "\n  ... %d more", (int)as_int(*snap_vec_at(place, 1)));
+      } else {
+        SValue file = *snap_vec_at(place, 0), name = *snap_vec_at(place, 2);
+        SnapInt line = as_int(*snap_vec_at(place, 1));
+        buf_printf(&b, "\n  at %s", is_str(file) ? as_str(file)->data : "<string>");
+        if (line > 0) buf_printf(&b, ":%d", (int)line);
+        if (is_str(name)) buf_printf(&b, " in %s", as_str(name)->data);
+        if (place->len > 3) buf_printf(&b, " (inlined)");
+      }
+    }
+    snap_unpin(snap, where);
+  }
+  result = create_obj(snap_str_new(snap, b.data));
+  free(b.data);
+  return result;
+}
+
+void snap_print_err(Snap* snap, FILE* out, SValue value) {
+  print_val(out, value);
+  if (is_err(value)) {
+    snap_pin(snap, value);
+    fputs(as_str(snap_err_trace(snap, value))->data, out);
+    snap_unpin(snap, value);
+  }
 }
 
 // (err-where <err>): see snap_err_where()
 static bool builtin_err_where(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (!err_arg(snap, args, num_args, result)) return false;
   *result = snap_err_where(snap, args[0]);
+  return true;
+}
+
+// (err-trace <err>): see snap_err_trace()
+static bool builtin_err_trace(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!err_arg(snap, args, num_args, result)) return false;
+  *result = snap_err_trace(snap, args[0]);
   return true;
 }
 
@@ -1513,6 +1567,7 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "err-kind", builtin_err_kind);
   snap_def_cfunc(snap, "err-msg", builtin_err_msg);
   snap_def_cfunc(snap, "err-where", builtin_err_where);
+  snap_def_cfunc(snap, "err-trace", builtin_err_trace);
   snap_def_cfunc(snap, "count", builtin_count);
   snap_def_cfunc(snap, "nth", builtin_nth);
   snap_def_cfunc(snap, "apply", builtin_apply);

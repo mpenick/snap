@@ -328,24 +328,48 @@ enum {
 
 // Where an error is being raised (see SErr): inner, where it was raised
 // before (by snap code a C function called, say), then each frame's
-// instruction, down to the one that will catch it, at most 16 places
-#define MAX_WHERE 16
-static SValue error_where(Snap* snap, SValue inner) {
-  SVec* inner_vec = is_vec(inner) ? as_vec(inner) : NULL;
-  int num_inner = inner_vec ? inner_vec->len / 2 : 0, n = num_inner, i;
-  SVec* where;
-  for (i = snap->frames.vsize - 1; i >= 0 && n < MAX_WHERE; --i) {
-    SnapFrame* f = &snap->frames.vitems[i];
-    n++;
-    if (f->recover || f->stop) break;
-  }
-  where = snap_vec_new(snap, 2 * n); // inner is rooted by the failed error
-  for (i = 0; i < 2 * num_inner && i < 2 * MAX_WHERE; ++i) vec_push(snap, where, *snap_vec_at(inner_vec, i));
-  for (i = snap->frames.vsize - 1; i >= 0 && where->len < 2 * MAX_WHERE; --i) {
-    SnapFrame* f = &snap->frames.vitems[i];
+// instruction, down to the one that will catch it. Past 16 places it keeps
+// the innermost 12 and the outermost 4, with :skipped and how many between.
+#define WHERE_INNER 12
+#define WHERE_OUTER 4
+
+static void push_place(Snap* snap, SVec* where, SVec* inner, int num_inner, int top, int k) {
+  if (k < num_inner) {
+    vec_push(snap, where, *snap_vec_at(inner, 2 * k));
+    vec_push(snap, where, *snap_vec_at(inner, 2 * k + 1));
+  } else {
+    SnapFrame* f = &snap->frames.vitems[top - (k - num_inner)];
     vec_push(snap, where, create_obj(f->code));
     vec_push(snap, where, create_int(f->pc - f->code->insts - 1)); // pc is past it
-    if (f->recover || f->stop) break;
+  }
+}
+
+static SValue error_where(Snap* snap, SValue inner) {
+  SVec* inner_vec = is_vec(inner) ? as_vec(inner) : NULL; // Rooted by the failed error
+  int num_inner = inner_vec ? inner_vec->len / 2 : 0, top = snap->frames.vsize - 1, n, k, skipped = 0;
+  SVec* where;
+  for (n = 0; top - n >= 0; ++n) {
+    SnapFrame* f = &snap->frames.vitems[top - n];
+    if (f->recover || f->stop) {
+      n++;
+      break;
+    }
+  }
+  n += num_inner;
+  where = snap_vec_new(snap, 2 * (n < WHERE_INNER + WHERE_OUTER + 1 ? n : WHERE_INNER + WHERE_OUTER + 1));
+  for (k = 0; k < n; ++k) {
+    if (n <= WHERE_INNER + WHERE_OUTER || k < WHERE_INNER || k >= n - WHERE_OUTER) {
+      if (skipped > 0) {
+        vec_push(snap, where, create_obj(snap_key_new(snap, "skipped")));
+        vec_push(snap, where, create_int(skipped));
+        skipped = 0;
+      }
+      push_place(snap, where, inner_vec, num_inner, top, k);
+    } else if (k < num_inner && is_key(*snap_vec_at(inner_vec, 2 * k))) {
+      skipped += (int)as_int(*snap_vec_at(inner_vec, 2 * k + 1)); // Already skipped ones
+    } else {
+      skipped++;
+    }
   }
   return create_obj(where);
 }
