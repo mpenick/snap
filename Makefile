@@ -1,10 +1,14 @@
 #CFLAGS=-g -O0 -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
-# -fno-crossjumping keeps a separate dispatch jump per opcode in exec() (GCC
-# otherwise merges them, which hurts branch prediction). -DNDEBUG drops the
-# asserts, including the type checks in the as_ macros, which the stress build
-# keeps.
-CFLAGS=-O3 -fno-crossjumping -DNDEBUG
+# -DNDEBUG drops the asserts, including the type checks in the as_ macros,
+# which the stress build keeps.
+CFLAGS=-O3 -DNDEBUG
 LDFLAGS=-lm -lreadline
+
+# The VM is -O2: GCC's -O3 makes exec() fragile, where a change as small as
+# one more opcode can tip it into keeping pc in memory (about 30% slower). At
+# -O2 GCC and clang give the same exec() however many opcodes there are, with
+# a dispatch jump per handler. make vmcheck checks it.
+snap_vm.o: CFLAGS:=$(subst -O3,-O2,$(CFLAGS))
 
 TARGET=snap
 SOURCES=$(wildcard *.c)
@@ -28,7 +32,7 @@ endif
 
 # The generated headers must exist before the dependencies can be found
 .depends/%.d: %.c snap_lex.h repl_snap.h stdlib_snap.h | .depends
-	$(CC) $(CFLAGS) -MM -c $< -o $@
+	$(CC) $(CFLAGS) -MM $< -o $@
 
 .depends:
 	mkdir .depends
@@ -64,7 +68,11 @@ stress: snap_lex.h repl_snap.h stdlib_snap.h
 	@tests/run.sh ./snap_stress_pool
 	@tests/api_stress
 
-.PHONY: clean test stress
+# Whether exec() stays as fast with more opcodes (see tests/vm/check.sh)
+vmcheck: snap_lex.h repl_snap.h stdlib_snap.h
+	@tests/vm/check.sh $(CC)
+
+.PHONY: clean test stress vmcheck
 clean:
 	rm -rf $(TARGET).dSYM .depends
 	rm -f $(TARGET) snap_stress snap_stress_pool tests/api tests/api_stress libsnap.a snap_lex.h repl_snap.h stdlib_snap.h *.o a.out

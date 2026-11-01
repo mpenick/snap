@@ -37,7 +37,11 @@ vector of strings in `args`.
 ```
 make test     # Run tests/ and compare with the expected output
 make stress   # The same under ASan/UBSan, collecting all the time
+make vmcheck  # Check that the VM stays as fast with more opcodes
 ```
+
+It builds with GCC or clang (`make CC=clang`), with no compiler-specific
+flags.
 
 ## Language
 
@@ -563,7 +567,16 @@ it.
   of two number constants, including `defconst` values like `(* PI 2.0)`,
   are worked out when compiling (except `/` and `%`, so dividing by zero is
   still an error when it runs).
-* **The VM** is a stack machine with computed-goto dispatch. Once a function
+* **The VM** is a stack machine with computed-goto dispatch, each handler
+  ending in its own jump. Its loop keeps only what nearly every handler uses
+  in local variables (pc, the stack, locals, constants and the `Snap`), few
+  enough for the callee-saved registers, and each slow path (errors, calls to
+  anything but snap code and C functions, `recover`, making closures) is a
+  function it calls with its frame saved. Otherwise the compiler's register
+  allocation is fragile: one more opcode can tip it into keeping pc in
+  memory, which costs about 30%. It's compiled with `-O2`, where GCC and
+  clang give the same code however many opcodes there are (GCC's `-O3`
+  doesn't), and `make vmcheck` checks it. Once a function
   is compiled, each binary op is switched to a variant for its kinds of
   operands (stack, local or constant), which handles ints without decoding
   them and falls back to the general handler otherwise (for floats, without

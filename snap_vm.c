@@ -245,8 +245,8 @@ static void store_float(Snap* snap, SnapFloat f, int dest) {
   compare_variant(name, op, L, S) compare_variant(name, op, L, L) compare_variant(name, op, L, K) \
   compare_variant(name, op, K, S) compare_variant(name, op, K, L) compare_variant(name, op, K, K)
 
-// Build with -fno-crossjumping (see Makefile): each handler must keep its own
-// indirect jump so the branch predictor can learn opcode sequences
+// Each handler ends in its own indirect jump (DISPATCH), so the branch
+// predictor can learn opcode sequences
 #define INDIRECT_DISPATCH 1
 
 #ifdef INDIRECT_DISPATCH
@@ -300,10 +300,240 @@ static SValue* pack_rest(Snap* snap, SValue* top, int count) {
   return (count > 0 ? top - count : top) + 1;
 }
 
+// The slow paths of exec() are these functions rather than code in it:
+// code in exec() costs registers across all its handlers, and with too much
+// of it the compiler starts keeping pc or the stack pointer in memory. (For
+// the same reason exec() keeps only what nearly every handler uses in local
+// variables, which fit x86-64's six callee-saved registers, and reads the
+// code and closure from the frame.) They work on the top frame, which exec()
+// saves first and reloads after.
+
+// What exec() does after a slow path
+enum {
+  VM_NEXT,  // The next instruction, in the same frame (reload its stack)
+  VM_FRAME, // A frame was pushed or popped (goto new_frame)
+  VM_FAIL   // An error (the result), with the frame's stack_top where it was
+};
+
+// Raises an error: a failed call's (failed is an error) or a panic's (the
+// stack ends [... msg err]). Unwinds to the innermost recover. Returns undef
+// when exec() goes on from there (at new_frame), else the error for exec()
+// to return.
+static SValue vm_raise(Snap* snap, SValue* stack, SValue failed) {
+  SValue err;
+  if (is_err(failed)) {
+    *stack++ = as_err(failed)->msg;
+    *stack++ = as_err(failed)->err;
+  }
+  mvec_back(&snap->frames).stack_top = stack;
+  err = create_obj(snap_err_new(snap, *(stack - 1), *(stack - 2)));
+  return unwind(snap, err) ? create_undef() : err;
+}
+
+// Raises a new error of kind err (as vm_raise())
+static SValue vm_error(Snap* snap, SValue* stack, const char* err, const char* format, ...) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  va_list args;
+  frame->stack_top = stack;
+  va_start(args, format);
+  *stack++ = create_obj(snap_str_new_vformat(snap, format, args));
+  va_end(args);
+  frame->stack_top = stack; // The message stays rooted while the key is made
+  *stack++ = create_obj(snap_key_new(snap, err));
+  return vm_raise(snap, stack, create_undef());
+}
+
+static int vm_fail(Snap* snap, SValue* stack, SValue* result, const char* err, const char* format) {
+  mvec_back(&snap->frames).stack_top = stack;
+  *result = create_obj(snap_err_new_format(snap, err, "%s", format));
+  return VM_FAIL;
+}
+
+// Enters a function with arg arguments under callable a: its frame, with the
+// rest of the arguments in a list if it takes them
+static int vm_enter(Snap* snap, SValue* a, int arg, SValue* result) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
+  SCode* c = cl ? cl->code : as_code(*a);
+  if (arg != c->arity) {
+    if (c->arity >= 0 || arg < c->num_args - 1) {
+      return vm_fail(snap, a, result, "snap_arity_error", "Invalid number of arguments");
+    }
+    frame->stack_top = a;
+    a = pack_rest(snap, a, arg - (c->num_args - 1));
+    arg = c->num_args;
+  }
+  frame->stack_top = a - arg; // Pop arguments
+  if (!push_frame(snap, c, frame->stack_top, cl)) {
+    return vm_fail(snap, a, result, "snap_stack_error", "Stack overflow");
+  }
+  return VM_FRAME;
+}
+
+// (apply f a b xs) becomes (f a b xs...) here, so it's an ordinary call: the
+// callable's slot, now above xs's items, or NULL on a stack overflow
+static SValue* vm_spread(Snap* snap, SValue* a, int* arg) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  SValue fn, seq = a[-1];
+  int len = seq_length(seq), i;
+  if (a + len + 2 >= snap->stack_end) {
+    SValue* moved;
+    frame->stack_top = a;
+    if (!(moved = grow_stack(snap, a, len + 2))) return NULL;
+    a = moved;
+  }
+  fn = a[-*arg];
+  memmove(a - *arg, a - *arg + 1, (*arg - 2) * sizeof(SValue)); // The fixed arguments
+  a -= 2;
+  if (is_vec(seq)) {
+    for (i = 0; i < len; ++i) *a++ = *snap_vec_at(as_vec(seq), i);
+  } else {
+    for (; !is_nil(seq) && !is_empty(seq); seq = as_cons(seq)->rest) *a++ = as_cons(seq)->first;
+  }
+  *a = fn;
+  *arg = *arg - 2 + len;
+  return a;
+}
+
+static int vm_called(Snap* snap, int arg, bool ok, SValue* result);
+
+// Calls callable a, above its arg arguments, when it's anything but snap
+// code with the right number of arguments or a C function (CALL does those
+// itself)
+static int vm_call(Snap* snap, SValue* a, int arg, SValue* result) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  SValue* base;
+  bool ok;
+  for (;;) {
+    if (is_code(*a) || is_closure(*a)) {
+      return vm_enter(snap, a, arg, result);
+    } else if (is_method(*a)) {
+      SValue* fn = method_find(snap, as_method(*a), a - arg, arg);
+      if (!fn) {
+        frame->stack_top = a;
+        *result = create_obj(method_error(snap, as_method(*a), a - arg, arg));
+        return VM_FAIL;
+      }
+      *a = *fn;
+      continue;
+    } else if (is_cfunc(*a) && as_cfunc(*a) == builtin_apply && arg >= 2 && is_seq(a[-1])) {
+      // A bad call goes to builtin_apply() for its error
+      if (!(a = vm_spread(snap, a, &arg))) return vm_fail(snap, frame->stack_top, result, "snap_stack_error", "Stack overflow");
+      continue;
+    }
+    break;
+  }
+  *result = create_nil();
+  frame->stack_top = a; // Keep the arguments rooted during the call
+  if (is_cfunc(*a)) {
+    ok = as_cfunc(*a)(snap, a - arg, arg, result);
+  } else if (is_type(*a)) {
+    ok = struct_new(snap, as_type(*a), a - arg, arg, result); // Types are never freed
+  } else if (is_key(*a)) {
+    ok = key_call(snap, *a, a - arg, arg, result);
+  } else {
+    return vm_fail(snap, a, result, "snap_type_error", "Value is not callable");
+  }
+  return vm_called(snap, arg, ok, result);
+}
+
+// After a C call (made with the frame's stack_top above the callable): pops
+// the arguments and pushes the result, or fails
+static int vm_called(Snap* snap, int arg, bool ok, SValue* result) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  SValue* a = frame->stack_top;
+  SValue* base;
+  if (snap->reentered) {
+    // It ran snap code (like a macro), which can move the frames and the
+    // stack
+    snap->reentered = false;
+    frame = &mvec_back(&snap->frames);
+    a = frame->stack_top;
+    if (ok && snap->fin_pending) {
+      // Structs are waiting for their finalizers (which set reentered), and
+      // between instructions is a safe place to run them. The result goes on
+      // the stack meanwhile, to keep it.
+      a[-arg] = *result;
+      frame->stack_top = a - arg + 1;
+      snap_run_finalizers(snap);
+      snap->reentered = false;
+      frame = &mvec_back(&snap->frames);
+      a = frame->stack_top - 1 + arg;
+      *result = a[-arg];
+    }
+  }
+  base = a - arg; // Pop arguments
+  frame->stack_top = base;
+  if (!ok) return VM_FAIL;
+  *frame->stack_top++ = *result;
+  return VM_NEXT;
+}
+
+// (recover f): calls f, without arguments. If it panics, the error is the
+// result instead (see unwind()).
+static int vm_recover(Snap* snap, SValue* a, SValue* result) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  if (is_cfunc(*a)) {
+    *result = create_nil();
+    frame->stack_top = a;
+    as_cfunc(*a)(snap, a, 0, result); // On failure result is the error
+    frame = &mvec_back(&snap->frames);
+    *frame->stack_top++ = *result;
+    return VM_NEXT;
+  }
+  if (is_code(*a) || is_closure(*a)) {
+    SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
+    SCode* c = cl ? cl->code : as_code(*a);
+    if (c->arity != 0) {
+      return vm_fail(snap, a, result, "snap_arity_error", "recover expects a function without arguments");
+    }
+    frame->stack_top = a;
+    if (!push_frame(snap, c, a, cl)) return vm_fail(snap, a, result, "snap_stack_error", "Stack overflow");
+    mvec_back(&snap->frames).recover = true;
+    return VM_FRAME;
+  }
+  return vm_fail(snap, a, result, "snap_type_error", "Value is not callable");
+}
+
+// Fills in the closure on top of the stack, which has replaced its code
+static void vm_closure(Snap* snap, SClosure* closure, SValue* locals, SValue* top) {
+  SCode* c = as_code(*top);
+  SClosure* cl = closure_new(snap, c);
+  int i;
+  *top = create_obj(cl); // Replace the code, keeping the closure rooted
+  for (i = 0; i < c->num_upvals; ++i) {
+    uint32_t desc = c->upvals[i];
+    if (!(desc & 1)) cl->upvals[i] = closure->upvals[desc >> 2]; // Either kind
+    else if (desc & 2) cl->upvals[i].value = locals[desc >> 2];
+    else cl->upvals[i].upval = upval_find(snap, &locals[desc >> 2]);
+  }
+}
+
+// UNPACK of anything but a long enough vector: nth of each part, which is
+// its error. The parts go above the value, which stays rooted, then move
+// down.
+static int vm_unpack(Snap* snap, SValue* a, int n, SValue* result) {
+  SnapFrame* frame = &mvec_back(&snap->frames);
+  SValue* stack = a + 1;
+  int i;
+  for (i = 0; i < n; ++i) {
+    SValue nth_args[2];
+    nth_args[0] = *a;
+    nth_args[1] = create_int(i);
+    frame->stack_top = stack;
+    if (!builtin_nth(snap, nth_args, 2, result)) return VM_FAIL;
+    *stack++ = *result;
+  }
+  memmove(a, a + 1, n * sizeof(SValue));
+  frame->stack_top = a + n;
+  return VM_NEXT;
+}
+
+// The top frame. Not a variable, which would take a register in every
+// handler (see vm_raise()).
+#define frame (&mvec_back(&snap->frames))
+
 static SValue exec(Snap* snap) {
-  SnapFrame* frame;
-  SCode* code;
-  SClosure* closure;
   SnapInst* pc;
   SnapInst inst;
   SValue* constants;
@@ -312,7 +542,7 @@ static SValue exec(Snap* snap) {
   SValue* a, * b;
   SnapFloat x, y; // Operands of float arithmetic and compares
   SValue temp;
-  bool cond, ok;
+  bool cond;
   int arg;
 
 #ifdef INDIRECT_DISPATCH
@@ -324,22 +554,29 @@ static SValue exec(Snap* snap) {
 #endif
 
 new_frame:
-  frame = &mvec_back(&snap->frames);
-  code = frame->code;
-  closure = frame->closure;
   pc = frame->pc;
-  constants = code->constants;
+  constants = frame->code->constants;
   locals = frame->stack_base;
   stack = frame->stack_top;
 
-// Anything that can allocate must sync frame->stack_top first so the GC sees
-// the whole stack. Always use inside braces.
-#define RUNTIME_ERROR(err,  ...)                           \
-  frame->stack_top = stack;                                \
-  *stack++ = create_obj(snap_str_new_format(snap, __VA_ARGS__)); \
-  frame->stack_top = stack;                                \
-  *stack++ = create_obj(snap_key_new(snap, err));          \
-  goto panic;
+// Raises an error. Always use inside braces.
+#define RUNTIME_ERROR(err, ...) \
+  temp = vm_error(snap, stack, err, __VA_ARGS__); \
+  goto raised;
+
+// After a slow path that can fail, with the frame saved
+#define SLOW_PATH(result) \
+  switch (result) { \
+    case VM_NEXT: \
+      locals = frame->stack_base; \
+      stack = frame->stack_top; \
+      DISPATCH(); \
+    case VM_FRAME: \
+      goto new_frame; \
+    default: \
+      temp = vm_raise(snap, mvec_back(&snap->frames).stack_top, temp); \
+      goto raised; \
+  }
 
 #ifdef INDIRECT_DISPATCH
   DISPATCH();
@@ -375,15 +612,15 @@ new_frame:
         DISPATCH();
       }
       OP(LOAD_CLOSED) {
-        *stack++ = *closure->upvals[arg].upval->value;
+        *stack++ = *frame->closure->upvals[arg].upval->value;
         DISPATCH();
       }
       OP(LOAD_COPIED) {
-        *stack++ = closure->upvals[arg].value;
+        *stack++ = frame->closure->upvals[arg].value;
         DISPATCH();
       }
       OP(STORE_CLOSED) {
-        SValue* value = closure->upvals[arg].upval->value;
+        SValue* value = frame->closure->upvals[arg].upval->value;
         gc_barrier(snap, *value);
         *value = *--stack;
         DISPATCH();
@@ -461,7 +698,7 @@ new_frame:
         a = stack - 2;
         b = stack - 1;
         if (builtin_global(builtin_get)) {
-          if (is_struct(*a) && (i = cached_field(code, arg & 0xff, as_struct(*a), *b)) >= 0) {
+          if (is_struct(*a) && (i = cached_field(frame->code, arg & 0xff, as_struct(*a), *b)) >= 0) {
             *a = as_struct(*a)->vals[i];
             stack--;
             DISPATCH();
@@ -480,7 +717,7 @@ new_frame:
         int i;
         a = stack - 3;
         b = stack - 2;
-        if (builtin_global(builtin_put) && is_struct(*a) && (i = cached_field(code, arg & 0xff, as_struct(*a), *b)) >= 0) {
+        if (builtin_global(builtin_put) && is_struct(*a) && (i = cached_field(frame->code, arg & 0xff, as_struct(*a), *b)) >= 0) {
           SValue* val = &as_struct(*a)->vals[i];
           gc_barrier(snap, *val);
           *val = *(stack - 1);
@@ -539,122 +776,36 @@ new_frame:
       OP(CALL) {
         a = --stack; // Pop callable
       call:
-        if (is_cfunc(*a)) {
-          if (as_cfunc(*a) == builtin_apply && arg >= 2 && is_seq(stack[-1])) {
-            // (apply f a b xs) becomes (f a b xs...) here, so it's an
-            // ordinary call. A bad call goes to builtin_apply() for its error.
-            SValue fn, seq = stack[-1];
-            int len = seq_length(seq), i;
-            if (stack + len + 2 >= snap->stack_end) {
-              SValue* moved;
-              frame->stack_top = stack;
-              moved = grow_stack(snap, stack, len + 2);
-              if (!moved) {
-                RUNTIME_ERROR("snap_stack_error", "Stack overflow");
-              }
-              stack = moved;
-              locals = frame->stack_base;
-            }
-            fn = stack[-arg];
-            memmove(stack - arg, stack - arg + 1, (arg - 2) * sizeof(SValue)); // The fixed arguments
-            stack -= 2;
-            if (is_vec(seq)) {
-              for (i = 0; i < len; ++i) *stack++ = *snap_vec_at(as_vec(seq), i);
-            } else {
-              for (; !is_nil(seq) && !is_empty(seq); seq = as_cons(seq)->rest) *stack++ = as_cons(seq)->first;
-            }
-            a = stack;
-            *a = fn;
-            arg = arg - 2 + len;
-            goto call;
+        // Snap code with the right number of arguments: the rest go to vm_call()
+        if (is_code(*a) || is_closure(*a)) {
+          SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
+          SCode* c = cl ? cl->code : as_code(*a);
+          if (arg == c->arity) {
+            frame->pc = pc;
+            frame->stack_top = stack - arg; // Pop arguments
+            if (push_frame(snap, c, frame->stack_top, cl)) goto new_frame;
           }
+        }
+        // A C function, which returns here unless it fails or ran snap code
+        if (is_cfunc(*a) && as_cfunc(*a) != builtin_apply) {
+          bool ok;
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
           ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
-          stack -= arg; // Pop arguments
-          if (snap->reentered) {
-            // It ran snap code (like a macro), which can move the frames and
-            // the stack
-            snap->reentered = false;
-            frame = &mvec_back(&snap->frames);
-            locals = frame->stack_base;
-            stack = frame->stack_top - arg;
-            if (ok && snap->fin_pending) {
-              // Structs are waiting for their finalizers (which set
-              // reentered), and between instructions is a safe place to run
-              // them. The result goes on the stack meanwhile, to keep it.
-              *stack = temp;
-              frame->stack_top = stack + 1;
-              snap_run_finalizers(snap);
-              snap->reentered = false;
-              frame = &mvec_back(&snap->frames);
-              locals = frame->stack_base;
-              stack = frame->stack_top - 1;
-              temp = *stack;
-            }
-          }
-          if (!ok) goto call_failed;
-          *stack++ = temp;
-        } else if (is_code(*a) || is_closure(*a)) {
-          SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
-          SCode* c = cl ? cl->code : as_code(*a);
-          if (arg != c->arity) {
-            if (c->arity >= 0 || arg < c->num_args - 1) {
-              RUNTIME_ERROR("snap_arity_error", "Invalid number of arguments");
-            }
-            frame->stack_top = stack;
-            stack = pack_rest(snap, stack, arg - (c->num_args - 1));
-            arg = c->num_args;
+          if (ok && !snap->reentered) {
+            stack -= arg; // Pop arguments
+            *stack++ = temp;
+            DISPATCH();
           }
           frame->pc = pc;
-          frame->stack_top = stack - arg; // Pop arguments
-          if (!push_frame(snap, c, frame->stack_top, cl)) {
-            RUNTIME_ERROR("snap_stack_error", "Stack overflow");
-          }
-          goto new_frame;
-        } else if (is_method(*a)) {
-          SValue* fn = method_find(snap, as_method(*a), stack - arg, arg);
-          if (!fn) {
-            frame->stack_top = stack;
-            temp = create_obj(method_error(snap, as_method(*a), stack - arg, arg));
-            goto call_failed;
-          }
-          *a = *fn;
-          goto call;
-        } else if (is_type(*a)) {
-          frame->stack_top = stack; // Keeps the arguments rooted (types are never freed)
-          ok = struct_new(snap, as_type(*a), stack - arg, arg, &temp);
-          stack -= arg;
-          if (!ok) goto call_failed;
-          *stack++ = temp;
-        } else if (is_key(*a)) {
-          frame->stack_top = stack;
-          ok = key_call(snap, *a, stack - arg, arg, &temp);
-          stack -= arg;
-          if (!ok) goto call_failed;
-          *stack++ = temp;
-        } else {
-          RUNTIME_ERROR("snap_type_error", "Value is not callable");
+          SLOW_PATH(vm_called(snap, arg, ok, &temp))
         }
-        DISPATCH();
-      call_failed:
-        *stack++ = as_err(temp)->msg;
-        *stack++ = as_err(temp)->err;
-        goto panic;
+        frame->pc = pc;
+        SLOW_PATH(vm_call(snap, a, arg, &temp))
       }
       OP(CLOSURE) {
-        int i;
-        SCode* c = as_code(*(stack - 1));
-        SClosure* cl;
         frame->stack_top = stack;
-        cl = closure_new(snap, c);
-        *(stack - 1) = create_obj(cl); // Replace the code, keeping the closure rooted
-        for (i = 0; i < c->num_upvals; ++i) {
-          uint32_t desc = c->upvals[i];
-          if (!(desc & 1)) cl->upvals[i] = closure->upvals[desc >> 2]; // Either kind
-          else if (desc & 2) cl->upvals[i].value = locals[desc >> 2];
-          else cl->upvals[i].upval = upval_find(snap, &locals[desc >> 2]);
-        }
+        vm_closure(snap, frame->closure, locals, stack - 1);
         DISPATCH();
       }
       // Whether the inlined loop can run: the global still holds the stdlib
@@ -716,18 +867,8 @@ new_frame:
           stack = a + arg;
           DISPATCH();
         }
-        // The parts go above the value, which stays rooted, then move down
-        for (i = 0; i < arg; ++i) {
-          SValue nth_args[2];
-          nth_args[0] = *a;
-          nth_args[1] = create_int(i);
-          frame->stack_top = stack;
-          if (!builtin_nth(snap, nth_args, 2, &temp)) goto call_failed;
-          *stack++ = temp;
-        }
-        memmove(a, a + 1, arg * sizeof(SValue));
-        stack--;
-        DISPATCH();
+        frame->pc = pc;
+        SLOW_PATH(vm_unpack(snap, a, arg, &temp))
       }
       OP(JUMP) {
         pc += arg;
@@ -764,33 +905,9 @@ new_frame:
       }
       OP(RECOVER) {
         // Calls a function without arguments. If it panics, the error is the
-        // result instead (see panic below).
-        a = --stack; // Pop callable
-        if (is_cfunc(*a)) {
-          temp = create_nil();
-          frame->stack_top = stack;
-          as_cfunc(*a)(snap, stack, 0, &temp); // On failure temp is the error
-          frame = &mvec_back(&snap->frames);
-          locals = frame->stack_base;
-          stack = frame->stack_top;
-          *stack++ = temp;
-        } else if (is_code(*a) || is_closure(*a)) {
-          SClosure* cl = is_closure(*a) ? as_closure(*a) : NULL;
-          SCode* c = cl ? cl->code : as_code(*a);
-          if (c->arity != 0) {
-            RUNTIME_ERROR("snap_arity_error", "recover expects a function without arguments");
-          }
-          frame->pc = pc;
-          frame->stack_top = stack;
-          if (!push_frame(snap, c, stack, cl)) {
-            RUNTIME_ERROR("snap_stack_error", "Stack overflow");
-          }
-          mvec_back(&snap->frames).recover = true;
-          goto new_frame;
-        } else {
-          RUNTIME_ERROR("snap_type_error", "Value is not callable");
-        }
-        DISPATCH();
+        // result instead.
+        frame->pc = pc;
+        SLOW_PATH(vm_recover(snap, --stack, &temp))
       }
       OP(PANIC) {
         goto panic;
@@ -851,12 +968,13 @@ new_frame:
 #undef RUNTIME_ERROR
 
 panic:
-  // Stack: [... msg err]. Allocate the error while the stack is still rooted.
-  frame->stack_top = stack;
-  temp = create_obj(snap_err_new(snap, *(stack - 1), *(stack - 2)));
-  if (unwind(snap, temp)) goto new_frame;
+  temp = vm_raise(snap, stack, create_undef()); // The stack ends [... msg err]
+raised:
+  if (is_undef(temp)) goto new_frame;
   return temp;
 }
+
+#undef frame
 
 SValue snap_run(Snap* snap, SValue fn) {
   return snap_call(snap, fn, NULL, 0);

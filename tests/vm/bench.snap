@@ -1,0 +1,12 @@
+; vi: filetype=scheme
+; The dispatch benchmark for make vmcheck (tests/vm/check.sh): calls, a
+; counting loop over a vector, and an inlined some. Prints the total seconds.
+
+(defn fib [n] (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))
+(def v [1 2 3 4 5 6 7 8 9 10])
+(defn hand [k] (loop [i 0] (if (< i 10) (if (= (nth v i) k) k (recur (+ i 1))) nil)))
+(defn timed [f] (let [start (clock)] (f) (- (clock) start)))
+
+(println (+ (timed (fn [] (fib 27)))
+            (timed (fn [] (dotimes [_ 1000000] (hand 6))))
+            (timed (fn [] (dotimes [_ 1000000] (some (fn [x] (= x 6)) v))))))
