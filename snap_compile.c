@@ -42,6 +42,7 @@ typedef struct SnapFnState_ {
   Snap* snap;
   struct SnapFnState_* up;
   struct { MVEC_FIELDS(SnapInst); } insts;
+  struct { MVEC_FIELDS(SnapLineRun); } lines; // See SCode
   SnapVec constants;
   SnapLocal locals[MAX_LOCALS];
   int num_locals;
@@ -66,7 +67,8 @@ typedef struct SnapFnState_ {
   int inline_form; // See SCode
   int barrier;     // Locals below it can't be seen: an inlined function's
   int inlining;    // body is being compiled (inside this many)
-  SCode* inlined[2]; // and these are the functions
+  SCode* inlined[2]; // and these are the functions,
+  int inlined_k[2];  // as these constants
 } SnapFnState;
 
 void gc_mark_fn_states(Snap* snap) {
@@ -79,6 +81,7 @@ void gc_mark_fn_states(Snap* snap) {
 static SnapFnState* fn_state_new(Snap* snap) {
   SnapFnState* fs = (SnapFnState*)calloc(1, sizeof(SnapFnState));
   mvec_init(&fs->insts, SnapInst, 16);
+  mvec_init(&fs->lines, SnapLineRun, 4);
   mvec_init(&fs->constants, SValue, 8);
   fs->last_target = -1;
   fs->inline_form = -1;
@@ -92,6 +95,7 @@ static void fn_state_free(Snap* snap) {
   SnapFnState* fs = snap->fn_state;
   snap->fn_state = fs->up;
   mvec_destroy(&fs->insts);
+  mvec_destroy(&fs->lines);
   mvec_destroy(&fs->constants);
   free(fs->sets);
   free(fs);
@@ -172,6 +176,12 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   c->num_caches = fs->num_caches;
   c->caches = (SFieldCache*)calloc(fs->num_caches > 0 ? fs->num_caches : 1, sizeof(SFieldCache));
   c->inline_form = fs->inline_form;
+  while (fs->lines.vsize > 0 && mvec_back(&fs->lines).pc >= fs->insts.vsize) fs->lines.vsize--;
+  c->lines = fs->lines.vitems;
+  c->num_lines = fs->lines.vsize;
+  c->file = snap->source;
+  fs->lines.vitems = NULL;
+  fs->lines.vsize = 0;
   heap_add(snap, code_extra_bytes(c));
 
   // The code object owns the buffers now
@@ -191,6 +201,25 @@ static void adjust_stack(SnapFnState* fs, int n) {
 
 static int pc(SnapFnState* fs) {
   return fs->insts.vsize;
+}
+
+// Adds an instruction, noting its line when that changes (see SCode). Runs
+// past the end, from instructions a peephole took back, go first.
+static void push_inst(SnapFnState* fs, SnapInst inst) {
+  int at = pc(fs), line = fs->snap->line, j;
+  int inlined[2];
+  SnapLineRun* last;
+  for (j = 0; j < 2; ++j) inlined[j] = j < fs->inlining ? fs->inlined_k[j] : -1;
+  while (fs->lines.vsize > 0 && mvec_back(&fs->lines).pc >= at) fs->lines.vsize--;
+  last = fs->lines.vsize > 0 ? &mvec_back(&fs->lines) : NULL;
+  if (line > 0 && (!last || last->line != line || last->inlined[0] != inlined[0] || last->inlined[1] != inlined[1])) {
+    last = mvec_push(&fs->lines, SnapLineRun);
+    last->pc = at;
+    last->line = line;
+    last->inlined[0] = inlined[0];
+    last->inlined[1] = inlined[1];
+  }
+  *mvec_push(&fs->insts, SnapInst) = inst;
 }
 
 static int last_op(SnapFnState* fs) {
@@ -257,7 +286,7 @@ static bool fold(SnapFnState* fs, int op, int left, int right) {
   } else {
     return false;
   }
-  *mvec_push(&fs->insts, SnapInst) = INST(LOAD_CONSTANT, add_constant(fs->snap, fs, val));
+  push_inst(fs, INST(LOAD_CONSTANT, add_constant(fs->snap, fs, val)));
   adjust_stack(fs, 1);
   return true;
 }
@@ -265,7 +294,7 @@ static bool fold(SnapFnState* fs, int op, int left, int right) {
 static int emit_binary_operands(SnapFnState* fs, int op, int left, int right) {
   if (fold(fs, op, left, right)) return pc(fs) - 1;
   adjust_stack(fs, 1 - (left == 0) - (right == 0)); // Pops stack operands, pushes the result
-  *mvec_push(&fs->insts, SnapInst) = INST(op, OPERANDS(0, left, right));
+  push_inst(fs, INST(op, OPERANDS(0, left, right)));
   return pc(fs) - 1;
 }
 
@@ -344,7 +373,7 @@ static int emit(SnapFnState* fs, int op, int arg) {
       break;
   }
 
-  *mvec_push(&fs->insts, SnapInst) = INST(op, arg);
+  push_inst(fs, INST(op, arg));
   return pc(fs) - 1;
 }
 
@@ -1623,7 +1652,7 @@ static void compile_recur(Snap* snap, SnapFnState* fs, SCons* args, bool tail) {
   }
 
   // STEP is followed by the jump back, which it skips when the compare holds
-  if (step >= 0) *mvec_push(&fs->insts, SnapInst) = step;
+  if (step >= 0) push_inst(fs, step);
   emit_jump_back(snap, fs, target->top);
 }
 
@@ -2071,7 +2100,8 @@ static bool inline_global(Snap* snap, SnapFnState* fs, SCons* sexpr) {
   loop = fs->loop;
   fs->barrier = first;
   fs->loop = NULL;
-  fs->inlined[fs->inlining++] = code;
+  fs->inlined[fs->inlining] = code;
+  fs->inlined_k[fs->inlining++] = fn_k;
   compile_body(snap, fs, body, false);
   fs->inlining--;
   fs->loop = loop;
@@ -2253,7 +2283,12 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
       if (is_empty(expr)) {
         load_constant(snap, fs, expr);
       } else {
+        // Code takes the line of the innermost list it's from that was read
+        // (not one a macro made, say)
+        int line = snap->line, at = parse_line_of(snap, as_cons(expr));
+        if (at > 0) snap->line = at;
         compile_sexpr(snap, fs, as_cons(expr), tail);
+        snap->line = line;
       }
       break;
     case STYPE_FORM:
@@ -2275,6 +2310,23 @@ static void compile(Snap* snap, SnapFnState* fs, SValue expr, bool tail) {
   snap->c_depth--;
 }
 
+// A compile error says the file and line of the form it's in, after where
+// it was raised if it was (in a macro), unless it's from the reader, whose
+// messages give the line
+static void compile_error_where(Snap* snap, SErr* e) {
+  SVec* where;
+  const char* kind = is_key(e->err) ? as_key(e->err)->data : "";
+  if (snap->line <= 0 || strcmp(kind, "snap_parse_error") == 0 || strcmp(kind, "snap_eof_error") == 0) return;
+  if (is_vec(e->where)) {
+    where = as_vec(e->where);
+  } else {
+    where = snap_vec_new(snap, 2); // e is rooted by snap->cause
+    e->where = create_obj(where);
+  }
+  vec_push(snap, where, snap->source);
+  vec_push(snap, where, create_int(snap->line));
+}
+
 // Compiles the forms from lex into a function without arguments: all of
 // them, or just the next one. A macro can compile code (with the compile
 // built-in) while its caller is being compiled, so this saves and restores the
@@ -2288,8 +2340,12 @@ SValue compile_forms(Snap* snap, SnapLex* lex, bool all) {
   int num_anchors = snap->anchors.vsize, c_depth = snap->c_depth;
   SnapLex lex_start = *lex;
   jmp_buf jmp;
+  SnapLines lines = { NULL, NULL, 0, 0 };
+  SnapLines* outer_lines = snap->lines;
+  int outer_line = snap->line;
 
   memcpy(jmp, snap->jmp, sizeof(jmp_buf));
+  snap->lines = &lines;
 start:
   if (setjmp(snap->jmp) > 0) {
     while (snap->fn_state != up) fn_state_free(snap);
@@ -2302,12 +2358,15 @@ start:
       goto start;
     }
     result = create_obj(snap->cause);
+    compile_error_where(snap, snap->cause);
     goto done;
   }
 
   fs = fn_state_new(snap);
   fs->top = true;
-  while ((all || first) && parse_form(snap, lex, &expr)) {
+  // Each form's lists are forgotten once it's compiled: it's released, so
+  // their cells can be reused
+  while ((all || first) && (parse_lines_clear(&lines), snap->line = 0, parse_form(snap, lex, &expr))) {
     if (is_obj(expr)) anchor(snap, as_obj(expr));
     scan_sets(fs, expr);
 #ifdef SNAP_DEBUG
@@ -2334,6 +2393,9 @@ start:
 done:
   memcpy(snap->jmp, jmp, sizeof(jmp_buf));
   snap->anchors.vsize = num_anchors; // Also unwinds anchors left by a longjmp
+  snap->lines = outer_lines;
+  snap->line = outer_line;
+  parse_lines_free(&lines);
   return result;
 }
 static void iprintf(int indent, const char* format, ...) {

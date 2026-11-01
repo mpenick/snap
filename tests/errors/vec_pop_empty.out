@@ -1,1 +1,2 @@
 <err :snap_index_error "Vector is empty">
+  at tests/errors/vec_pop_empty.snap:3

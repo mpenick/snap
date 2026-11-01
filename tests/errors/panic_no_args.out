@@ -1,1 +1,2 @@
 <err :snap_compile_error "Expected (panic <err> <msg>)">
+  at tests/errors/panic_no_args.snap:3

@@ -5,6 +5,7 @@
 #include "snap_lex.h"
 
 #include <errno.h>
+#include <stdlib.h>
 
 /* Parser */
 
@@ -20,14 +21,66 @@ void parse_raise(Snap* snap, const char* err, const char* format, ...) {
 
 static SValue parse_expr(Snap* snap, SnapLex* lex, int token);
 
+/* Lines */
+
+static unsigned line_hash(SCons* list) {
+  uint64_t p = (uint64_t)(uintptr_t)list;
+  return (unsigned)((p >> 4) * 0x9e3779b97f4a7c15ull >> 32);
+}
+
+static void lines_put(SnapLines* t, SCons* list, int line) {
+  unsigned i;
+  if (2 * (t->size + 1) > t->cap) { // Grows to keep it at most half full
+    SnapLines old = *t;
+    int k;
+    t->cap = old.cap ? 2 * old.cap : 64;
+    t->keys = (SCons**)calloc(t->cap, sizeof(SCons*));
+    t->lines = (int*)malloc(t->cap * sizeof(int));
+    t->size = 0;
+    for (k = 0; k < old.cap; ++k) {
+      if (old.keys[k]) lines_put(t, old.keys[k], old.lines[k]);
+    }
+    free(old.keys);
+    free(old.lines);
+  }
+  for (i = line_hash(list) & (t->cap - 1); t->keys[i] && t->keys[i] != list; i = (i + 1) & (t->cap - 1)) {}
+  if (!t->keys[i]) t->size++;
+  t->keys[i] = list;
+  t->lines[i] = line;
+}
+
+int parse_line_of(Snap* snap, SCons* list) {
+  SnapLines* t = snap->lines;
+  unsigned i;
+  if (!t || t->size == 0) return 0;
+  for (i = line_hash(list) & (t->cap - 1); t->keys[i]; i = (i + 1) & (t->cap - 1)) {
+    if (t->keys[i] == list) return t->lines[i];
+  }
+  return 0;
+}
+
+void parse_lines_clear(SnapLines* t) {
+  if (t->size > 0) memset(t->keys, 0, t->cap * sizeof(SCons*));
+  t->size = 0;
+}
+
+void parse_lines_free(SnapLines* t) {
+  free(t->keys);
+  free(t->lines);
+}
+
+/* Reading */
+
 static SValue parse_sexpr(Snap* snap, SnapLex* lex) {
   SCons* sexpr;
   SCons* tail;
+  int line = lex->line;
   int token = snap_lex_next_token(lex);
   if (token == ')') {
     return create_empty();
   }
   sexpr = tail = (SCons*)anchor(snap, (SObject*)cons_new(snap));
+  if (snap->lines) lines_put(snap->lines, sexpr, line);
   sexpr->first = parse_expr(snap, lex, token);
   // parse_expr() raises on EOF, so this always ends at ')'
   while ((token = snap_lex_next_token(lex)) != ')') {

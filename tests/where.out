@@ -1,0 +1,13 @@
+<err :snap_type_error "Expected numbers">
+[["tests/where.snap" 6 "first-num" :inlined] ["tests/where.snap" 8 "wrap" :inlined] ["tests/where.snap" 9 nil]]
+[["tests/where.snap" 20 "total"] ["tests/where.snap" 23 "caller" :inlined] ["tests/where.snap" 24 nil]]
+[["tests/where.snap" 29 "oops" :inlined] ["tests/where.snap" 31 nil]]
+[["tests/where.snap" 32 nil]]
+[["tests/where.snap" 33 nil]]
+[["tests/where.snap" 36 nil]]
+[["tests/where.snap" 40 nil]]
+[[nil 1 nil]]
+[[nil 3 nil]]
+[["tests/where.snap" 49 "bad-macro"] [nil 1 nil]]
+[["tests/load/panics.snap" 2 nil]]
+nil <err :snap_type_error "Expected an error">

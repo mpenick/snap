@@ -1,1 +1,17 @@
 <err :oops "from deep">
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f
+  at tests/errors/uncaught.snap:3 in f

@@ -1,1 +1,3 @@
 <err :snap_type_error "Expected numbers">
+  at tests/errors/type_error.snap:3 in f (inlined)
+  at tests/errors/type_error.snap:4

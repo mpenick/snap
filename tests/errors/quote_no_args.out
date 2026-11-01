@@ -1,1 +1,2 @@
 <err :snap_compile_error "Expected a single expression">
+  at tests/errors/quote_no_args.snap:3

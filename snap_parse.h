@@ -51,6 +51,19 @@ typedef struct {
 
 int snap_lex_next_token(SnapLex* lex);
 
+// The line each list was read from, while the form they're in is compiled:
+// a hash table from the list's first cell to its line
+typedef struct SnapLines_ {
+  SCons** keys;
+  int* lines;
+  int cap; // A power of 2, or 0
+  int size;
+} SnapLines;
+
+void parse_lines_clear(SnapLines* lines);
+void parse_lines_free(SnapLines* lines);
+int parse_line_of(Snap* snap, SCons* list); // 0 if it wasn't read
+
 void parse_enter(Snap* snap, const char* err);
 bool parse_form(Snap* snap, SnapLex* lex, SValue* result);
 void parse_raise(Snap* snap, const char* err, const char* format, ...);

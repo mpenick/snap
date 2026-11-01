@@ -693,6 +693,93 @@ static void code_name(Snap* snap, SCode* target, char* out, size_t n) {
   snprintf(out, n, "<anonymous>"); // Top-level code, or a function only data holds
 }
 
+// The line run instruction at is in (see SCode), or NULL
+static SnapLineRun* line_run(SCode* code, int at) {
+  int lo = 0, hi = code->num_lines - 1;
+  SnapLineRun* found = NULL;
+  while (lo <= hi) {
+    int mid = (lo + hi) / 2;
+    if (code->lines[mid].pc <= at) {
+      found = &code->lines[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found ? found : (code->num_lines > 0 ? &code->lines[0] : NULL);
+}
+
+static SCode* value_code(SValue fn) {
+  return is_closure(fn) ? as_closure(fn)->code : is_code(fn) ? as_code(fn) : NULL;
+}
+
+// Adds [file line name] (and :inlined if it is) to out
+static void add_place(Snap* snap, SVec* out, SValue file, int line, SCode* code, bool inlined) {
+  SVec* place = snap_vec_new(snap, 4);
+  char name[256];
+  vec_push(snap, out, create_obj(place)); // So it's rooted
+  vec_push(snap, place, file);
+  vec_push(snap, place, create_int(line));
+  if (code) code_name(snap, code, name, sizeof(name));
+  vec_push(snap, place, code && strcmp(name, "<anonymous>") != 0 ? create_obj(snap_str_new_format(snap, "%s", name))
+                                                                : create_nil());
+  if (inlined) vec_push(snap, place, create_obj(snap_key_new(snap, "inlined")));
+}
+
+SValue snap_err_where(Snap* snap, SValue err) {
+  SVec *where, *out;
+  int i, j;
+  if (!is_err(err) || !is_vec(as_err(err)->where)) return create_nil();
+  where = as_vec(as_err(err)->where);
+  out = (SVec*)anchor(snap, (SObject*)snap_vec_new(snap, where->len / 2));
+  for (i = 0; i + 1 < where->len; i += 2) {
+    SValue x = *snap_vec_at(where, i);
+    int n = (int)as_int(*snap_vec_at(where, i + 1));
+    if (is_code(x)) {
+      SCode* code = as_code(x);
+      SnapLineRun* run = line_run(code, n);
+      // Inlined functions, innermost first, at the line their code starts on
+      for (j = 1; run && j >= 0; --j) {
+        SCode* in = run->inlined[j] >= 0 ? value_code(code->constants[run->inlined[j]]) : NULL;
+        SnapLineRun* first = in ? line_run(in, 0) : NULL;
+        if (in) add_place(snap, out, in->file, first ? first->line : 0, in, true);
+      }
+      add_place(snap, out, code->file, run ? run->line : 0, code, false);
+    } else {
+      add_place(snap, out, x, n, NULL, false);
+    }
+  }
+  release(snap);
+  return create_obj(out);
+}
+
+void snap_print_err(Snap* snap, FILE* out, SValue value) {
+  SValue where;
+  int i;
+  print_val(out, value);
+  if (!is_err(value)) return;
+  snap_pin(snap, value);
+  where = snap_pin(snap, snap_err_where(snap, value));
+  for (i = 0; is_vec(where) && i < as_vec(where)->len; ++i) {
+    SVec* place = as_vec(*snap_vec_at(as_vec(where), i));
+    SValue file = *snap_vec_at(place, 0), name = *snap_vec_at(place, 2);
+    SnapInt line = as_int(*snap_vec_at(place, 1));
+    fprintf(out, "\n  at %s", is_str(file) ? as_str(file)->data : "<string>");
+    if (line > 0) fprintf(out, ":%d", (int)line);
+    if (is_str(name)) fprintf(out, " in %s", as_str(name)->data);
+    if (place->len > 3) fprintf(out, " (inlined)");
+  }
+  snap_unpin(snap, where);
+  snap_unpin(snap, value);
+}
+
+// (err-where <err>): see snap_err_where()
+static bool builtin_err_where(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!err_arg(snap, args, num_args, result)) return false;
+  *result = snap_err_where(snap, args[0]);
+  return true;
+}
+
 static const char* kind_name(uint8_t type) {
   if (type == STYPE_CONS) return "list";
   switch (type) {
@@ -1425,6 +1512,7 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "err?", builtin_iserr);
   snap_def_cfunc(snap, "err-kind", builtin_err_kind);
   snap_def_cfunc(snap, "err-msg", builtin_err_msg);
+  snap_def_cfunc(snap, "err-where", builtin_err_where);
   snap_def_cfunc(snap, "count", builtin_count);
   snap_def_cfunc(snap, "nth", builtin_nth);
   snap_def_cfunc(snap, "apply", builtin_apply);

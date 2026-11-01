@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define check(a, e) (assert(a), (e))
@@ -157,6 +158,9 @@ typedef struct SErr_ {
   SOBJECT_FIELDS
   SValue err;
   SValue msg;
+  SValue where; // Where it was raised: nil, or a vector of pairs, innermost
+                // first: a code object and the offset of its instruction, or
+                // a file (a string or nil) and a line (see snap_err_where())
 } SErr;
 
 typedef struct SCons_ {
@@ -242,6 +246,15 @@ typedef struct SClosure_ {
   SCapture upvals[0];
 } SClosure;
 
+// Instructions from pc on came from line, inside the functions at constants
+// inlined[0] and inlined[1] (outermost first) when they're >= 0 (see
+// inline_global)
+typedef struct SnapLineRun_ {
+  int pc;
+  int line;
+  int inlined[2];
+} SnapLineRun;
+
 struct SCode_ {
   SOBJECT_FIELDS
   SnapInst* insts;
@@ -259,6 +272,9 @@ struct SCode_ {
   int num_caches;
   int inline_form; // The constant holding its ([params] body...), for calls to
                    // inline it in their place, or -1 (see inline_global)
+  SnapLineRun* lines; // Which line each instruction is from
+  int num_lines;
+  SValue file; // The file it was loaded from, or nil
 };
 
 // Where a call site last found a struct field: for structs of type, key is
@@ -333,6 +349,9 @@ struct Snap_ {
   int c_depth; // Counted up to SNAP_MAX_C_DEPTH
   char* load_file; // The file snap_load() is running, which relative paths are from
   uint64_t rand_state; // (rand), set by (rand-seed n)
+  SValue source; // The file being compiled (a string), or nil; it's pinned
+  struct SnapLines_* lines; // The line of each list read by the form being
+  int line;                 // compiled, and the line it's at (see compile())
   struct { MVEC_FIELDS(SObject*); } anchors;
   struct { MVEC_FIELDS(SValue); } pins; // See snap_pin()
   size_t num_bytes_alloced;
@@ -675,6 +694,14 @@ SValue snap_exec(Snap* snap, const char* str);
 // its message.
 SValue snap_load(Snap* snap, const char* path);
 void snap_print(SValue value);
+// A vector of [file line name] for where an error was raised, innermost
+// first, or nil. file is nil when it wasn't loaded from one, line is 0 when
+// unknown and name is nil for top-level code. A function inlined in another
+// adds :inlined, with the line its code starts on.
+SValue snap_err_where(Snap* snap, SValue err);
+// Prints an error, then a line "  at file:line in name" for each place in
+// snap_err_where(). Prints any other value as snap_print() does.
+void snap_print_err(Snap* snap, FILE* out, SValue value);
 
 // Does about `work` units of collection (one is marking a value or sweeping an
 // object), starting a collection if none is running. Returns true when a

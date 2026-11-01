@@ -1,0 +1,56 @@
+; vi: filetype=scheme
+; err-where: where an error was raised, innermost first, as [file line name],
+; with :inlined for a small function compiled into its caller
+
+(defn first-num [v]
+  (+ (nth v 0) 1))
+(defn wrap []
+  (first-num [:a]))
+(def e (recover (fn [] (wrap))))
+(println e)
+(println (err-where e))
+
+; A function too big to inline keeps its own frame; the line is the one the
+; failing instruction came from
+(defn total [v]
+  (let [n (count v)]
+    (loop [i 0 s 0]
+      (if (< i n)
+        (recur (+ i 1)
+               (+ s (nth v i)))
+        s))))
+(defn caller [v]
+  (total v))
+(println (err-where (recover (fn [] (caller [1 :x])))))
+
+; A panic, a call of something that isn't a function, and a wrong number of
+; arguments
+(defn oops [x]
+  (when (> x 2)
+    (panic :too-big x)))
+(println (err-where (recover (fn [] (dotimes [i 5] (oops i))))))
+(println (err-where (recover (fn [] (let [f 5] (f 1))))))
+(println (err-where (recover (fn [] (total)))))
+
+; An inline loop's fn is part of its caller
+(println (err-where (recover (fn [] (map (fn [x] (+ x 1)) [1 :z])))))
+
+; Rethrowing a caught error makes a new one, from where it's raised again
+(def caught (recover (fn [] (caller [:q]))))
+(println (err-where (recover (fn [] (panic (err-kind caught) (err-msg caught))))))
+
+; Compile errors give the line of the form; code compiled from a string has
+; no file
+(println (err-where (compile "(let [x] 1)")))
+(println (err-where (compile "1\n2\n(fn)")))
+
+; A macro whose expansion panics says where in the macro
+(defmacro bad-macro [x]
+  (panic :macro-failed x))
+(println (err-where (compile "(bad-macro 1)")))
+
+; From a loaded file: its own name
+(println (err-where (load "load/panics.snap")))
+
+; An error that wasn't raised, and other values
+(println (err-where (err :made "not raised")) (recover (fn [] (err-where 1))))

@@ -326,18 +326,46 @@ enum {
   VM_FAIL   // An error (the result), with the frame's stack_top where it was
 };
 
+// Where an error is being raised (see SErr): inner, where it was raised
+// before (by snap code a C function called, say), then each frame's
+// instruction, down to the one that will catch it, at most 16 places
+#define MAX_WHERE 16
+static SValue error_where(Snap* snap, SValue inner) {
+  SVec* inner_vec = is_vec(inner) ? as_vec(inner) : NULL;
+  int num_inner = inner_vec ? inner_vec->len / 2 : 0, n = num_inner, i;
+  SVec* where;
+  for (i = snap->frames.vsize - 1; i >= 0 && n < MAX_WHERE; --i) {
+    SnapFrame* f = &snap->frames.vitems[i];
+    n++;
+    if (f->recover || f->stop) break;
+  }
+  where = snap_vec_new(snap, 2 * n); // inner is rooted by the failed error
+  for (i = 0; i < 2 * num_inner && i < 2 * MAX_WHERE; ++i) vec_push(snap, where, *snap_vec_at(inner_vec, i));
+  for (i = snap->frames.vsize - 1; i >= 0 && where->len < 2 * MAX_WHERE; --i) {
+    SnapFrame* f = &snap->frames.vitems[i];
+    vec_push(snap, where, create_obj(f->code));
+    vec_push(snap, where, create_int(f->pc - f->code->insts - 1)); // pc is past it
+    if (f->recover || f->stop) break;
+  }
+  return create_obj(where);
+}
+
 // Raises an error: a failed call's (failed is an error) or a panic's (the
 // stack ends [... msg err]). Unwinds to the innermost recover. Returns undef
 // when exec() goes on from there (at new_frame), else the error for exec()
 // to return.
 static SValue vm_raise(Snap* snap, SValue* stack, SValue failed) {
-  SValue err;
+  SValue err, where;
   if (is_err(failed)) {
     *stack++ = as_err(failed)->msg;
     *stack++ = as_err(failed)->err;
   }
   mvec_back(&snap->frames).stack_top = stack;
+  where = error_where(snap, is_err(failed) ? as_err(failed)->where : create_nil());
+  anchor(snap, as_obj(where));
   err = create_obj(snap_err_new(snap, *(stack - 1), *(stack - 2)));
+  as_err(err)->where = where;
+  release(snap);
   return unwind(snap, err) ? create_undef() : err;
 }
 
@@ -572,6 +600,7 @@ new_frame:
 
 // Raises an error. Always use inside braces.
 #define RUNTIME_ERROR(err, ...) \
+  frame->pc = pc; \
   temp = vm_error(snap, stack, err, __VA_ARGS__); \
   goto raised;
 
@@ -992,6 +1021,7 @@ new_frame:
 #undef RUNTIME_ERROR
 
 panic:
+  frame->pc = pc;
   temp = vm_raise(snap, stack, create_undef()); // The stack ends [... msg err]
 raised:
   if (is_undef(temp)) goto new_frame;

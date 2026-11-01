@@ -1,1 +1,2 @@
 <err :snap_compile_error "Expected bindings [<id> <expr> ...]">
+  at tests/errors/let_nested.snap:4

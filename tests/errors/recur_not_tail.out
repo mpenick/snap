@@ -1,1 +1,2 @@
 <err :snap_compile_error "recur must be in tail position">
+  at tests/errors/recur_not_tail.snap:3

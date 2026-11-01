@@ -1,1 +1,2 @@
 <err :snap_type_error "Expected a map">
+  at tests/errors/map_type.snap:3

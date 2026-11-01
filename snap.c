@@ -23,10 +23,15 @@ static void lex_init(SnapLex* lex, const char* str) {
   lex->line = 1;
 }
 
+// Code compiled from a string isn't from the file being loaded
 SValue snap_compile(Snap* snap, const char* str) {
   SnapLex lex;
+  SValue source = snap->source, result;
   lex_init(&lex, str);
-  return compile_forms(snap, &lex, true);
+  snap->source = create_nil();
+  result = compile_forms(snap, &lex, true);
+  snap->source = source;
+  return result;
 }
 
 // Runs each form as soon as it's compiled, so that a macro can be used by
@@ -78,15 +83,22 @@ SValue snap_load(Snap* snap, const char* path) {
     free(full);
     return result;
   }
-  snap->load_file = full;
-  result = snap_exec(snap, src);
-  snap->load_file = outer;
+  {
+    SValue source = snap->source;
+    snap->source = snap_pin(snap, create_obj(snap_str_new_format(snap, "%s", full)));
+    snap->load_file = full;
+    result = snap_exec(snap, src);
+    snap->load_file = outer;
+    snap_unpin(snap, snap->source);
+    snap->source = source;
+  }
   // Says which file an error is from, when it was loaded by another file
   // (each file it was loaded through adds its name)
   if (outer && is_err(result) && is_str(as_err(result)->msg)) {
     SValue old = snap_pin(snap, result);
     SValue msg = snap_pin(snap, create_obj(snap_str_new_format(snap, "%s: %s", full, as_str(as_err(old)->msg)->data)));
     result = create_obj(snap_err_new(snap, as_err(old)->err, msg));
+    as_err(result)->where = as_err(old)->where;
     snap_unpin(snap, msg);
     snap_unpin(snap, old);
   }
@@ -142,6 +154,9 @@ void snap_init(Snap* snap) {
   snap->reentered = false;
   snap->c_depth = 0;
   snap->load_file = NULL;
+  snap->source = create_nil();
+  snap->lines = NULL;
+  snap->line = 0;
   snap->rand_state = 0x9e3779b97f4a7c15;
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);

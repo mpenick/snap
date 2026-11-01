@@ -75,7 +75,8 @@ size_t code_extra_bytes(SCode* code) {
   return code->insts_count * sizeof(SnapInst) +
          code->num_constants * sizeof(SValue) +
          code->num_upvals * sizeof(uint32_t) +
-         code->num_caches * sizeof(SFieldCache);
+         code->num_caches * sizeof(SFieldCache) +
+         code->num_lines * sizeof(SnapLineRun);
 }
 
 // Returns how many buffers it freed with free(), besides the object itself
@@ -128,7 +129,8 @@ int gc_free(Snap* snap, SObject* obj) {
       free(((SCode*)obj)->constants);
       free(((SCode*)obj)->upvals);
       free(((SCode*)obj)->caches);
-      freed = 4;
+      free(((SCode*)obj)->lines);
+      freed = 5;
       break;
     case STYPE_CLOSURE:
       snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->num_upvals * sizeof(SCapture));
@@ -219,10 +221,12 @@ static int gc_scan(Snap* snap, SnapGray* gray) {
     case STYPE_MAP:
       return gc_scan_vals(snap, gray, ((SMap*)obj)->entries, 2 * ((SMap*)obj)->used); // Deleted keys aren't objects
     case STYPE_CODE:
+      gc_mark_val(snap, ((SCode*)obj)->file);
       return gc_scan_vals(snap, gray, ((SCode*)obj)->constants, ((SCode*)obj)->num_constants);
     case STYPE_ERR:
       gc_mark_val(snap, ((SErr*)obj)->err);
       gc_mark_val(snap, ((SErr*)obj)->msg);
+      gc_mark_val(snap, ((SErr*)obj)->where);
       break;
     case STYPE_CONS:
       gc_mark_val(snap, ((SCons*)obj)->first);

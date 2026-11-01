@@ -1,1 +1,2 @@
 <err :snap_type_error "Can't change a quoted literal">
+  at tests/errors/quoted_nested.snap:5

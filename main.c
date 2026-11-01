@@ -59,7 +59,7 @@ static int repl(Snap* snap) {
   snap->dump_code = dump_code;
   result = is_code(fn) ? snap_run(snap, fn) : fn;
   if (is_err(result)) {
-    snap_print(result);
+    snap_print_err(snap, stdout, result);
     printf("\n");
     return -1;
   }
@@ -69,7 +69,7 @@ static int repl(Snap* snap) {
 static int run_file(Snap* snap, const char* filename) {
   SValue result = snap_load(snap, filename);
   if (is_err(result)) {
-    snap_print(result);
+    snap_print_err(snap, stdout, result);
     printf("\n");
     return -1;
   }

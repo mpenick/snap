@@ -1,1 +1,2 @@
 <err :snap_compile_error "Expected expressions">
+  at tests/errors/begin_no_args.snap:3

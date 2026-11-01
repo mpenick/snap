@@ -292,6 +292,7 @@ SErr* snap_err_new(Snap* snap, SValue err, SValue msg) {
   SErr* e = (SErr*)gc_new(snap, STYPE_ERR, sizeof(SErr));
   e->err = err;
   e->msg = msg;
+  e->where = create_nil();
   return e;
 }
 

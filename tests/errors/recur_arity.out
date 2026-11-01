@@ -1,1 +1,2 @@
 <err :snap_compile_error "Invalid number of arguments">
+  at tests/errors/recur_arity.snap:3

@@ -1,1 +1,2 @@
 <err :snap_arith_error "Division by zero">
+  at tests/errors/div_zero.snap:3
