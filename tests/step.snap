@@ -39,7 +39,7 @@
 ; No iterations
 (println (loop [i 5 n 0] (if (< i 5) (recur (+ i 1) (+ n 1)) [i n])))
 
-; recur to a fn, and nested loops (as in loop.snap)
+; recur to a fn, and nested loops (as in examples/loop.snap)
 (def count-up (fn [i acc] (if (< i 10) (recur (+ i 1) (+ acc i)) acc)))
 (println (count-up 0 0) (count-up 20 0))
 (println (loop [i 0 s 0]

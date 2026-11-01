@@ -50,7 +50,7 @@ stress: snap_lex.h repl_snap.h stdlib_snap.h
 	$(CC) $(STRESS_FLAGS) -DGC_POOL=0 -o snap_stress $(SOURCES) $(LDFLAGS)
 	$(CC) $(STRESS_FLAGS) -o snap_stress_pool $(SOURCES) $(LDFLAGS)
 	$(CC) $(STRESS_FLAGS) -DGC_POOL=0 -I. -o tests/api_stress tests/api.c snap.c -lm
-	@for f in test.snap closure.snap loop.snap new.snap; do \
+	@for f in examples/test.snap examples/closure.snap examples/loop.snap examples/new.snap; do \
 		echo "== $$f"; ./snap_stress $$f > /dev/null || exit 1; \
 	done
 	@tests/run.sh ./snap_stress
