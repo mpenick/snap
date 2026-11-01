@@ -687,6 +687,8 @@ static void patch_jumps(Snap* snap, SnapFnState* fs, int chain) {
   }
 }
 
+static void compile_compare(Snap* snap, SnapFnState* fs, int opcode, SCons* args);
+
 // Compiles a condition that jumps when its truth is `when`, and otherwise
 // falls through, leaving nothing on the stack. Returns the chain of its
 // jumps, added to `chain`. An and (or) jumps out at the first false (true)
@@ -712,7 +714,13 @@ static int compile_jump(Snap* snap, SnapFnState* fs, SValue cond, bool when, int
   } else if (form == TK_NOT && list_length(args) == 1) {
     chain = compile_jump(snap, fs, args->first, !when, chain);
   } else {
-    compile(snap, fs, cond, false);
+    // (not= ...) is (= ...) with the jump the other way
+    if (form == TK_NE) {
+      compile_compare(snap, fs, EQUALS, args);
+      when = !when;
+    } else {
+      compile(snap, fs, cond, false);
+    }
     if (fs->last_target != pc(fs) && (last_op(fs) == LOAD_CONSTANT || last_op(fs) == LOAD_NIL)) {
       SnapInst inst = fs->insts.vitems[pc(fs) - 1];
       bool truth = INST_OP(inst) == LOAD_CONSTANT && !is_falsy(fs->constants.vitems[INST_ARG(inst)]);
@@ -1707,6 +1715,10 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
           compile(snap, fs, args->first, false);
           emit(fs, NOT, 0);
           break;
+        case TK_NE:
+          compile_compare(snap, fs, EQUALS, args);
+          emit(fs, NOT, 0);
+          break;
         case TK_AND: case TK_OR:
           if (!args) {
             load_constant(snap, fs, create_bool(as_form(sexpr->first) == TK_AND));
@@ -1863,6 +1875,7 @@ const char* form_name(int token) {
     case TK_GE: return ">=";
     case TK_EQ: return "=";
     case TK_NOT: return "not";
+    case TK_NE: return "not=";
     case TK_AND: return "and";
     case TK_OR: return "or";
     case TK_ADD: return "+";

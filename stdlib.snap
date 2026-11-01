@@ -72,6 +72,21 @@
   (let [v (if (vector? coll) coll (vec coll)) n (count v)]
     (loop [acc init i 0] (if (< i n) (recur (f acc (nth v i)) (+ i 1)) acc))))
 
+; (some f coll) is the first truthy (f x) for x in a vector, list or map (as
+; [k v] entries), or nil. (every? f coll) is whether (f x) is truthy for every
+; x, so true for none. Both stop as soon as they know.
+(defn some [f coll]
+  (if (or (vector? coll) (map? coll))
+    (let [n (count coll)]
+      (loop [i 0] (if (< i n) (if-let [r (f (nth coll i))] r (recur (+ i 1))) nil)))
+    (loop [s coll] (if (or (nil? s) (= s '())) nil (if-let [r (f (first s))] r (recur (next s)))))))
+
+(defn every? [f coll]
+  (if (or (vector? coll) (map? coll))
+    (let [n (count coll)]
+      (loop [i 0] (if (< i n) (if (f (nth coll i)) (recur (+ i 1)) false) true)))
+    (loop [s coll] (if (or (nil? s) (= s '())) true (if (f (first s)) (recur (next s)) false)))))
+
 ; (sort-by key coll) is a vector of coll's items ordered by (key item),
 ; smallest first. Items with equal keys keep their order (a bottom-up merge
 ; sort).

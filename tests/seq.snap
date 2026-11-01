@@ -1,0 +1,37 @@
+; vi: filetype=scheme
+; not=, range, some and every?
+
+; not= is (not (= ...)), with any number of arguments, as a value too
+(println (not= 1 2) (not= 1 1) (not= 1 1 2) (not= 1 1 1) (not= "a" "a") (not= [1] [2]))
+(println (if (not= 1 2) :yes :no) (if (not= 2 2) :yes :no) (when (not= :a :b) :w))
+(defn pick [a b] (if (and (not= a b) (not= a 0)) a b))
+(println (pick 1 2) (pick 0 2) (pick 3 3))
+(defn same? [a b] (not (not= a b)))
+(println (same? 1 1) (same? 1 2))
+(println (filter (fn [x] (not= x 2)) [1 2 3]) (apply not= [1 1]) (reduce not= true [false]))
+(println (recover (fn [] (compile "(not= 1)"))) (compile "(def not= 1)"))
+
+; range: ints if every argument is one, otherwise floats
+(println (range 5) (range 0) (range -3) (range 2 6) (range 6 2) (range 0 10 3) (range 10 0 -3) (range 5 0 -1))
+(println (range 0 1 0.25) (range 0.0 3) (range 0 0.3 0.1) (range 3.5) (range 1 0 0.5) (range 1 0 -0.5))
+(println (count (range 100000)) (nth (range 100000) 99999) (count (range 0 1000 0.5)))
+(println (range -4611686018427387904 4611686018427387903 4611686018427387903))
+(println (map (fn [x] (* x x)) (range 1 5)) (reduce + 0 (range 101)))
+(println (recover (fn [] (range 1 2 0))) (recover (fn [] (range 1.0 2 0.0))) (recover (fn [] (range))))
+(println (recover (fn [] (range 1 2 3 4))) (recover (fn [] (range :a))) (recover (fn [] (range 0 1e300 1e-300))))
+
+; Boxed floats allocate while the vector fills
+(gc-step 0)
+(println (count (range 1e300 2e300 1e295)) (nth (range 1e300 2e300 1e299) 3))
+
+; some is the first truthy (f x), every? whether all are; both stop early
+(defn even [x] (= (% x 2) 0))
+(println (some even [1 3 4 5]) (some even [1 3]) (some (fn [x] (when (even x) x)) [1 6 8]) (some even []) (some even nil))
+(println (some even '(1 2)) (some even '()) (some nil? (list 1 nil 3)) (some (fn [[k v]] (when (= v 2) k)) {:a 1 :b 2}))
+(println (every? even [2 4]) (every? even [2 3]) (every? even []) (every? even nil) (every? even '(2 4)) (every? even '(2 5)) (every? even '()))
+(println (every? (fn [[k v]] (key? k)) {:a 1 :b 2}) (some nil? [1 nil]) (some (fn [x] x) [nil false 0]))
+(def calls 0)
+(println (some (fn [x] (set! calls (+ calls 1)) (> x 2)) (range 100)) calls)
+(set! calls 0)
+(println (every? (fn [x] (set! calls (+ calls 1)) (< x 2)) (range 100)) calls)
+(println (recover (fn [] (some even 5))) (recover (fn [] (every? even [1 :a]))) (recover (fn [] (every? even [2 :a]))))

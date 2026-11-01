@@ -80,6 +80,7 @@ int snap_lex_next_token(SnapLex* lex) {
       '>=' => { token = TK_GE; fbreak; };
       '=' => { token = TK_EQ; fbreak; };
       'not' => { token = TK_NOT; fbreak; };
+      'not=' => { token = TK_NE; fbreak; };
       'and' => { token = TK_AND; fbreak; };
       'or' => { token = TK_OR; fbreak; };
       chars => { token = *ts; fbreak; };

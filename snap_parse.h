@@ -33,7 +33,7 @@ enum {
   TK_RECOVER,
   TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
   TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ,
-  TK_AND, TK_OR, TK_NOT,
+  TK_AND, TK_OR, TK_NOT, TK_NE,
   TK_UNQUOTE, // ~x, never lexed
   TK_SPLICE,  // ~@x
   TK_EOF

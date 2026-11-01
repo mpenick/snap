@@ -296,7 +296,7 @@ static SValue parse_value(Snap* snap, SnapLex* lex, int token) {
     case TK_RECOVER:
     case TK_ADD: case TK_SUB: case TK_MUL: case TK_DIV: case TK_MOD:
     case TK_LT: case TK_LE: case TK_GT: case TK_GE: case TK_EQ:
-    case TK_NOT: case TK_AND: case TK_OR:
+    case TK_NOT: case TK_NE: case TK_AND: case TK_OR:
       return create_form(token);
     case TK_EOF:
       parse_raise(snap, "snap_eof_error", "Premature end of file on line %d", lex->line);

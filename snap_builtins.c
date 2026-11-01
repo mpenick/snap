@@ -3,6 +3,8 @@
 #include "snap_vm.h"
 #include "snap_compile.h"
 
+#include <limits.h>
+
 /* Builtins */
 
 // Sets *result to a new error and returns false, so a builtin can panic with
@@ -106,6 +108,51 @@ bool builtin_err_msg(Snap* snap, const SValue* args, int num_args, SValue* resul
 // Builds vector literals (see compile_vec())
 bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return vec_from_args(snap, args, num_args, result);
+}
+
+// (range n), (range a b) and (range a b step): a vector of the numbers from a
+// (0 if not given) up to but not including b, by step (1 if not given, and it
+// can be negative). Ints if every argument is an int, otherwise floats, each
+// a + i * step so that the steps' rounding doesn't add up.
+static bool builtin_range(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  const SValue* end = &args[num_args > 1 ? 1 : 0];
+  bool ints = true;
+  uint64_t len;
+  SVec* vec;
+  int i;
+  if (num_args < 1 || num_args > 3) return arity_error(snap, result);
+  for (i = 0; i < num_args; ++i) {
+    if (!is_num_p(&args[i])) return fail(snap, result, "snap_type_error", "Expected numbers");
+    if (!is_int(args[i])) ints = false;
+  }
+  if (ints) {
+    SnapInt a = num_args > 1 ? as_int(args[0]) : 0, b = as_int(*end), step = num_args > 2 ? as_int(args[2]) : 1;
+    if (step == 0) return fail(snap, result, "snap_arith_error", "range's step can't be 0");
+    // Unsigned, since b - a can be past what an int holds
+    if (step > 0) len = b > a ? ((uint64_t)b - (uint64_t)a + (uint64_t)step - 1) / (uint64_t)step : 0;
+    else len = a > b ? ((uint64_t)a - (uint64_t)b + (uint64_t)-step - 1) / (uint64_t)-step : 0;
+    if (len > INT_MAX) return fail(snap, result, "snap_arith_error", "range is too long");
+    vec = snap_vec_new(snap, (int)len);
+    for (i = 0; i < (int)len; ++i) vec->data[i] = create_int(a + i * step);
+    vec->len = (int)len;
+  } else {
+    SnapFloat a = num_args > 1 ? num_p(&args[0]) : 0.0, b = num_p(end), step = num_args > 2 ? num_p(&args[2]) : 1.0;
+    SnapFloat n = ceil((b - a) / step);
+    if (step == 0.0) return fail(snap, result, "snap_arith_error", "range's step can't be 0");
+    if (!(n > 0.0)) n = 0.0; // Also NaN
+    if (n > INT_MAX) return fail(snap, result, "snap_arith_error", "range is too long");
+    len = (uint64_t)n;
+    // A float that can't be immediate allocates, so the vector is anchored
+    // and only counts the values it has so far
+    vec = (SVec*)anchor(snap, (SObject*)snap_vec_new(snap, (int)len));
+    for (i = 0; i < (int)len; ++i) {
+      SValue x = float_new(snap, a + i * step);
+      vec->data[vec->len++] = x;
+    }
+    release(snap);
+  }
+  *result = create_obj(vec);
+  return true;
 }
 
 // Checks for a vector, and an index that's in range when there is one
@@ -810,6 +857,12 @@ XX(builtin_gt, compare_args, TK_GT) XX(builtin_ge, compare_args, TK_GE)
 XX(builtin_eq, compare_args, TK_EQ)
 #undef XX
 
+static bool builtin_ne(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (!compare_args(snap, TK_EQ, args, num_args, result)) return false;
+  *result = create_bool(is_falsy(*result));
+  return true;
+}
+
 // Sets *val to the C function for an operator. Returns false if the form
 // isn't one.
 bool op_value(int token, SValue* val) {
@@ -819,6 +872,8 @@ bool op_value(int token, SValue* val) {
   };
   if (token == TK_NOT) {
     *val = create_cfunc(builtin_not);
+  } else if (token == TK_NE) {
+    *val = create_cfunc(builtin_ne);
   } else if (token >= TK_ADD && token <= TK_EQ) {
     *val = create_cfunc(ops[token - TK_ADD]);
   } else {
@@ -1120,6 +1175,7 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "count", builtin_count);
   snap_def_cfunc(snap, "nth", builtin_nth);
   snap_def_cfunc(snap, "apply", builtin_apply);
+  snap_def_cfunc(snap, "range", builtin_range);
   snap_def_cfunc(snap, "put!", builtin_put);
   snap_def_cfunc(snap, "push!", builtin_push);
   snap_def_cfunc(snap, "pop!", builtin_pop);

@@ -51,7 +51,8 @@ make stress   # The same under ASan/UBSan, collecting all the time
 
 Special forms: `def`, `defmacro`, `set!`, `fn`, `let`, `loop`, `recur`, `if`, `begin`,
 `quote`, `and`, `or`, `not`, `try`, `panic`, `recover`, and the operators
-`+ - * / %` and `< <= > >= =`. `(- x)` negates, and `(+ x)` is `x` (it must be a number).
+`+ - * / %` and `< <= > >= = not=`. `(- x)` negates, and `(+ x)` is `x` (it must be a number).
+`(not= a b ...)` is `(not (= a b ...))`.
 
 The operators and `not` can be used as values too, as in `(reduce + 0 v)` or
 `(map not v)`: there they're C functions that do the same thing (a call like
@@ -142,6 +143,11 @@ Built-in functions:
   arguments, `(defn log [& args] (apply println :log args))`. The VM spreads
   them itself, so it's an ordinary call. Called from C with `snap_call()`, an
   error value returned by `f` looks like a panic.
+* Ranges: `(range n)`, `(range a b)` and `(range a b step)` make a vector of
+  the numbers from `a` (0 if not given) up to but not including `b`, by `step`
+  (1 if not given, and it can be negative): `(range 2 8 2)` is `[2 4 6]`.
+  They're ints if every argument is, otherwise floats. The whole vector is
+  made at once, so `dotimes` is still the way to count in a loop.
 * Errors: `err`, `err?`, `err-kind` and `err-msg`
 * Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
   instead of `()` at the end), `nthnext` (the values from an index on, of a
@@ -197,7 +203,9 @@ The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,
 `(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map`,
 `filter`, `reduce` and `(sort-by key coll)` (which take a vector or list and
-make a vector), the
+make a vector), `(some f coll)` (the first truthy `(f x)`, or `nil`) and
+`(every? f coll)` (whether `(f x)` is truthy for all of them), which take a
+vector, list or map and stop as soon as they know, the
 struct macros below, and `defgc`.
 
 `(defconst name expr)` defines a global that can't change: `def`, `set!` or
@@ -527,8 +535,8 @@ it.
   used (all but the last in a body) is compiled without its value, so an `if`
   or `when` there doesn't push `nil` for a missing branch only to pop it. The
   condition of an `if` (so of `when` and `cond` too) compiles to jumps: `and`
-  and `or` jump out at the operand that decides them, `not` flips where the
-  jumps go, and each compare takes its branch itself rather than pushing a
+  and `or` jump out at the operand that decides them, `not` (and `not=`)
+  flips where the jumps go, and each compare takes its branch itself rather than pushing a
   bool. A condition that's a constant, like `cond`'s final `true`, is never
   tested, and the branch that can't run is dropped. Arithmetic and compares
   of two number constants, including `defconst` values like `(* PI 2.0)`,
