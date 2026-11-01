@@ -398,6 +398,37 @@ void snap_map_put(Snap* snap, SMap* map, SValue key, SValue val) {
   map->entries[2 * e + 1] = val;
 }
 
+// A new map with src's entries in the same order, with room for extra more
+// without growing. With no deleted entries and room enough at src's size,
+// the entries and index are copied as they are, without hashing anything.
+SMap* map_copy(Snap* snap, SMap* src, int extra) {
+  SMap* m = snap_map_new(snap);
+  int i, cap = src->cap;
+  if (src->len + extra == 0) return m;
+  if (cap < src->len + extra) {
+    for (cap = 4; cap < src->len + extra; cap *= 2) {}
+  }
+  m->entries = (SValue*)malloc(2 * cap * sizeof(SValue));
+  m->index = (int32_t*)malloc(2 * cap * sizeof(int32_t));
+  m->cap = cap;
+  heap_add(snap, map_bytes(cap));
+  if (src->used == src->len && cap == src->cap) {
+    memcpy(m->entries, src->entries, 2 * src->used * sizeof(SValue));
+    memcpy(m->index, src->index, 2 * cap * sizeof(int32_t));
+    m->used = m->len = src->len;
+  } else {
+    memset(m->index, -1, 2 * cap * sizeof(int32_t));
+    for (i = 0; i < src->used; ++i) {
+      if (src->entries[2 * i].bits == SV_DELETED) continue;
+      m->entries[2 * m->used] = src->entries[2 * i];
+      m->entries[2 * m->used + 1] = src->entries[2 * i + 1];
+      map_index(m, m->used++);
+    }
+    m->len = m->used;
+  }
+  return m;
+}
+
 bool snap_map_del(Snap* snap, SMap* map, SValue key) {
   int e = map_find(map, key);
   if (e < 0) return false;

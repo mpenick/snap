@@ -1,0 +1,37 @@
+; vi: filetype=scheme
+; assoc, dissoc and merge (copies, never changing their arguments), and map
+; over several collections
+
+(def m {:a 1 :b 2})
+(println (assoc m :c 3) (assoc m :a 9) (assoc m :a 9 :d 4 :e 5) m (assoc nil :x 1 :y 2) (assoc {} :k 1))
+(def q '{:a 1})
+(println (put! (assoc q :b 2) :c 3) q)
+(println (dissoc m :a) (dissoc m :zz) (dissoc m :a :b) (dissoc nil :a) (dissoc m) m)
+(def d (dissoc {:a 1 :b 2 :c 3} :b))
+(println (assoc d :b 9) (keys (assoc d :e 5)) (merge d {:z 1}))
+(println (merge {:a 1} {:b 2} nil {:a 3}) (merge) (merge nil nil) (merge nil {:a 1}) (merge {:a 1}))
+(defstruct P [x y])
+(def p (P 1 2))
+(println (assoc p :x 5) p (assoc p :x 5 :y 6))
+(println (assoc [1 2 3] 0 :a) (assoc [1 2] 2 3) (assoc [] 0 :a 1 :b) (assoc [1 2 3] 1 :x 3 :y))
+(defn big [n] (let [m {}] (dotimes [i n] (put! m i (* i i))) m))
+(def b (big 1000))
+(def b2 (assoc b 1000 :new))
+(println (count b) (count b2) (get b2 999) (get b2 1000) (get b 1000))
+(def b3 (merge b (big 2000)))
+(println (count b3) (get b3 1999) (count (dissoc b3 0 1 2)))
+(println (recover (fn [] (assoc p :z 1))) (recover (fn [] (assoc [1] 5 1))) (recover (fn [] (assoc m :a))) (recover (fn [] (assoc 5 1 2))))
+(println (recover (fn [] (merge {:a 1} [1]))) (recover (fn [] (dissoc [1] 0))) (recover (fn [] (assoc [1] :k 1))))
+
+; Finalized struct types finalize their copies too
+(defstruct Tag [id])
+(def freed 0)
+(defgc [t Tag] (set! freed (+ freed 1)))
+(dotimes [i 100] (assoc (Tag i) :id (- i)))
+(gc-step 0) (loop [] (if (gc-step 100000) nil (recur))) (gc-step 0) (loop [] (if (gc-step 100000) nil (recur)))
+(println freed)
+
+; map stops at the shortest collection
+(println (map inc [1 2 3]) (map inc '(1 2)) (map inc []) (map + [1 2 3] [10 20]) (map + [1 2] '(10 20 30)))
+(println (map (fn [a b c] [a b c]) [1 2 3] [:a :b :c] '(x y)) (map + [1 2] [3 4] [5 6] [7 8]) (map + [] [1]))
+(println (map (fn [a b] [a b]) [1 2] [3 4]))

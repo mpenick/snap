@@ -32,6 +32,7 @@ SStr* snap_str_new_format(Snap* snap, const char* format, ...);
 SKeyword* snap_key_new(Snap* snap, const char* name);
 SClosure* snap_closure_new(Snap* snap, SCode* code);
 void map_rebuild(Snap* snap, SMap* map);
+SMap* map_copy(Snap* snap, SMap* src, int extra);
 SErr* method_error(Snap* snap, SMethod* m, const SValue* args, int num_args);
 void print_val(FILE* out, SValue val);
 bool struct_new(Snap* snap, SType* type, const SValue* args, int num_args, SValue* result);

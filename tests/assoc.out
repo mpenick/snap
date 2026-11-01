@@ -1,0 +1,15 @@
+{:a 1 :b 2 :c 3} {:a 9 :b 2} {:a 9 :b 2 :d 4 :e 5} {:a 1 :b 2} {:x 1 :y 2} {:k 1}
+{:a 1 :b 2 :c 3} {:a 1}
+{:b 2} {:a 1 :b 2} {} nil {:a 1 :b 2} {:a 1 :b 2}
+{:a 1 :c 3 :b 9} [:a :c :e] {:a 1 :c 3 :z 1}
+{:a 3 :b 2} nil nil {:a 1} {:a 1}
+#P{:x 5 :y 2} #P{:x 1 :y 2} #P{:x 5 :y 6}
+[:a 2 3] [1 2 3] [:a :b] [1 :x 3 :y]
+1000 1001 998001 :new nil
+2000 3996001 1997
+<err :snap_key_error "P has no field :z"> <err :snap_index_error "Index out of range"> <err :snap_arity_error "Invalid number of arguments"> <err :snap_type_error "Expected a map, struct, vector or nil">
+<err :snap_type_error "Expected maps or nil"> <err :snap_type_error "Expected a map or nil"> <err :snap_type_error "Expected an index">
+200
+[2 3 4] [2 3] [] [11 22] [11 22]
+[[1 :a x] [2 :b y]] [16 20] []
+[[1 3] [2 4]]

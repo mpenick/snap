@@ -56,10 +56,27 @@
 (defn inc [x] (+ x 1))
 (defn dec [x] (- x 1))
 
-; map, filter and reduce take a vector or list and make a vector
-(defn map [f coll]
-  (let [v (if (vector? coll) coll (vec coll)) n (count v) out []]
-    (loop [i 0] (if (< i n) (begin (push! out (f (nth v i))) (recur (+ i 1))) out))))
+; map, filter and reduce take a vector or list and make a vector. (map f xs
+; ys ...) calls f with an item of each, stopping at the shortest.
+(defn map [f coll & colls]
+  (let [v (if (vector? coll) coll (vec coll)) out []]
+    (cond
+      (nil? colls)
+      (let [n (count v)]
+        (loop [i 0] (if (< i n) (begin (push! out (f (nth v i))) (recur (+ i 1))) out)))
+      (nil? (next colls))
+      (let [w (first colls) w (if (vector? w) w (vec w)) n (min (count v) (count w))]
+        (loop [i 0] (if (< i n) (begin (push! out (f (nth v i) (nth w i))) (recur (+ i 1))) out)))
+      true
+      (let [vs (reduce (fn [vs c] (push! vs (if (vector? c) c (vec c)))) [v] colls)
+            n (reduce (fn [n c] (min n (count c))) (count v) vs)]
+        (loop [i 0]
+          (if (< i n)
+            (let [args []]
+              (doseq [c vs] (push! args (nth c i)))
+              (push! out (apply f args))
+              (recur (+ i 1)))
+            out))))))
 
 (defn filter [f coll]
   (let [v (if (vector? coll) coll (vec coll)) n (count v) out []]

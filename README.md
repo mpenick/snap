@@ -158,7 +158,8 @@ Built-in functions:
 * Types: `type`, `make-type`, `add-method!`, `find-method` and `set-gc!`
   (see Structs and Finalizers below)
 * Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
-  `keys` and `vals`
+  `keys` and `vals`, and `assoc`, `dissoc` and `merge`, which make copies
+  (see Maps below)
 * Strings: `(str x...)` joins strings, and other values as they print
 * Math: `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `exp`, `log`, `(pow x y)`
   and `(atan2 y x)` give floats; `(mod a b)` is the remainder with `b`'s sign,
@@ -201,7 +202,8 @@ Built-in functions:
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,
-`(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map`,
+`(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map` (over
+one collection or several, as in `(map + xs ys)`, stopping at the shortest),
 `filter`, `reduce` and `(sort-by key coll)` (which take a vector or list and
 make a vector), `(some f coll)` (the first truthy `(f x)`, or `nil`) and
 `(every? f coll)` (whether `(f x)` is truthy for all of them), which take a
@@ -273,6 +275,23 @@ change one after using it as a key.
 
 Vectors and maps inside a quoted value, like `'[1 2]`, are read-only. A quoted
 value is a single constant shared by every evaluation, so changing one panics.
+
+`assoc`, `dissoc` and `merge` leave their arguments alone and return a new
+copy, which is never read-only:
+
+```clojure
+(def o {:a 1 :b 2})
+(assoc o :a 9 :c 3)     ; => {:a 9 :b 2 :c 3}, a copy with those set (o is unchanged)
+(assoc nil :x 1)        ; => {:x 1}
+(assoc (Rect 3 4) :w 5) ; => #Rect{:w 5 :h 4}, a struct's fields too
+(assoc [1 2 3] 0 :a 3 4); => [:a 2 3 4], a vector's indexes (len appends)
+(dissoc o :a)           ; => {:b 2}, a copy without those keys
+(merge {:a 1} {:b 2} {:a 3}) ; => {:a 3 :b 2}, later maps winning, nil skipped
+```
+
+Each copies the whole collection (a map without deleted keys with two
+`memcpy`s), so they suit small maps like specs and options. To build up a big
+one, `put!` into it.
 
 ## Structs, methods and interfaces
 

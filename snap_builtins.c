@@ -228,6 +228,94 @@ static bool field_error(Snap* snap, const SValue* args, SValue* result) {
   return false;
 }
 
+// (assoc coll k v ...) is a copy of a map, struct or vector with those keys,
+// fields or indexes set (index len appends). (assoc nil k v ...) is a new map.
+// It copies the whole collection, so put! is the way to build one up.
+static bool builtin_assoc(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i;
+  if (num_args < 3 || num_args % 2 == 0) return arity_error(snap, result);
+  if (is_nil(args[0]) || is_map(args[0])) {
+    SMap* m = is_nil(args[0]) ? snap_map_new(snap) : map_copy(snap, as_map(args[0]), (num_args - 1) / 2);
+    for (i = 1; i < num_args; i += 2) snap_map_put(snap, m, args[i], args[i + 1]);
+    *result = create_obj(m);
+  } else if (is_struct(args[0])) {
+    SStruct* src = as_struct(args[0]), * st;
+    for (i = 1; i < num_args; i += 2) {
+      if (field_index(src->stype, args[i]) < 0) {
+        SValue at[2] = { args[0], args[i] };
+        return field_error(snap, at, result);
+      }
+    }
+    // Made as the type makes them, so a finalizer (see defgc) runs for it too
+    if (!struct_new(snap, src->stype, src->vals, src->num_vals, result)) return false;
+    st = as_struct(*result);
+    for (i = 1; i < num_args; i += 2) st->vals[field_index(st->stype, args[i])] = args[i + 1];
+  } else if (is_vec(args[0])) {
+    SVec* src = as_vec(args[0]), * v;
+    int len = src->len;
+    for (i = 1; i < num_args; i += 2) {
+      if (!is_int(args[i])) return fail(snap, result, "snap_type_error", "Expected an index");
+      if (as_int(args[i]) < 0 || as_int(args[i]) > len) return fail(snap, result, "snap_index_error", "Index out of range");
+      if (as_int(args[i]) == len) len++; // Each append makes room for the next
+    }
+    v = snap_vec_new(snap, len);
+    for (i = 0; i < src->len; ++i) v->data[i] = *snap_vec_at(src, i);
+    v->len = src->len;
+    for (i = 1; i < num_args; i += 2) {
+      if (as_int(args[i]) == v->len) v->data[v->len++] = args[i + 1];
+      else v->data[as_int(args[i])] = args[i + 1];
+    }
+    *result = create_obj(v);
+  } else {
+    return fail(snap, result, "snap_type_error", "Expected a map, struct, vector or nil");
+  }
+  return true;
+}
+
+// (dissoc m k ...) is a copy of a map without those keys
+static bool builtin_dissoc(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SMap* m;
+  int i;
+  if (num_args < 1) return arity_error(snap, result);
+  if (is_nil(args[0])) {
+    *result = create_nil();
+    return true;
+  }
+  if (!is_map(args[0])) return fail(snap, result, "snap_type_error", "Expected a map or nil");
+  m = map_copy(snap, as_map(args[0]), 0);
+  for (i = 1; i < num_args; ++i) snap_map_del(snap, m, args[i]);
+  *result = create_obj(m);
+  return true;
+}
+
+// (merge m ...) is a new map with every map's entries, later ones winning.
+// nil arguments are skipped, and with only those it's nil.
+static bool builtin_merge(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  int i, j, first = -1, extra = 0;
+  SMap* m;
+  for (i = 0; i < num_args; ++i) {
+    if (is_nil(args[i])) continue;
+    if (!is_map(args[i])) return fail(snap, result, "snap_type_error", "Expected maps or nil");
+    if (first < 0) first = i;
+    else extra += as_map(args[i])->len;
+  }
+  if (first < 0) {
+    *result = create_nil();
+    return true;
+  }
+  m = map_copy(snap, as_map(args[first]), extra);
+  for (i = first + 1; i < num_args; ++i) {
+    SMap* src;
+    if (is_nil(args[i])) continue;
+    src = as_map(args[i]);
+    for (j = 0; j < src->used; ++j) {
+      if (src->entries[2 * j].bits != SV_DELETED) snap_map_put(snap, m, src->entries[2 * j], src->entries[2 * j + 1]);
+    }
+  }
+  *result = create_obj(m);
+  return true;
+}
+
 // (put! <vec> <index> <val>), (put! <map> <key> <val>) or
 // (put! <struct> <field> <val>) returns the vector, map or struct
 bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -1176,6 +1264,9 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "nth", builtin_nth);
   snap_def_cfunc(snap, "apply", builtin_apply);
   snap_def_cfunc(snap, "range", builtin_range);
+  snap_def_cfunc(snap, "assoc", builtin_assoc);
+  snap_def_cfunc(snap, "dissoc", builtin_dissoc);
+  snap_def_cfunc(snap, "merge", builtin_merge);
   snap_def_cfunc(snap, "put!", builtin_put);
   snap_def_cfunc(snap, "push!", builtin_push);
   snap_def_cfunc(snap, "pop!", builtin_pop);
