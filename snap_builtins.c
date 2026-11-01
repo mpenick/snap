@@ -779,6 +779,26 @@ bool builtin_vec(Snap* snap, const SValue* args, int num_args, SValue* result) {
   SCons* list;
   SVec* vec;
   if (num_args != 1) return arity_error(snap, result);
+  if (is_map(args[0])) {
+    // A map's entries as [k v] in order. Each pair allocates, so the vector
+    // is anchored and only counts the pairs it has so far.
+    SMap* m = as_map(args[0]);
+    int i;
+    vec = (SVec*)anchor(snap, (SObject*)snap_vec_new(snap, m->len));
+    for (i = 0; i < m->used; ++i) {
+      SVec* pair;
+      if (m->entries[2 * i].bits == SV_DELETED) continue;
+      pair = snap_vec_new(snap, 2);
+      pair->data[0] = m->entries[2 * i];
+      pair->data[1] = m->entries[2 * i + 1];
+      pair->len = 2;
+      vec->data[vec->len++] = create_obj(pair);
+    }
+    release(snap);
+    *result = create_obj(vec);
+    return true;
+  }
+  if (!is_cons(args[0]) && !is_nil(args[0])) return fail(snap, result, "snap_type_error", "Expected a list or map");
   if (!list_arg(snap, args[0], &list, result)) return false;
   vec = snap_vec_new(snap, list_length(list)); // The only allocation
   for (; list; list = as_cons(list->rest)) vec_push(snap, vec, list->first);
@@ -1264,6 +1284,7 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "nth", builtin_nth);
   snap_def_cfunc(snap, "apply", builtin_apply);
   snap_def_cfunc(snap, "range", builtin_range);
+  snap_def_cfunc(snap, "vector", builtin_vector);
   snap_def_cfunc(snap, "assoc", builtin_assoc);
   snap_def_cfunc(snap, "dissoc", builtin_dissoc);
   snap_def_cfunc(snap, "merge", builtin_merge);

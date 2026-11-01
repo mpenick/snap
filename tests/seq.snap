@@ -1,5 +1,5 @@
 ; vi: filetype=scheme
-; not=, range, some and every?
+; not=, range, some, every?, vector, and maps in map, filter, reduce and vec
 
 ; not= is (not (= ...)), with any number of arguments, as a value too
 (println (not= 1 2) (not= 1 1) (not= 1 1 2) (not= 1 1 1) (not= "a" "a") (not= [1] [2]))
@@ -35,3 +35,18 @@
 (set! calls 0)
 (println (every? (fn [x] (set! calls (+ calls 1)) (< x 2)) (range 100)) calls)
 (println (recover (fn [] (some even 5))) (recover (fn [] (every? even [1 :a]))) (recover (fn [] (every? even [2 :a]))))
+
+; vector is [...] as a function, and map, filter, reduce, sort-by and vec take
+; maps as [k v] entries
+(println (vector) (vector 1 2 3) (map vector [1 2] [:a :b]) (apply vector '(1 2)) (vector? (vector 1)))
+(def m {:a 1 :b 2 :c 3})
+(del! m :b)
+(put! m :d 4)
+(println (vec m) (vec {}) (vec nil) (vec '(1 2)) m)
+(println (map (fn [[k v]] (* v 10)) m) (filter (fn [[k v]] (> v 2)) m) (reduce (fn [acc [k v]] (+ acc v)) 0 m))
+(println (sort-by (fn [[k v]] (- v)) m) (map (fn [[k v] i] [k i]) m (range 10)) (map + {} [1]))
+(println (recover (fn [] (vec 5))) (recover (fn [] (vec [1 2]))))
+(gc-step 0)
+(defn bigm [n] (let [m {}] (dotimes [i n] (put! m i (* 1.5e300 i))) m))
+(def bm (bigm 3000))
+(println (count (vec bm)) (nth (nth (vec bm) 2999) 0) (count (filter (fn [[k v]] (= (% k 2) 0)) bm)))

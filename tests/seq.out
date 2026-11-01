@@ -19,3 +19,9 @@ true true 0
 true 4
 false 3
 <err :snap_type_error "Expected a list"> false <err :snap_type_error "Expected numbers">
+[] [1 2 3] [[1 :a] [2 :b]] [1 2] true
+[[:a 1] [:c 3] [:d 4]] [] [] [1 2] {:a 1 :c 3 :d 4}
+[10 30 40] [[:c 3] [:d 4]] 8
+[[:d 4] [:c 3] [:a 1]] [[:a 0] [:c 1] [:d 2]] []
+<err :snap_type_error "Expected a list or map"> <err :snap_type_error "Expected a list or map">
+3000 2999 1500

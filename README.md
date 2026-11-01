@@ -152,12 +152,13 @@ Built-in functions:
 * Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
   instead of `()` at the end), `nthnext` (the values from an index on, of a
   list or vector, or `nil`), `concat` (of lists and vectors)
-  and `vec` (a list to a vector). `count` and `nth` work on lists too. `nil`
+  and `vec` (a list, or a map's `[k v]` entries, to a vector). `count` and `nth` work on lists too. `nil`
   counts as an empty list.
 * Macros: `gensym` and `macroexpand` (see below)
 * Types: `type`, `make-type`, `add-method!`, `find-method` and `set-gc!`
   (see Structs and Finalizers below)
-* Vectors and maps: `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
+* Vectors and maps: `(vector x...)` (a vector literal as a function, as in
+  `(map vector xs ys)`), `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`, and `assoc`, `dissoc` and `merge`, which make copies
   (see Maps below)
 * Strings: `(str x...)` joins strings, and other values as they print
@@ -204,10 +205,11 @@ The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,
 `(doseq [x coll] ...)` (over a vector, list or map), `inc`, `dec`, `map` (over
 one collection or several, as in `(map + xs ys)`, stopping at the shortest),
-`filter`, `reduce` and `(sort-by key coll)` (which take a vector or list and
-make a vector), `(some f coll)` (the first truthy `(f x)`, or `nil`) and
-`(every? f coll)` (whether `(f x)` is truthy for all of them), which take a
-vector, list or map and stop as soon as they know, the
+`filter`, `reduce` and `(sort-by key coll)` (which make a vector), and `(some f
+coll)` (the first truthy `(f x)`, or `nil`) and `(every? f coll)` (whether
+`(f x)` is truthy for all of them), which stop as soon as they know. All of
+these take a vector, list or map; a map's items are its `[k v]` entries, each
+a new pair (`doseq` with a `[k v]` pattern makes none). It also has the
 struct macros below, and `defgc`.
 
 `(defconst name expr)` defines a global that can't change: `def`, `set!` or

@@ -26,8 +26,10 @@ static SnapAllocSite* alloc_site(Snap* snap, SCode* code, uint8_t type) {
   for (i = (int)((((uintptr_t)code >> 4) * 31 + type) & mask); snap->alloc_sites[i].count; i = (i + 1) & mask) {
     if (snap->alloc_sites[i].code == code && snap->alloc_sites[i].type == type) return &snap->alloc_sites[i];
   }
+  // A slot taken out by profile_code_freed() still has its bytes
   snap->alloc_sites[i].code = code;
   snap->alloc_sites[i].type = type;
+  snap->alloc_sites[i].bytes = 0;
   snap->alloc_sites_count++;
   return &snap->alloc_sites[i];
 }
