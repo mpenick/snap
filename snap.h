@@ -130,8 +130,11 @@ typedef struct SStr_ {
 } SStr;
 
 // Symbols are interned and hold their global binding (undef when unbound)
+#define SNAP_NUM_INLINE_FNS 5
+
 typedef struct SSym_ {
   SOBJECT_FIELDS
+  bool assigned; // A macro made a set! of a local with this name (see store_variable)
   SValue value;
   size_t len;
   char data[1];
@@ -225,18 +228,26 @@ typedef struct SUpval_ {
   struct SUpval_* next; // Next open upvalue (sorted by descending stack address)
 } SUpval;
 
+// A closed over variable that's never assigned is copied into the closure;
+// others are shared through an SUpval
+typedef union SCapture_ {
+  SUpval* upval;
+  SValue value;
+} SCapture;
+
 typedef struct SClosure_ {
   SOBJECT_FIELDS
   SCode* code;
   int num_upvals;
-  SUpval* upvals[0];
+  SCapture upvals[0];
 } SClosure;
 
 struct SCode_ {
   SOBJECT_FIELDS
   SnapInst* insts;
   SValue* constants;
-  uint32_t* upvals; // (index << 1) | islocal, islocal means a slot in the enclosing frame
+  uint32_t* upvals; // (index << 2) | copied << 1 | islocal, islocal means a slot in the
+                    // enclosing frame, copied that the value itself is kept (see SCapture)
   int insts_count;
   int num_constants;
   int num_upvals;
@@ -351,6 +362,11 @@ struct Snap_ {
   SnapGCStats gc_stats;
   SUpval* open_upvals;
   struct SnapFnState_* fn_state; // Innermost function being compiled
+  bool compile_restart; // Compile the forms again (see store_variable)
+  // some, every?, map, filter and reduce as stdlib.snap defines them, which
+  // calls with a literal fn compile inline while their globals hold them
+  SSym* inline_syms[SNAP_NUM_INLINE_FNS];
+  SValue inline_fns[SNAP_NUM_INLINE_FNS];
   SErr* cause;
   jmp_buf jmp;
   int num_gensyms;

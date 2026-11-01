@@ -569,8 +569,18 @@ it.
   them and falls back to the general handler otherwise (for floats, without
   fetching the operands again). Counting loops end in
   a single `STEP` instruction that adds to the counter, compares it and jumps
-  back. Closed-over variables are shared between closures and closed when
-  their frame returns.
+  back. A closed-over variable that's never assigned (no `set!` of it) is
+  copied into the closure, so making one costs one allocation. Others are
+  shared between closures through an upvalue, closed when their frame
+  returns. The compiler finds the `set!`s by looking through the function
+  first. If a macro makes one after a closure copied the variable, the forms
+  are compiled again, with that name shared.
+* **Inline loops:** `some`, `every?`, `map` (of one collection), `filter` and
+  `reduce` called with a literal `fn` run the loop in place: no closure is
+  made and the fn isn't called, so `(some (fn [x] (= x k)) v)` is about as
+  fast as a hand-written `loop`. When it runs, a check falls back to the call
+  as written if the collection isn't a vector or map, or the global no longer
+  holds the stdlib function. The fn mustn't take `& rest` or use `recur`.
 * **The stack** is one array for every frame, which grows (by reallocating
   and fixing the pointers into it) up to `SNAP_MAX_STACK`. It only moves when
   a function is called, so the VM reloads its pointers after a C function

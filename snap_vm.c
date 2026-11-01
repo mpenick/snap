@@ -375,11 +375,15 @@ new_frame:
         DISPATCH();
       }
       OP(LOAD_CLOSED) {
-        *stack++ = *closure->upvals[arg]->value;
+        *stack++ = *closure->upvals[arg].upval->value;
+        DISPATCH();
+      }
+      OP(LOAD_COPIED) {
+        *stack++ = closure->upvals[arg].value;
         DISPATCH();
       }
       OP(STORE_CLOSED) {
-        SValue* value = closure->upvals[arg]->value;
+        SValue* value = closure->upvals[arg].upval->value;
         gc_barrier(snap, *value);
         *value = *--stack;
         DISPATCH();
@@ -647,9 +651,18 @@ new_frame:
         *(stack - 1) = create_obj(cl); // Replace the code, keeping the closure rooted
         for (i = 0; i < c->num_upvals; ++i) {
           uint32_t desc = c->upvals[i];
-          cl->upvals[i] = (desc & 1) ? upval_find(snap, &locals[desc >> 1])
-                                     : closure->upvals[desc >> 1];
+          if (!(desc & 1)) cl->upvals[i] = closure->upvals[desc >> 2]; // Either kind
+          else if (desc & 2) cl->upvals[i].value = locals[desc >> 2];
+          else cl->upvals[i].upval = upval_find(snap, &locals[desc >> 2]);
         }
+        DISPATCH();
+      }
+      // Whether the inlined loop can run: the global still holds the stdlib
+      // function, and the collection is a vector or map (see inline_seq())
+      OP(INLINE_GUARD) {
+        SValue coll = *(stack - 1);
+        *(stack - 1) = create_bool((is_vec(coll) || is_map(coll)) &&
+                                   snap->inline_syms[arg]->value.bits == snap->inline_fns[arg].bits);
         DISPATCH();
       }
       OP(CLOSE_UPVALS) {

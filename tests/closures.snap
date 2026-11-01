@@ -1,0 +1,67 @@
+; vi: filetype=scheme
+; Closures: variables that are never assigned are copied into the closure,
+; and some, every?, map, filter and reduce with a literal fn run inline
+
+; Copied and shared variables
+(defn adder [k] (fn [x] (+ x k)))
+(println ((adder 3) 4))
+(defn counter [] (let [n 0 tick (fn [] (set! n (+ n 1)) n)] tick))
+(def c (counter))
+(c) (c)
+(println (c))
+(let [a 1] (set! a 5) (println ((fn [] a))))
+(defn set-param [a] (let [g (fn [] (set! a 10))] (g) a))
+(println (set-param 1))
+(defn nest [a] (fn [] (fn [] (+ a 1))))
+(println (((nest 41))))
+(defn nest-shared [a] (let [h (fn [] (fn [] (set! a (+ a 1)) a))] ((h)) ((h))))
+(println (nest-shared 1))
+; Each iteration's closure has its own value
+(println (map (fn [g] (g)) (loop [i 0 acc []] (if (< i 3) (begin (push! acc (fn [] i)) (recur (+ i 1) acc)) acc))))
+; A set! made by a macro after the fn was made still shares the variable
+(defmacro bump! [x] `(set! ~x (+ ~x 100)))
+(defn bumped [q] (let [g (fn [] q)] (bump! q) (g)))
+(println (bumped 1))
+
+; Inline loops give what the calls give
+(def v [1 2 3 4 5])
+(def m {:a 1 :b 2})
+(defn all-kinds [coll k]
+  [(some (fn [x] (if (> x k) x nil)) coll)
+   (every? (fn [x] (> x k)) coll)
+   (map (fn [x] (* x k)) coll)
+   (filter (fn [x] (> x k)) coll)
+   (reduce (fn [acc x] (+ acc (* x k))) 100 coll)])
+(println (all-kinds v 2))
+(println (all-kinds (list 1 2 3 4 5) 2)) ; Lists make the calls
+(println (all-kinds [] 2))
+(println (map (fn [[k x]] [x k]) m) (filter (fn [[_ x]] (> x 1)) m) (reduce (fn [s [_ x]] (+ s x)) 0 m))
+(println (some (fn [{a :a}] a) [{:b 1} {:a 7} {:a 8}]))
+; some and every? stop as soon as they know, in order
+(def seen [])
+(println (some (fn [x] (push! seen x) (if (= x 3) :three nil)) v) seen)
+(def seen [])
+(println (every? (fn [x] (push! seen x) (< x 2)) v) seen)
+; set! of an outer variable, defs and fns made in the body
+(defn total [coll] (let [t 0] (map (fn [x] (set! t (+ t x))) coll) t))
+(println (total v))
+(println (map (fn [x] (def y (* x x)) (+ y 1)) v))
+(println (map (fn [g] (g)) (map (fn [x] (fn [] (* x 10))) v)))
+; Nested
+(println (map (fn [x] (reduce (fn [a y] (+ a (* x y))) 0 v)) v))
+; Not inlined: rest parameters, recur, the wrong count, locals named like
+; the globals
+(println (map (fn [& xs] xs) [1 2]))
+(println (map (fn [x] (if (> x 0) (recur (- x 1)) x)) [3 4]))
+(println (map (fn [a b] (+ a b)) [1 2] [10 20]))
+(println (let [nth (fn [c i] :mine)] (map (fn [x] x) v)))
+(println (let [map (fn [f c] :mine)] (map (fn [x] x) v)))
+(println (map (fn [count] count) v))
+; A global redefined after a function was compiled is called as it is now
+(defn uses-map [] (map (fn [x] (+ x 1)) v))
+(println (uses-map))
+(def stdlib-map map)
+(def map (fn [f coll] :redefined))
+(println (uses-map))
+(def map stdlib-map)
+(println (uses-map))

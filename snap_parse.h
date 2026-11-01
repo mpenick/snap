@@ -36,6 +36,7 @@ enum {
   TK_AND, TK_OR, TK_NOT, TK_NE,
   TK_UNQUOTE, // ~x, never lexed
   TK_SPLICE,  // ~@x
+  TK_INLINE,  // (#inline k coll), never lexed (see inline_seq())
   TK_EOF
 };
 

@@ -131,7 +131,7 @@ int gc_free(Snap* snap, SObject* obj) {
       freed = 4;
       break;
     case STYPE_CLOSURE:
-      snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->num_upvals * sizeof(SUpval*));
+      snap->num_bytes_alloced -= (sizeof(SClosure) + ((SClosure*)obj)->num_upvals * sizeof(SCapture));
       break;
     case STYPE_UPVAL:
       snap->num_bytes_alloced -= sizeof(SUpval);
@@ -228,13 +228,16 @@ static int gc_scan(Snap* snap, SnapGray* gray) {
       gc_mark_val(snap, ((SCons*)obj)->first);
       gc_mark_val(snap, ((SCons*)obj)->rest);
       break;
-    case STYPE_CLOSURE:
-      gc_mark(snap, (SObject*)((SClosure*)obj)->code);
-      for (i = 0; i < ((SClosure*)obj)->num_upvals; ++i) {
-        gc_mark(snap, (SObject*)((SClosure*)obj)->upvals[i]);
+    case STYPE_CLOSURE: {
+      SClosure* cl = (SClosure*)obj;
+      gc_mark(snap, (SObject*)cl->code);
+      for (i = 0; i < cl->num_upvals; ++i) {
+        if (cl->code->upvals[i] & 2) gc_mark_val(snap, cl->upvals[i].value);
+        else gc_mark(snap, (SObject*)cl->upvals[i].upval);
       }
       gray->pos = -1;
       return i + 1;
+    }
     case STYPE_UPVAL:
       gc_mark_val(snap, *((SUpval*)obj)->value);
       break;
@@ -276,6 +279,7 @@ static void gc_start(Snap* snap) {
   gc_mark_vals(snap, snap->tobefnz.vitems, snap->tobefnz.vsize); // Waiting for their finalizers
 
   gc_mark(snap, (SObject*)snap->cause);
+  gc_mark_vals(snap, snap->inline_fns, SNAP_NUM_INLINE_FNS);
 
   // Each frame's [stack_base, stack_top) region is live (args, locals and
   // temporaries); the top frame's stack_top is synced before any allocation.

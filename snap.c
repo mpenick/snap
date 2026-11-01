@@ -135,6 +135,7 @@ void snap_init(Snap* snap) {
   snap->gc_closing = false;
   snap->open_upvals = NULL;
   snap->fn_state = NULL;
+  snap->compile_restart = false;
   snap->cause = NULL;
   snap->num_gensyms = 0;
   snap->dump_code = false;
@@ -145,6 +146,13 @@ void snap_init(Snap* snap) {
   snap_hash_init(&snap->symbols);
   snap_hash_init(&snap->keywords);
 
+  {
+    int i; // Before anything can collect, as they're roots
+    for (i = 0; i < SNAP_NUM_INLINE_FNS; ++i) {
+      snap->inline_syms[i] = NULL;
+      snap->inline_fns[i] = create_undef();
+    }
+  }
   snap_init_builtins(snap);
 
   {
@@ -169,6 +177,7 @@ void snap_init(Snap* snap) {
     fprintf(stderr, "stdlib.snap failed\n");
     abort();
   }
+  compile_init_inline(snap);
 }
 
 void snap_destroy(Snap* snap) {

@@ -262,6 +262,7 @@ SSym* snap_sym_new(Snap* snap, const char* name) {
   }
   s = (SSym*)gc_new(snap, STYPE_SYM, sizeof(SSym) + len + 1);
   s->mark = GC_FIXED;
+  s->assigned = false;
   s->value = create_undef();
   s->len = len;
   memcpy(s->data, name, len + 1);

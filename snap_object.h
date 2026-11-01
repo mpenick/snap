@@ -119,12 +119,12 @@ static inline SClosure* closure_new(Snap* snap, SCode* code) {
   SClosure* cl = (SClosure*)gc_new(snap,
                                    STYPE_CLOSURE,
                                    sizeof(SClosure) +
-                                   sizeof(SUpval*) *
+                                   sizeof(SCapture) *
                                    code->num_upvals);
   cl->code = code;
   cl->num_upvals = code->num_upvals;
   for (i = 0; i < cl->num_upvals; ++i) {
-    cl->upvals[i] = NULL;
+    cl->upvals[i].upval = NULL; // Also a value the GC skips
   }
   return cl;
 }
