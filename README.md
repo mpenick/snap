@@ -156,7 +156,7 @@ Built-in functions:
 * Lists: `list`, `cons`, `first`, `rest`, `next` (like `rest`, but `nil`
   instead of `()` at the end), `nthnext` (the values from an index on, of a
   list or vector, or `nil`), `concat` (of lists and vectors)
-  and `vec` (a list, or a map's `[k v]` entries, to a vector). `count` and `nth` work on lists too. `nil`
+  and `vec` (a list, a map's `[k v]` entries, or a copy of a vector, to a vector). `count` and `nth` work on lists too. `nil`
   counts as an empty list.
 * Macros: `gensym` and `macroexpand` (see below)
 * Types: `type`, `make-type`, `add-method!`, `find-method` and `set-gc!`
@@ -165,7 +165,14 @@ Built-in functions:
   `(map vector xs ys)`), `count`, `nth`, `push!`, `pop!`, `put!`, `get`, `del!`,
   `keys` and `vals`, and `assoc`, `dissoc` and `merge`, which make copies
   (see Maps below)
-* Strings: `(str x...)` joins strings, and other values as they print
+* Strings: `(str x...)` joins strings, and other values as they print, and
+  `(name x)` is a keyword's or symbol's name as a string (`(name :rock)` is
+  `"rock"`), and `(format fmt x...)` formats as C's `printf` does:
+  `(format "%s-%g.glb" "house" 8.5)` is `"house-8.5.glb"`. Conversions are
+  `d i o u x X c` (integers; a float is truncated), `f F e E g G` (numbers)
+  and `s` (a string as it is, anything else as `str` prints it), with flags,
+  width and precision (`*` takes them from the arguments) and `%%`; no length
+  modifiers. Too few or too many arguments is an error.
 * Math: `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `exp`, `log`, `(pow x y)`
   and `(atan2 y x)` give floats; `(mod a b)` is the remainder with `b`'s sign,
   so `(mod -1 4)` is 3 where `(% -1 4)` is -1; `floor`, `ceil`, `round` (half away from

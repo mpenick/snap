@@ -1,0 +1,13 @@
+; format: printf-style strings
+(println (format "%d apples, %5.2f each, %s" 3 0.5 "ripe"))
+(println (format "%04d|%-6s|%x|%X|%o|%c" 42 "ab" 255 255 8 65))
+(println (format "%g %g %e" 8.5 8.0 1234.5))
+(println (format "%s %s %s %s" :key [1 2] nil 1.5))
+(println (format "%*d|%.*f|%%" 5 7 2 3.14159))
+(println (format "%d %.1f" 2.9 3))
+(println (format "no specs"))
+(println (recover (fn [] (format "%d"))))
+(println (recover (fn [] (format "%d" 1 2))))
+(println (recover (fn [] (format "%d" "x"))))
+(println (recover (fn [] (format "%q" 1))))
+(println (recover (fn [] (format 5))))

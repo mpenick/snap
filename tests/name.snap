@@ -1,0 +1,5 @@
+; vi: filetype=scheme
+
+; name: a keyword's or symbol's name as a string, a string as itself
+(println (name :rock) (name 'oak-tree) (name "plain"))
+(println (= (name :rock) "rock") (str (name :a) (name :b)))

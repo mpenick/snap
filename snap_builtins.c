@@ -431,6 +431,137 @@ bool builtin_str(Snap* snap, const SValue* args, int num_args, SValue* result) {
   return true;
 }
 
+// (format <fmt> <arg>...) is a string made as C's printf makes one: each
+// %[flags][width][.precision]conversion in fmt takes the next argument.
+// d i o x X c take an integer (a float is truncated), f F e E g G a number,
+// s anything (a string as it is, anything else as str prints it), and %%
+// is a %. A * for the width or precision takes it from the next argument.
+// There are no length modifiers (l, h, ...): snap's integers are all 64 bit.
+bool builtin_format(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  const char* f;
+  char* buf = NULL;
+  size_t len = 0;
+  FILE* out;
+  SStr* s;
+  int next = 1;
+  const char* err = NULL;
+  if (num_args < 1) return arity_error(snap, result);
+  if (!is_str(args[0])) return fail(snap, result, "snap_type_error", "Expected a format string");
+  f = as_str(args[0])->data;
+  out = open_memstream(&buf, &len);
+  while (*f && !err) {
+    char spec[64];
+    int n = 0, star[2], num_stars = 0, k;
+    char conv;
+    if (*f != '%') {
+      fputc(*f++, out);
+      continue;
+    }
+    if (f[1] == '%') {
+      fputc('%', out);
+      f += 2;
+      continue;
+    }
+    spec[n++] = *f++;
+    while (*f && strchr("-+ #0", *f) && n < 40) spec[n++] = *f++;
+    for (k = 0; k < 2 && !err; ++k) {
+      if (k == 1) {
+        if (*f != '.') break;
+        spec[n++] = *f++;
+      }
+      if (*f == '*') {
+        SValue a;
+        if (next >= num_args) { err = "Too few arguments for the format"; break; }
+        a = args[next++];
+        if (!is_int(a)) { err = "Expected an integer for a * in the format"; break; }
+        star[num_stars++] = (int)as_int(a);
+        spec[n++] = *f++;
+      } else {
+        while (*f >= '0' && *f <= '9' && n < 50) spec[n++] = *f++;
+      }
+    }
+    if (err) break;
+    conv = *f;
+    if (!conv || !strchr("diouxXcfFeEgGs", conv)) { err = "Expected a conversion (d i o u x X c f F e E g G s) in the format"; break; }
+    ++f;
+    if (next >= num_args) { err = "Too few arguments for the format"; break; }
+    {
+      SValue a = args[next++];
+      if (strchr("diouxXc", conv)) {
+        long long v;
+        if (is_int(a)) v = (long long)as_int(a);
+        else if (is_float(a)) v = (long long)as_float(a);
+        else { err = "Expected a number for an integer conversion in the format"; break; }
+        if (conv == 'c') {
+          spec[n++] = 'c';
+          spec[n] = 0;
+          if (num_stars == 2) fprintf(out, spec, star[0], star[1], (int)v);
+          else if (num_stars == 1) fprintf(out, spec, star[0], (int)v);
+          else fprintf(out, spec, (int)v);
+        } else {
+          spec[n++] = 'l';
+          spec[n++] = 'l';
+          spec[n++] = conv;
+          spec[n] = 0;
+          if (num_stars == 2) fprintf(out, spec, star[0], star[1], v);
+          else if (num_stars == 1) fprintf(out, spec, star[0], v);
+          else fprintf(out, spec, v);
+        }
+      } else if (conv == 's') {
+        char* sb = NULL;
+        size_t sl = 0;
+        const char* str;
+        if (is_str(a)) str = as_str(a)->data;
+        else {
+          FILE* so = open_memstream(&sb, &sl);
+          print_val(so, a);
+          fclose(so);
+          str = sb;
+        }
+        spec[n++] = 's';
+        spec[n] = 0;
+        if (num_stars == 2) fprintf(out, spec, star[0], star[1], str);
+        else if (num_stars == 1) fprintf(out, spec, star[0], str);
+        else fprintf(out, spec, str);
+        free(sb);
+      } else {
+        double v;
+        if (is_int(a)) v = (double)as_int(a);
+        else if (is_float(a)) v = as_float(a);
+        else { err = "Expected a number for a float conversion in the format"; break; }
+        spec[n++] = conv;
+        spec[n] = 0;
+        if (num_stars == 2) fprintf(out, spec, star[0], star[1], v);
+        else if (num_stars == 1) fprintf(out, spec, star[0], v);
+        else fprintf(out, spec, v);
+      }
+    }
+  }
+  if (!err && next < num_args) err = "Too many arguments for the format";
+  fclose(out);
+  if (err) {
+    free(buf);
+    return fail(snap, result, "snap_type_error", err);
+  }
+  s = (SStr*)gc_new(snap, STYPE_STR, sizeof(SStr) + len + 1);
+  memcpy(s->data, buf, len + 1);
+  s->len = len;
+  free(buf);
+  *result = create_obj(s);
+  return true;
+}
+
+// (name <keyword or symbol>) is its name as a string, without a keyword's
+// colon; a string is itself
+bool builtin_name(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  if (is_str(args[0])) *result = args[0];
+  else if (is_key(args[0])) *result = create_obj(snap_str_new(snap, as_key(args[0])->data));
+  else if (is_sym(args[0])) *result = create_obj(snap_str_new(snap, as_sym(args[0])->data));
+  else return fail(snap, result, "snap_type_error", "Expected a keyword, symbol or string");
+  return true;
+}
+
 // (compile <str>) compiles code into a function without arguments, or returns
 // an error if it doesn't parse or compile, or nil if there's no code
 bool builtin_compile(Snap* snap, const SValue* args, int num_args, SValue* result) {
@@ -798,7 +929,17 @@ bool builtin_vec(Snap* snap, const SValue* args, int num_args, SValue* result) {
     *result = create_obj(vec);
     return true;
   }
-  if (!is_cons(args[0]) && !is_nil(args[0])) return fail(snap, result, "snap_type_error", "Expected a list or map");
+  if (is_vec(args[0])) {
+    // A copy, so a function can take a list or a vector alike
+    SVec* src = as_vec(args[0]);
+    int i, n = src->len;
+    vec = snap_vec_new(snap, n); // The only allocation
+    for (i = 0; i < n; ++i) vec->data[i] = *snap_vec_at(src, i);
+    vec->len = n;
+    *result = create_obj(vec);
+    return true;
+  }
+  if (!is_cons(args[0]) && !is_nil(args[0])) return fail(snap, result, "snap_type_error", "Expected a list, vector or map");
   if (!list_arg(snap, args[0], &list, result)) return false;
   vec = snap_vec_new(snap, list_length(list)); // The only allocation
   for (; list; list = as_cons(list->rest)) vec_push(snap, vec, list->first);
@@ -1296,6 +1437,8 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "keys", builtin_keys);
   snap_def_cfunc(snap, "vals", builtin_vals);
   snap_def_cfunc(snap, "str", builtin_str);
+  snap_def_cfunc(snap, "name", builtin_name);
+  snap_def_cfunc(snap, "format", builtin_format);
   snap_def_cfunc(snap, "compile", builtin_compile);
   snap_def_cfunc(snap, "gc-step", builtin_gc_step);
   snap_def_cfunc(snap, "gc-stats", builtin_gc_stats);

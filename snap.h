@@ -482,6 +482,7 @@ static inline int snap_type(SValue val) {
 
 SStr* snap_str_new(Snap* snap, const char* str);
 SSym* snap_sym_new(Snap* snap, const char* name);
+SKeyword* snap_key_new(Snap* snap, const char* name);
 SErr* snap_err_new(Snap* snap, SValue err, SValue msg);
 SErr* snap_err_new_format(Snap* snap, const char* err, const char* format, ...);
 SCons* snap_cons_new(Snap* snap);

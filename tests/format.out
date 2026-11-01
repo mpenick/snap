@@ -1,0 +1,12 @@
+"3 apples,  0.50 each, ripe"
+"0042|ab    |ff|FF|10|A"
+"8.5 8 1.234500e+03"
+":key [1 2] nil 1.500000"
+"    7|3.14|%"
+"2 3.0"
+"no specs"
+<err :snap_type_error "Too few arguments for the format">
+<err :snap_type_error "Too many arguments for the format">
+<err :snap_type_error "Expected a number for an integer conversion in the format">
+<err :snap_type_error "Expected a conversion (d i o u x X c f F e E g G s) in the format">
+<err :snap_type_error "Expected a format string">
