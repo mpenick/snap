@@ -513,6 +513,50 @@ do the short-lived version of this: they keep an object alive while C is
 still building it (filling a new map allocates), and they come undone, last
 first, by the end of the call or when an error unwinds.
 
+## Reading arguments in C
+
+A C function can take snap data the way snap code builds it, such as maps,
+structs and vectors of `[x z]` pairs, through `SnapArgs`:
+
+```c
+static bool road_len(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SnapArgs a;
+  SVec* pts;
+  float xz[2];
+  double scale;
+  int i;
+  if (!snap_args(&a, snap, args, num_args, result, "(road-len road [scale])")) return false;
+  pts = snap_vec(&a, snap_get(&a, snap_arg(&a, 0), "pts")); // (:pts road), a map or struct
+  scale = snap_num_or(&a, snap_arg(&a, 1), 1.0);           // 1.0 if left out or nil
+  for (i = 0; i < pts->len; ++i) snap_nums(&a, snap_at(&a, pts, i), xz, 2);
+  if (a.failed) return false; // The first error is in *result
+  ...
+}
+```
+
+The usage string sets the arity: a plain name (or `<name>`, which can hold
+spaces) is required, `[name]` is optional and `name...` takes the rest. Its
+arity is cached by its address, so it should be a literal. It also names
+what was wrong in the error, with the way there, as in `(road-len road
+[scale]): road, :pts, item 3 should be a vector of at most 2 numbers, not a
+vector`. The first error sticks. After it, reads
+give safe zero values (0, `""`, an empty vector, or NULL from `snap_handle`),
+so a function can read everything and check `a.failed` once, before using a
+handle or changing anything.
+
+- Accessors: `snap_arg`, `snap_get` (a field of a map or struct; nil has none)
+  and `snap_at`. Each gives undef for something missing.
+- Converters: `snap_num` (an int or float), `snap_int`, `snap_truthy`,
+  `snap_name` (a string, keyword or symbol), `snap_vec`, `snap_handle` (a
+  struct of a given type) and `snap_nums` (a vector of numbers into a float
+  array). The `_or` forms of `snap_num` and `snap_int` give a default for
+  something missing or nil.
+- `snap_args_fail` fails with a message of the function's own.
+
+Reading doesn't allocate, so pointers it gives stay valid without pins. A
+field read is a string hash and a map lookup, which is fine for a function's
+inputs; a loop run thousands of times should copy them into C arrays first.
+
 ## Implementation
 
 The core is split by job, each `.c` with a header of the same name for what

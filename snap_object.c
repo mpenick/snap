@@ -615,3 +615,188 @@ void print_val(FILE* out, SValue val) {
       break;
   }
 }
+
+// Reading a C function's arguments (see SnapArgs in snap.h)
+
+// The next word of a usage, after *p: a name, or <...> or [...], which can
+// hold spaces. Returns false at the end.
+static bool usage_word(const char** p, const char** start, size_t* len) {
+  const char* q = *p;
+  while (*q == ' ' || *q == '(') ++q;
+  if (!*q || *q == ')') return false;
+  *start = q;
+  if (*q == '<' || *q == '[') {
+    char close = *q == '<' ? '>' : ']';
+    while (*q && *q != close) ++q;
+    if (*q) ++q;
+  } else {
+    while (*q && *q != ' ' && *q != ')') ++q;
+  }
+  *len = (size_t)(q - *start);
+  *p = q;
+  return true;
+}
+
+// A usage word's name, without brackets or "...", and whether it's optional
+// ([name]) or the rest (name...)
+static void usage_parse(const char* w, size_t len, const char** name, size_t* nlen, bool* optional, bool* rest) {
+  *optional = len > 0 && *w == '[';
+  while (len > 0 && (*w == '[' || *w == '<')) ++w, --len;
+  while (len > 0 && (w[len - 1] == ']' || w[len - 1] == '>')) --len;
+  *rest = len > 3 && strncmp(w + len - 3, "...", 3) == 0;
+  if (*rest) len -= 3;
+  *name = w;
+  *nlen = len;
+}
+
+// The name of the usage's argument i (counting from 0) into out
+static void usage_name(const char* usage, int i, char* out, size_t size) {
+  const char *p = usage, *w, *name, *rest = NULL;
+  size_t len, nlen, restlen = 0;
+  bool optional, isrest;
+  int n = -1;
+  while (usage_word(&p, &w, &len)) {
+    if (n >= 0) {
+      usage_parse(w, len, &name, &nlen, &optional, &isrest);
+      if (n == i) {
+        snprintf(out, size, "%.*s", (int)nlen, name);
+        return;
+      }
+      if (isrest) rest = name, restlen = nlen;
+    }
+    ++n;
+  }
+  if (rest) snprintf(out, size, "%.*s", (int)restlen, rest);
+  else snprintf(out, size, "argument %d", i + 1);
+}
+
+// The number of arguments the usage takes: at least *min, and at most *max
+// (-1 for any)
+static void usage_arity(const char* usage, int* min, int* max) {
+  const char *p = usage, *w, *name;
+  size_t len, nlen;
+  bool optional, rest;
+  int n = -1;
+  *min = *max = 0;
+  while (usage_word(&p, &w, &len)) {
+    if (n >= 0) {
+      usage_parse(w, len, &name, &nlen, &optional, &rest);
+      if (rest) *max = -1;
+      else if (*max >= 0) ++*max;
+      if (!optional && !rest) ++*min;
+    }
+    ++n;
+  }
+}
+
+bool snap_args_fail(SnapArgs* a, const char* msg) {
+  char path[256];
+  size_t n;
+  int d;
+  if (a->failed) return false;
+  a->failed = true;
+  usage_name(a->usage, a->arg, path, sizeof(path));
+  for (d = 1; d <= a->depth; ++d) {
+    n = strlen(path);
+    if (a->steps[d].field) snprintf(path + n, sizeof(path) - n, ", :%s", a->steps[d].field);
+    else snprintf(path + n, sizeof(path) - n, ", item %d", a->steps[d].item);
+  }
+  *a->result = create_obj(snap_err_new_format(a->snap, "snap_type_error", "%s: %s %s", a->usage, path, msg));
+  return false;
+}
+
+SVec snap_empty_vec; // What snap_vec() gives for something else
+
+void snap_args_wrong(SnapArgs* a, SValue v, const char* what) {
+  char msg[128];
+  if (a->failed) return;
+  if (is_undef(v)) snprintf(msg, sizeof(msg), "is missing (it should be %s)", what);
+  else {
+    static const char* names[] = {
+#define XX(type, id, name) name,
+      STYPE_MAPPING(XX)
+#undef XX
+    };
+    int t = snap_type(v);
+    const char* name = t == STYPE_STRUCT ? as_struct(v)->stype->name->data : names[t];
+    if (t == STYPE_NIL) snprintf(msg, sizeof(msg), "should be %s, not nil", what);
+    else snprintf(msg, sizeof(msg), "should be %s, not %s %s", what, strchr("aeiouAEIOU", name[0]) ? "an" : "a", name);
+  }
+  snap_args_fail(a, msg);
+}
+
+SnapArity snap_arities[256];
+
+// Works out (and caches) the usage's arity, and checks it
+bool snap_args_slow(SnapArgs* a) {
+  SnapArity* ar = &snap_arities[((uintptr_t)a->usage >> 3) % 256];
+  if (ar->usage != a->usage) {
+    usage_arity(a->usage, &ar->min, &ar->max);
+    ar->usage = a->usage;
+  }
+  if (a->num_args < ar->min || (ar->max >= 0 && a->num_args > ar->max)) {
+    a->failed = true;
+    *a->result = create_obj(snap_err_new_format(a->snap, "snap_arity_error", "%s: got %d argument%s", a->usage,
+                                                a->num_args, a->num_args == 1 ? "" : "s"));
+    return false;
+  }
+  return true;
+}
+
+SValue snap_get(SnapArgs* a, SValue obj, const char* k) {
+  SValue* existing;
+  SValue val = create_undef();
+  if (a->failed || is_undef(obj)) return val;
+  if (!is_nil(obj) && !is_map(obj) && !is_struct(obj)) {
+    snap_args_wrong(a, obj, "a map or struct");
+    return val;
+  }
+  // A keyword that was never made can't be a key, so it isn't made here
+  existing = is_nil(obj) ? NULL : snap_hash_get_str(&a->snap->keywords, k, strlen(k));
+  if (existing && is_map(obj)) {
+    SValue* found = snap_map_get(as_map(obj), *existing);
+    if (found) val = *found;
+  } else if (existing) {
+    SStruct* st = as_struct(obj);
+    int i;
+    for (i = 0; i < st->stype->num_fields; ++i) {
+      if (st->stype->fields[i].bits == existing->bits) val = st->vals[i];
+    }
+  }
+  snap_args_step(a, obj, val, k, 0);
+  return val;
+}
+
+const char* snap_name(SnapArgs* a, SValue v) {
+  if (is_str(v)) return as_str(v)->data;
+  if (is_key(v)) return as_key(v)->data;
+  if (is_sym(v)) return as_sym(v)->data;
+  snap_args_wrong(a, v, "a string, keyword or symbol");
+  return "";
+}
+
+SStruct* snap_handle(SnapArgs* a, SValue v, SType* t) {
+  char what[96];
+  if (is_struct(v) && as_struct(v)->stype == t) return as_struct(v);
+  snprintf(what, sizeof(what), "a %s", t->name->data);
+  snap_args_wrong(a, v, what);
+  return NULL;
+}
+
+int snap_nums(SnapArgs* a, SValue v, float* out, int max) {
+  SVec* vec = snap_vec(a, v);
+  int i;
+  char what[48];
+  if (vec->len > max) {
+    snprintf(what, sizeof(what), "a vector of at most %d numbers", max);
+    snap_args_wrong(a, v, what);
+    return 0;
+  }
+  for (i = 0; i < vec->len && !a->failed; ++i) {
+    SValue x = *snap_vec_at(vec, i);
+    if (is_int(x)) out[i] = (float)as_int(x);
+    else if (is_float(x)) out[i] = (float)as_float(x);
+    else { snprintf(what, sizeof(what), "numbers (item %d isn't)", i); snap_args_wrong(a, v, what); }
+  }
+  return a->failed ? 0 : vec->len;
+}

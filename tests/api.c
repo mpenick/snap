@@ -37,6 +37,52 @@ static void collect(Snap* snap) {
   }
 }
 
+// Reads a road, {:width w :pts [[x z] ...]} or a Road struct, and an optional
+// scale; returns the width times the scale plus the sum of the points, or the
+// read's error
+static bool road_sum(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SnapArgs a;
+  SValue road;
+  SVec* pts;
+  float xz[2];
+  double sum, scale;
+  int i;
+  if (!snap_args(&a, snap, args, num_args, result, "(road-sum road [scale] [label])")) return false;
+  road = snap_arg(&a, 0);
+  sum = snap_num(&a, snap_get(&a, road, "width"));
+  pts = snap_vec(&a, snap_get(&a, road, "pts"));
+  for (i = 0; i < pts->len; ++i) {
+    int n = snap_nums(&a, snap_at(&a, pts, i), xz, 2);
+    if (n == 2) sum += xz[0] + xz[1];
+    else if (!a.failed) snap_args_fail(&a, "should have 2 numbers");
+  }
+  scale = snap_num_or(&a, snap_arg(&a, 1), 1.0);
+  if (snap_truthy(&a, snap_get(&a, road, "double"))) sum *= 2.0;
+  if (num_args > 2) snap_name(&a, snap_arg(&a, 2));
+  if (a.failed) return false;
+  *result = create_float(snap, sum * scale);
+  return true;
+}
+
+// Sums its numbers, checking the name
+static bool spaced(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SnapArgs a;
+  SnapInt sum;
+  int i;
+  if (!snap_args(&a, snap, args, num_args, result, "(spaced <first number> <a name> <more...>)")) return false;
+  sum = snap_int(&a, snap_arg(&a, 0));
+  snap_name(&a, snap_arg(&a, 1));
+  for (i = 2; i < num_args; ++i) sum += snap_int(&a, snap_arg(&a, i));
+  if (a.failed) return false;
+  *result = create_int(sum);
+  return true;
+}
+
+// The message of err, a string
+static const char* err_msg(SValue err) {
+  return is_err(err) && is_str(as_err(err)->msg) ? as_str(as_err(err)->msg)->data : "";
+}
+
 int main(void) {
   Snap snap;
   SValue a, b, c, fn, r;
@@ -120,6 +166,55 @@ int main(void) {
   snap_destroy(&snap);
   CHECK(num_finalized == 2001);
   CHECK(sum_finalized == 1999 * 2000 / 2 + 1000000);
+
+  // Reading arguments from C (SnapArgs)
+  snap_init(&snap);
+  snap_def_cfunc(&snap, "road-sum", road_sum);
+  r = snap_exec(&snap, "(road-sum {:width 2 :pts [[1 2] [3.5 4]]})");
+  CHECK(is_float(r) && as_float(r) == 12.5);
+  r = snap_exec(&snap, "(road-sum {:width 2 :pts [] :double true} 0.5 :label)");
+  CHECK(is_float(r) && as_float(r) == 2.0);
+  r = snap_exec(&snap, "(defstruct Road [pts width]) (road-sum (Road [[1 1]] 1) 2)");
+  CHECK(is_float(r) && as_float(r) == 6.0);
+  r = snap_exec(&snap, "(road-sum)");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): got 0 arguments") == 0);
+  r = snap_exec(&snap, "(road-sum {} 1 2 3)");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): got 4 arguments") == 0);
+  r = snap_exec(&snap, "(road-sum {:pts []})");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :width is missing (it should be a number)") == 0);
+  r = snap_exec(&snap, "(road-sum {:width nil :pts []})");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :width should be a number, not nil") == 0);
+  r = snap_exec(&snap, "(road-sum [1 2])");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road should be a map or struct, not a vector") == 0);
+  r = snap_exec(&snap, "(road-sum {:width 1 :pts [[1 2] [3 :x]]})");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :pts, item 1 should be numbers (item 1 isn't), not a vector") == 0);
+  r = snap_exec(&snap, "(road-sum {:width 1 :pts [[1 2 3]]})");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :pts, item 0 should be a vector of at most 2 numbers, not a vector") == 0);
+  r = snap_exec(&snap, "(road-sum {:width 1 :pts [[1]]})");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :pts, item 0 should have 2 numbers") == 0);
+  r = snap_exec(&snap, "(road-sum {:width 1 :pts []} \"big\")");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): scale should be a number, not a str") == 0);
+  r = snap_exec(&snap, "(road-sum {:width 1 :pts []} 1 5)");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): label should be a string, keyword or symbol, not an int") == 0);
+  r = snap_exec(&snap, "(road-sum {:width 1 :pts [[1 2] [3 4] [5]]} 1)");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :pts, item 2 should have 2 numbers") == 0);
+  r = snap_exec(&snap, "(road-sum (Road [] 1) 1 (Road [] 2))");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): label should be a string, keyword or symbol, not a Road") == 0);
+  r = snap_exec(&snap, "(road-sum nil)");
+  CHECK(strcmp(err_msg(r), "(road-sum road [scale] [label]): road, :width is missing (it should be a number)") == 0);
+  // <name> can hold spaces; name... takes the rest
+  snap_def_cfunc(&snap, "spaced", spaced);
+  r = snap_exec(&snap, "(spaced 1 :x 2 3)");
+  CHECK(is_int(r) && as_int(r) == 6);
+  r = snap_exec(&snap, "(spaced 1 :x)");
+  CHECK(is_int(r) && as_int(r) == 1);
+  r = snap_exec(&snap, "(spaced 1)");
+  CHECK(strcmp(err_msg(r), "(spaced <first number> <a name> <more...>): got 1 argument") == 0);
+  r = snap_exec(&snap, "(spaced 1 2)");
+  CHECK(strcmp(err_msg(r), "(spaced <first number> <a name> <more...>): a name should be a string, keyword or symbol, not an int") == 0);
+  r = snap_exec(&snap, "(spaced 1 :x 2 :y)");
+  CHECK(strcmp(err_msg(r), "(spaced <first number> <a name> <more...>): more should be an int, not a key") == 0);
+  snap_destroy(&snap);
 
   printf(failed ? "api: %d failed\n" : "api: passed\n", failed);
   return failed != 0;
