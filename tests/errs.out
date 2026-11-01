@@ -1,7 +1,7 @@
 5
 <err :div-by-zero "can't divide by zero">
 true false false false
-"both ok"
+both ok
 12
 <err :div-by-zero "can't divide by zero">
 <err :div-by-zero "can't divide by zero">
@@ -13,8 +13,8 @@ true false false false
 <err :deep "at the bottom">
 <err :kind 3> true
 true false false
-:div-by-zero "can't divide by zero"
+:div-by-zero can't divide by zero
 5 0
-"before"
+before
 <err :div-by-zero "can't divide by zero">
   at tests/errs.snap:67

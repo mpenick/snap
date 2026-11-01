@@ -11,8 +11,14 @@
 [["tests/where.snap" 49 "bad-macro"] [nil 1 nil]]
 [["tests/load/panics.snap" 2 nil]]
 nil <err :snap_type_error "Expected an error">
-"\n  at tests/where.snap:20 in total\n  at tests/where.snap:23 in caller (inlined)\n  at tests/where.snap:59"
-"\n  at made.snap:2" "" "\n  at tests/where.snap:29 in oops (inlined)\n  at tests/where.snap:60"
+
+  at tests/where.snap:20 in total
+  at tests/where.snap:23 in caller (inlined)
+  at tests/where.snap:59
+
+  at made.snap:2  
+  at tests/where.snap:29 in oops (inlined)
+  at tests/where.snap:60
 [["short.snap" 3 nil]] [["odd.snap" 2 nil]]
 [["tests/load/returns-err.snap" 5 nil]]
 18 ["tests/where.snap" 70 "down"] [:skipped 15] ["tests/where.snap" 70 "down" :inlined]

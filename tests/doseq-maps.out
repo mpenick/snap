@@ -15,8 +15,8 @@
 :c 3
 :e 5
 {:a 10 :c 30 :e 50}
-"saw" :a
-"saw" :c
+saw :a
+saw :c
 <err :snap_index_error "Index out of range">
 :p 1 2
 <err :snap_index_error "Index out of range">

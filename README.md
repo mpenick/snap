@@ -134,7 +134,11 @@ can be written in hex, as in `0xff`.
 
 Built-in functions:
 
-* Output and input: `print`, `println` and `(read-line prompt?)`, which
+* Output and input: `print` and `println` print their arguments separated
+  by spaces, a string as its text and anything else (strings inside it too)
+  readably, as `str` joins them: `(println "at" [1 "a"])` prints
+  `at [1 "a"]`. `(repr x)` is `x` as it prints readably, a string quoted, so
+  `(println (repr s))` shows a string's quotes and escapes. `(read-line prompt?)`
   returns `nil` at the end of input. On a terminal it uses readline and shows
   the prompt. It's defined in `main.c`, so programs that embed snap don't need
   readline.
@@ -212,6 +216,18 @@ Built-in functions:
   `"<anonymous>"` is top-level code or a function only data holds, and
   `"<freed>"` code collected since (such as top-level forms, once run).
   Compiling counts too. When it's off it costs one check per allocation.
+* Compile report: `(compile-report! true)` starts noting, for code compiled
+  after it, which calls were inlined and which weren't, and why, and
+  `(compile-report)` stops, returns it and clears it: `[function line kind
+  detail]` rows, such as `["walk" 12 :loop "map"]`, `["walk" 9 :inlined
+  "dist2"]` and `["walk" 11 :call "map: the function is a value, not (fn
+  ...)"]`. `:inlined` is a small function compiled into its caller, `:loop`
+  an inline loop (see Implementation) and `:call` one that's left a call,
+  with the reason: too big, closes over variables, takes `& rest`, uses
+  `recur`, not defined yet, and so on. Calls of C functions and locals get
+  none. `(compile-report! false)` pauses it. Functions are named as in the
+  allocation profile. `-d` turns it on and prints each function's notes after
+  its code. It costs nothing at run time, or while compiling when it's off.
 
 The standard library, `stdlib.snap`, is written in snap and built in. It has
 `defn`, `defconst`, `when`, `cond`, `if-let`, `when-let`, `update!`, `dotimes`,

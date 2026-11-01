@@ -1,5 +1,12 @@
-"a\nb" "tab\there" "q\"uote" "back\\slash" "ends in \\"
+a
+b tab	here q"uote back\slash ends in \
 true true
-"" "a" "ab\nc"
-"a1:k[1 \"b\"]nil"
+ a ab
+c
+a1:k[1 "b"]nil
 nil
+plain two words ["in" "a vector"] {:k "v"} :key sym 1.500000 nil
+tab	here quote"d
+"q" "a\nb" ["x" 1] :k 2
+<"s"> "t"|t
+<err :snap_arity_error "Invalid number of arguments"> <err :snap_arity_error "Invalid number of arguments">

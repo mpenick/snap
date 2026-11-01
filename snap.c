@@ -175,6 +175,9 @@ void snap_init(Snap* snap) {
   snap->c_depth = 0;
   snap->load_file = NULL;
   snap->source = create_nil();
+  snap->report_on = false;
+  snap->defining = NULL;
+  snap->report = create_nil();
   snap->lines = NULL;
   snap->line = 0;
   snap->rand_state = 0x9e3779b97f4a7c15;

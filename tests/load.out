@@ -7,6 +7,6 @@
 [:snap_arith_error true]
 :ran
 <err :snap_type_error "Expected (load <path>)">
-"Premature end of file on line 2" [["tests/load/bad-parse.snap" 2 nil]]
+Premature end of file on line 2 [["tests/load/bad-parse.snap" 2 nil]]
 [["tests/load/bad-parse.snap" 2 nil] ["tests/load/loads-bad.snap" 1 nil]]
 [["tests/load/panics.snap" 2 nil]]

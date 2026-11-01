@@ -272,6 +272,7 @@ struct SCode_ {
   int num_caches;
   int inline_form; // The constant holding its ([params] body...), for calls to
                    // inline it in their place, or -1 (see inline_global)
+  int no_inline; // Why calls to it can't inline it (a SnapNoInline), or 0
   SnapLineRun* lines; // Which line each instruction is from
   int num_lines;
   SValue file; // The file it was loaded from, or nil
@@ -350,6 +351,10 @@ struct Snap_ {
   char* load_file; // The file snap_load() is running, which relative paths are from
   uint64_t rand_state; // (rand), set by (rand-seed n)
   SValue source; // The file being compiled (a string), or nil; it's pinned
+  SSym* defining;  // The global a def is compiling the value of, or NULL
+  bool report_on; // (compile-report! true): the compiler notes what it
+  SValue report;  // inlined and didn't, [code line kind detail] rows (a
+                  // vector or nil)
   struct SnapLines_* lines; // The line of each list read by the form being
   int line;                 // compiled, and the line it's at (see compile())
   struct { MVEC_FIELDS(SObject*); } anchors;

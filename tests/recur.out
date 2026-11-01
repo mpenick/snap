@@ -1,15 +1,15 @@
-"swap:" 19 8
-"rot:" 231
-"fib:" 12586269025
-"set and:" 5
-"set if:" 11 7
-"and/or:" 2 false 3 false true false
-"chain:" true false true true
-"closures:" 6
-"let:" 15
-"call:" 5 6
-"def:" 30
-"not:" true true false
-"counter:" 3
-"mixed:" 3.500000 8.500000 24 2
-"outer recur:" 9
+swap: 19 8
+rot: 231
+fib: 12586269025
+set and: 5
+set if: 11 7
+and/or: 2 false 3 false true false
+chain: true false true true
+closures: 6
+let: 15
+call: 5 6
+def: 30
+not: true true false
+counter: 3
+mixed: 3.500000 8.500000 24 2
+outer recur: 9

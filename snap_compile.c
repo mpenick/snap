@@ -12,7 +12,7 @@
 #define INLINE_SIZE 40    // and values in their body (as written, and
                           // instructions once compiled, macros expanded)
 
-static void print_code(SCode* code, int indent);
+static void print_code(Snap* snap, SCode* code, int indent);
 
 // Compile-time state is plain malloc'd memory, not GC objects. The only GC
 // values it holds are constants, which are rooted through snap->fn_state.
@@ -65,6 +65,8 @@ typedef struct SnapFnState_ {
   SnapLoop* loop;  // Innermost recur target, NULL at the top-level
   SnapLoop fn_loop;
   int inline_form; // See SCode
+  int no_inline;   // See SCode
+  SValue notes;    // [line kind detail] rows for the compile report, or nil
   int barrier;     // Locals below it can't be seen: an inlined function's
   int inlining;    // body is being compiled (inside this many)
   SCode* inlined[2]; // and these are the functions,
@@ -75,6 +77,7 @@ void gc_mark_fn_states(Snap* snap) {
   SnapFnState* fs;
   for (fs = snap->fn_state; fs; fs = fs->up) {
     gc_mark_vals(snap, fs->constants.vitems, fs->constants.vsize);
+    gc_mark_val(snap, fs->notes);
   }
 }
 
@@ -85,6 +88,7 @@ static SnapFnState* fn_state_new(Snap* snap) {
   mvec_init(&fs->constants, SValue, 8);
   fs->last_target = -1;
   fs->inline_form = -1;
+  fs->notes = create_nil();
   fs->snap = snap;
   fs->up = snap->fn_state;
   snap->fn_state = fs;
@@ -176,6 +180,7 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   c->num_caches = fs->num_caches;
   c->caches = (SFieldCache*)calloc(fs->num_caches > 0 ? fs->num_caches : 1, sizeof(SFieldCache));
   c->inline_form = fs->inline_form;
+  c->no_inline = fs->no_inline;
   while (fs->lines.vsize > 0 && mvec_back(&fs->lines).pc >= fs->insts.vsize) fs->lines.vsize--;
   c->lines = fs->lines.vitems;
   c->num_lines = fs->lines.vsize;
@@ -183,6 +188,24 @@ static SCode* code_new(Snap* snap, SnapFnState* fs) {
   fs->lines.vitems = NULL;
   fs->lines.vsize = 0;
   heap_add(snap, code_extra_bytes(c));
+
+  // Its notes go in the report, with it
+  if (is_vec(fs->notes) && snap->report_on) {
+    SVec* notes = as_vec(fs->notes);
+    int i;
+    anchor(snap, (SObject*)c);
+    if (!is_vec(snap->report)) snap->report = create_obj(snap_vec_new(snap, 16));
+    for (i = 0; i < notes->len; ++i) {
+      SVec* note = as_vec(*snap_vec_at(notes, i));
+      SVec* row = snap_vec_new(snap, 4);
+      vec_push(snap, as_vec(snap->report), create_obj(row)); // So it's rooted
+      vec_push(snap, row, create_obj(c));
+      vec_push(snap, row, *snap_vec_at(note, 0));
+      vec_push(snap, row, *snap_vec_at(note, 1));
+      vec_push(snap, row, *snap_vec_at(note, 2));
+    }
+    release(snap);
+  }
 
   // The code object owns the buffers now
   fs->insts.vitems = NULL;
@@ -220,6 +243,40 @@ static void push_inst(SnapFnState* fs, SnapInst inst) {
     last->inlined[1] = inlined[1];
   }
   *mvec_push(&fs->insts, SnapInst) = inst;
+}
+
+// Why a function can't be inlined (see inline_global), for the compile
+// report
+enum SnapNoInline {
+  NO_INLINE_OK,
+  NO_INLINE_REST,
+  NO_INLINE_CLOSES,
+  NO_INLINE_PARAMS,
+  NO_INLINE_SOURCE,
+  NO_INLINE_FN,
+  NO_INLINE_RECUR,
+  NO_INLINE_DEF,
+  NO_INLINE_TRY
+};
+static const char* const no_inline_reasons[] = {
+  "", "takes & rest", "closes over variables", "more than 8 parameters", "source over 40 values",
+  "makes a fn", "uses recur", "defines globals", "uses try"
+};
+
+// Notes what the compiler did or didn't do here, for (compile-report),
+// when it's on: kind is "inlined", "loop" or "call"
+static void note(Snap* snap, SnapFnState* fs, const char* kind, const char* format, ...) {
+  SVec* row;
+  va_list args;
+  if (!snap->report_on) return;
+  if (!is_vec(fs->notes)) fs->notes = create_obj(snap_vec_new(snap, 4)); // Rooted by fs
+  row = snap_vec_new(snap, 3);
+  vec_push(snap, as_vec(fs->notes), create_obj(row));
+  vec_push(snap, row, create_int(snap->line));
+  vec_push(snap, row, create_obj(snap_key_new(snap, kind)));
+  va_start(args, format);
+  vec_push(snap, row, create_obj(snap_str_new_vformat(snap, format, args)));
+  va_end(args);
 }
 
 static int last_op(SnapFnState* fs) {
@@ -782,7 +839,12 @@ static void compile_def(Snap* snap, SnapFnState* fs, SCons* args) {
     return;
   }
   name = as_sym(args->first);
-  compile(snap, fs, list_nth(args, 1), false);
+  {
+    SSym* defining = snap->defining; // A call of name in its own value isn't
+    snap->defining = name;           // worth a note that it's not defined yet
+    compile(snap, fs, list_nth(args, 1), false);
+    snap->defining = defining;
+  }
   if (fs->depth > 0) {
     emit(fs, STORE_LOCAL, add_local(snap, fs, name, false));
   } else {
@@ -1335,12 +1397,16 @@ static void compile_fn(Snap* snap, SnapFnState* up, SCons* args) {
   // A small function keeps its source, for calls to it to inline (see
   // inline_global). What it closes over or defines, a recur to the function
   // itself, or a try (which returns from it), can't be inlined.
-  if (!fs->variadic && fs->num_upvals == 0 && params->len <= MAX_INLINE_ARGS &&
-      form_size(args->rest, INLINE_SIZE + 1) <= INLINE_SIZE && !contains_form(args->rest, TK_FN) &&
-      !contains_form(args->rest, TK_RECUR) && !contains_form(args->rest, TK_DEF) &&
-      !contains_form(args->rest, TK_DEFMACRO) && !contains_form(args->rest, TK_TRY)) {
-    fs->inline_form = add_global_constant(snap, fs, create_obj(args));
-  }
+  fs->no_inline = fs->variadic                                          ? NO_INLINE_REST
+                  : fs->num_upvals > 0                                    ? NO_INLINE_CLOSES
+                  : params->len > MAX_INLINE_ARGS                         ? NO_INLINE_PARAMS
+                  : form_size(args->rest, INLINE_SIZE + 1) > INLINE_SIZE ? NO_INLINE_SOURCE
+                  : contains_form(args->rest, TK_FN)                      ? NO_INLINE_FN
+                  : contains_form(args->rest, TK_RECUR)                   ? NO_INLINE_RECUR
+                  : contains_form(args->rest, TK_DEF) || contains_form(args->rest, TK_DEFMACRO) ? NO_INLINE_DEF
+                  : contains_form(args->rest, TK_TRY)                     ? NO_INLINE_TRY
+                                                                          : NO_INLINE_OK;
+  if (fs->no_inline == NO_INLINE_OK) fs->inline_form = add_global_constant(snap, fs, create_obj(args));
 
   code = code_new(snap, fs);
   fn_state_free(snap);
@@ -1859,7 +1925,7 @@ static SValue make_vec(Snap* snap, int n, ...) {
 // loops are stdlib.snap's, using the same globals. coll is evaluated before
 // the fn is made, which nothing can tell. A fn that takes the rest of its
 // arguments or has a recur stays a call.
-static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
+static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail, bool* noted) {
   static const int num_params[SNAP_NUM_INLINE_FNS] = { 1, 1, 1, 1, 2, 1, 1, 2, 1 };
   SSym* name = as_sym(sexpr->first);
   SSym* count = snap_sym_new(snap, "count");
@@ -1877,24 +1943,51 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
   int k, j, num_anchors = snap->anchors.vsize;
 
   for (k = 0; k < SNAP_NUM_INLINE_FNS && snap->inline_syms[k] != name; ++k) {}
-  if (k == SNAP_NUM_INLINE_FNS || name->value.bits != snap->inline_fns[k].bits) return false;
-  if (list_length(args) != num_params[k] + 1 || !is_global_name(fs, name)) return false;
+  if (k == SNAP_NUM_INLINE_FNS || name->value.bits != snap->inline_fns[k].bits || !is_global_name(fs, name)) {
+    return false;
+  }
+  *noted = true; // From here, each way it's not a loop says why
+  if (list_length(args) != num_params[k] + 1) {
+    note(snap, fs, "call", "%s: given %d arguments (runs as a loop given %d)", name->data, list_length(args), num_params[k] + 1);
+    return false;
+  }
   if (!is_cons(args->first) || !as_cons(args->first) || !is_form(as_cons(args->first)->first) ||
       as_form(as_cons(args->first)->first) != TK_FN) {
+    note(snap, fs, "call", "%s: the function is a value, not (fn ...)", name->data);
     return false;
   }
   fn_args = as_cons(as_cons(args->first)->rest);
   if (!fn_args || !is_vec(fn_args->first) || !is_cons(fn_args->rest) || !as_cons(fn_args->rest)) return false;
   params = as_vec(fn_args->first);
-  if (params->len != num_params[k] || contains_form(fn_args->rest, TK_RECUR)) return false;
+  for (j = 0; j < params->len; ++j) {
+    if (binds(snap, *snap_vec_at(params, j), amp)) {
+      note(snap, fs, "call", "%s: (fn ...) takes & rest", name->data);
+      return false;
+    }
+  }
+  if (params->len != num_params[k]) {
+    note(snap, fs, "call", "%s: (fn ...) takes %d parameters, not %d", name->data, params->len, num_params[k]);
+    return false;
+  }
+  if (contains_form(fn_args->rest, TK_RECUR)) {
+    note(snap, fs, "call", "%s: (fn ...) uses recur", name->data);
+    return false;
+  }
   // The loop's own calls must reach the globals, from where they are
-  if (!is_global_name(fs, count) || !is_global_name(fs, nth) || !is_global_name(fs, push)) return false;
-  if (k == INLINE_MAPCAT && (!is_global_name(fs, is_vector) || !is_global_name(fs, to_vec))) return false;
+  if (!is_global_name(fs, count) || !is_global_name(fs, nth) || !is_global_name(fs, push) ||
+      (k == INLINE_MAPCAT && (!is_global_name(fs, is_vector) || !is_global_name(fs, to_vec)))) {
+    note(snap, fs, "call", "%s: a local hides a function its loop calls (count, nth, push!...)", name->data);
+    return false;
+  }
   for (j = 0; j < params->len; ++j) {
     SValue p = *snap_vec_at(params, j);
-    if (binds(snap, p, amp) || binds(snap, p, count) || binds(snap, p, nth) || binds(snap, p, push)) return false;
-    if (k == INLINE_MAPCAT && (binds(snap, p, is_vector) || binds(snap, p, to_vec))) return false;
+    if (binds(snap, p, count) || binds(snap, p, nth) || binds(snap, p, push) ||
+        (k == INLINE_MAPCAT && (binds(snap, p, is_vector) || binds(snap, p, to_vec)))) {
+      note(snap, fs, "call", "%s: a parameter hides a function its loop calls (count, nth, push!...)", name->data);
+      return false;
+    }
   }
+  note(snap, fs, "loop", "%s", name->data);
 
   c = new_gensym(snap);
   n = new_gensym(snap);
@@ -2037,7 +2130,7 @@ static bool inline_seq(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) {
 // While the body compiles, the caller's locals can't be seen, so its names
 // mean what they mean in the function: its parameters, its own lets and
 // globals. Inlining goes 2 deep, and not into a function's own body.
-static bool inline_global(Snap* snap, SnapFnState* fs, SCons* sexpr) {
+static bool inline_global(Snap* snap, SnapFnState* fs, SCons* sexpr, bool quiet) {
   SSym* name = as_sym(sexpr->first);
   SValue fn = name->value;
   SCode* code = is_closure(fn) ? as_closure(fn)->code : is_code(fn) ? as_code(fn) : NULL;
@@ -2047,20 +2140,42 @@ static bool inline_global(Snap* snap, SnapFnState* fs, SCons* sexpr) {
   bool sets;
   int k, sym_k, fn_k, slow, end, stack, first, barrier;
 
-  if (!code || code->inline_form < 0 || code->insts_count > INLINE_SIZE || as_obj(fn)->macro || name->read_only) {
+  if (!is_global_name(fs, name)) return false;
+  quiet = quiet || !snap->report_on;
+  if (!code) {
+    if (!quiet && is_undef(fn) && name != snap->defining) note(snap, fs, "call", "%s: not defined yet", name->data);
     return false;
   }
-  if (fs->inlining >= 2 || !is_global_name(fs, name)) return false;
+  if (as_obj(fn)->macro) return false;
+  if (code->inline_form < 0 || code->insts_count > INLINE_SIZE || name->read_only || fs->inlining >= 2) {
+    if (quiet) return false;
+    if (code->inline_form < 0) note(snap, fs, "call", "%s: %s", name->data, no_inline_reasons[code->no_inline]);
+    else if (code->insts_count > INLINE_SIZE) {
+      note(snap, fs, "call", "%s: %d instructions (inlines up to %d)", name->data, code->insts_count, INLINE_SIZE);
+    } else if (name->read_only) note(snap, fs, "call", "%s: a defconst", name->data);
+    else note(snap, fs, "call", "%s: would be inlined 3 deep (inlines up to 2)", name->data);
+    return false;
+  }
   for (k = 0; k < fs->inlining; ++k) {
-    if (fs->inlined[k] == code) return false;
+    if (fs->inlined[k] == code) {
+      if (!quiet) note(snap, fs, "call", "%s: calls itself", name->data);
+      return false;
+    }
   }
   form = as_cons(code->constants[code->inline_form]);
   params = as_vec(form->first);
   body = as_cons(form->rest);
-  if (list_length(as_cons(sexpr->rest)) != params->len) return false;
+  if (list_length(as_cons(sexpr->rest)) != params->len) {
+    if (!quiet) note(snap, fs, "call", "%s: given %d arguments, takes %d", name->data, list_length(as_cons(sexpr->rest)), params->len);
+    return false;
+  }
   sym_k = add_constant(snap, fs, create_obj(name));
   fn_k = add_global_constant(snap, fs, fn);
-  if (sym_k >= 2048 || fn_k >= 4096) return false;
+  if (sym_k >= 2048 || fn_k >= 4096) {
+    if (!quiet) note(snap, fs, "call", "%s: the caller has too many constants", name->data);
+    return false;
+  }
+  if (!quiet) note(snap, fs, "inlined", "%s", name->data);
 
   emit(fs, GUARD_GLOBAL, sym_k | fn_k << 11);
   slow = emit_jump(fs, JUMP);
@@ -2132,9 +2247,18 @@ static void compile_sexpr(Snap* snap, SnapFnState* fs, SCons* sexpr, bool tail) 
         if (is_obj(form)) release(snap);
         break;
       }
-      if (sexpr != fs->plain_call && inline_seq(snap, fs, sexpr, tail)) break;
-      if (inline_global(snap, fs, sexpr)) break;
-      compile_call(snap, fs, sexpr);
+      if (sexpr != fs->plain_call) {
+        bool noted = false; // Whether inline_seq() said why it didn't
+        if (inline_seq(snap, fs, sexpr, tail, &noted)) break;
+        if (inline_global(snap, fs, sexpr, noted)) break;
+        compile_call(snap, fs, sexpr);
+      } else {
+        // The call an inline loop falls back to: its fn was noted already
+        bool report_on = snap->report_on;
+        snap->report_on = false;
+        compile_call(snap, fs, sexpr);
+        snap->report_on = report_on;
+      }
       break;
     case STYPE_CONS:
     case STYPE_CFUNC: // From quasiquote
@@ -2344,6 +2468,7 @@ SValue compile_forms(Snap* snap, SnapLex* lex, bool all) {
   SnapLines lines = { NULL, NULL, 0, 0 };
   SnapLines* outer_lines = snap->lines;
   int outer_line = snap->line;
+  bool report_on = snap->report_on; // Back to it after an error (see compile_sexpr)
 
   memcpy(jmp, snap->jmp, sizeof(jmp_buf));
   snap->lines = &lines;
@@ -2351,6 +2476,7 @@ start:
   if (setjmp(snap->jmp) > 0) {
     while (snap->fn_state != up) fn_state_free(snap);
     snap->c_depth = c_depth;
+    snap->report_on = report_on;
     if (snap->compile_restart) { // See assign_local()
       snap->compile_restart = false;
       snap->anchors.vsize = num_anchors;
@@ -2388,7 +2514,7 @@ start:
 
   code = code_new(snap, fs);
   fn_state_free(snap);
-  if (snap->dump_code) print_code(code, 0);
+  if (snap->dump_code) print_code(snap, code, 0);
   result = create_obj(code);
 
 done:
@@ -2456,7 +2582,7 @@ static const char* opcode_name(int op) {
   }
 }
 
-static void print_code(SCode* code, int indent) {
+static void print_code(Snap* snap, SCode* code, int indent) {
   int i;
   iprintf(indent, "args: %d, locals: %d, max stack: %d\n",
           code->num_args, code->num_locals, code->max_stack_size);
@@ -2512,7 +2638,14 @@ static void print_code(SCode* code, int indent) {
   for (i = 0; i < code->num_constants; ++i) {
     if (is_code(code->constants[i])) {
       iprintf(indent, "constant %d:\n", i);
-      print_code(as_code(code->constants[i]), indent + 2);
+      print_code(snap, as_code(code->constants[i]), indent + 2);
     }
+  }
+  // Its compile report notes (see note())
+  for (i = 0; is_vec(snap->report) && i < as_vec(snap->report)->len; ++i) {
+    SVec* row = as_vec(*snap_vec_at(as_vec(snap->report), i));
+    if (snap_vec_at(row, 0)->bits != create_obj(code).bits) continue;
+    iprintf(indent, "; line %d: %s %s\n", (int)as_int(*snap_vec_at(row, 1)), as_key(*snap_vec_at(row, 2))->data,
+            as_str(*snap_vec_at(row, 3))->data);
   }
 }

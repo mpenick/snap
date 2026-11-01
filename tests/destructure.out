@@ -17,7 +17,7 @@
 <err :snap_compile_error "Expected a name, a [pattern] or a {:keys [names]} pattern"> <err :snap_compile_error "Expected :keys [names]"> <err :snap_compile_error "Expected only :as after & <pattern>">
 1 2 3 4
 1 2 0.500000 3
-"pony" :zero
+pony :zero
 9 #Pt{:x 9 :y 10}
 :plaster :planks
 1.600000 0.300000

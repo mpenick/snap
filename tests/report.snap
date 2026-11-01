@@ -1,0 +1,52 @@
+; vi: filetype=scheme
+; compile-report: what the compiler inlined, ran as a loop, or left as a call
+; and why, as [function line kind detail] rows
+
+(compile-report! true)
+(defn dist2 [ax az bx bz] (let [dx (- ax bx) dz (- az bz)] (+ (* dx dx) (* dz dz))))
+(defn total [v]
+  (let [n (count v)]
+    (loop [i 0 s 0] (if (< i n) (recur (+ i 1) (+ s (nth v i))) s))))
+(defn sq [x] (* x x))
+(defn rest-args [& xs] xs)
+(def adder (let [k 1] (fn [x] (+ x k))))
+(defn nine [a b c d e f g h i] a)
+(defn makes [x] (fn [] x))
+(defn tries [x] (try x))
+(defn long-one [x]
+  (+ x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x))
+(defn each [v] (doseq [x v] (doseq [y x] (doseq [z y] (println x y z)))))
+(defconst TWICE (fn [x] (* 2 x)))
+(defn fact [n] (if (= n 0) 1 (* n (fact (- n 1)))))
+
+(defn uses [pts]
+  [(dist2 0 0 3 4)
+   (total pts)
+   (map sq pts)
+   (map (fn [p] (* 2 p)) pts)
+   (filter (fn [& xs] true) pts)
+   (some (fn [a b] a) pts)
+   (every? (fn [x] (recur x)) [])
+   (later 1)
+   (map + pts pts)
+   (keep (fn [x] (when (> x 1) (dist2 x 0 0 0))) pts)
+   (rest-args 1)
+   (adder 1)
+   (nine 1 2 3 4 5 6 7 8 9)
+   (makes 1)
+   (tries 1)
+   (long-one 1)
+   (each [])
+   (TWICE 1)
+   (fact 3)
+   (sq 1 2)])
+(defn later [x] x)
+(defn local-hides [count] (map (fn [x] x) [count]))
+(doseq [r (compile-report)] (println r))
+
+; Taking it stops it and clears it; paused, nothing is noted
+(println (compile-report))
+(compile-report! true)
+(compile-report! false)
+(defn quiet [v] (map (fn [x] x) v))
+(println (compile-report))

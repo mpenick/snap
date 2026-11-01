@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
 
   if (argc > first && strcmp(argv[first], "-d") == 0) {
     snap.dump_code = true;
+    snap.report_on = true; // Printed with each function's code
     first++;
   }
 

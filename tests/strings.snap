@@ -10,3 +10,12 @@
 
 ; read-line returns nil at the end of input (stdin is empty in tests)
 (println (read-line))
+
+; print and println show a string as its text, anything else (strings inside
+; it too) readably; repr is the readable form as a string
+(println "plain" "two words" ["in" "a vector"] {:k "v"} :key 'sym 1.5 nil)
+(print "tab\there" "quote\"d")
+(println)
+(println (repr "q") (repr "a\nb") (repr ["x" 1]) (repr :k) (repr 2))
+(println (str "<" (repr "s") ">") (format "%s|%s" (repr "t") "t"))
+(println (recover (fn [] (repr))) (recover (fn [] (repr 1 2))))

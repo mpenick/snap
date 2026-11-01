@@ -1,11 +1,11 @@
-"fold:" 3 2 5 10
-"mixed:" 3.500000 true 3.000000 true
-"wrap:" -4611686018427387904 -2 -4611686018427387904
-"float div zero:" inf
-"chains:" true false false true
-"quoted:" [1 2] [3 4] false
-"empty:" () () (1 () 2)
-"forms:" (/ % <= = >)
-"shadow:" 5
-"peephole:" 100000
-"and tail:" 5
+fold: 3 2 5 10
+mixed: 3.500000 true 3.000000 true
+wrap: -4611686018427387904 -2 -4611686018427387904
+float div zero: inf
+chains: true false false true
+quoted: [1 2] [3 4] false
+empty: () () (1 () 2)
+forms: (/ % <= = >)
+shadow: 5
+peephole: 100000
+and tail: 5

@@ -13,5 +13,5 @@ snap: finalizer for Bad failed: <err :snap_arith_error "Division by zero">
 <err :snap_type_error "Expected (set-gc! <struct type> <fn or nil>)">
 5000
 1000 true 1000 true
-"done"
-"finalized at exit"
+done
+finalized at exit

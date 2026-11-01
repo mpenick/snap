@@ -22,12 +22,33 @@ static bool read_only_error(Snap* snap, SValue* result) {
   return fail(snap, result, "snap_type_error", "Can't change a quoted literal");
 }
 
+// (print x...) prints its arguments separated by spaces: strings as their
+// text, anything else as it prints readably (as str joins them)
 bool builtin_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
   int i;
   for (i = 0; i < num_args; ++i) {
     if (i > 0) printf(" ");
-    snap_print(args[i]);
+    if (is_str(args[i])) fwrite(as_str(args[i])->data, 1, as_str(args[i])->len, stdout);
+    else snap_print(args[i]);
   }
+  return true;
+}
+
+// (repr x) is x as it prints readably, a string quoted: (repr "a") is "\"a\""
+static bool builtin_repr(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  char* buf = NULL;
+  size_t len = 0;
+  FILE* out;
+  SStr* s;
+  if (num_args != 1) return arity_error(snap, result);
+  out = open_memstream(&buf, &len);
+  print_val(out, args[0]);
+  fclose(out);
+  s = (SStr*)gc_new(snap, STYPE_STR, sizeof(SStr) + len + 1);
+  memcpy(s->data, buf, len + 1);
+  s->len = len;
+  free(buf);
+  *result = create_obj(s);
   return true;
 }
 
@@ -827,6 +848,47 @@ static bool builtin_err_where(Snap* snap, const SValue* args, int num_args, SVal
   return true;
 }
 
+// (compile-report! <on>) starts (or with false pauses) noting what the
+// compiler inlines and doesn't, and why, in code compiled after it
+static bool builtin_compile_report_set(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  if (num_args != 1) return arity_error(snap, result);
+  snap->report_on = !is_nil(args[0]) && args[0].bits != create_bool(false).bits;
+  *result = create_nil();
+  return true;
+}
+
+// (compile-report) stops the report and returns it, then clears it: [function
+// line kind detail] rows in the order compiled, kind being :inlined, :loop
+// or :call (one that wasn't, detail saying why)
+static bool builtin_compile_report(Snap* snap, const SValue* args, int num_args, SValue* result) {
+  SVec *rows, *out;
+  int i;
+  if (num_args != 0) return arity_error(snap, result);
+  snap->report_on = false;
+  if (!is_vec(snap->report)) {
+    *result = create_obj(snap_vec_new(snap, 0));
+    return true;
+  }
+  rows = (SVec*)anchor(snap, as_obj(snap->report));
+  snap->report = create_nil();
+  out = (SVec*)anchor(snap, (SObject*)snap_vec_new(snap, rows->len));
+  for (i = 0; i < rows->len; ++i) {
+    SVec* row = as_vec(*snap_vec_at(rows, i));
+    SVec* r = snap_vec_new(snap, 4);
+    char name[256];
+    vec_push(snap, out, create_obj(r)); // So it's rooted
+    code_name(snap, as_code(*snap_vec_at(row, 0)), name, sizeof(name));
+    vec_push(snap, r, create_obj(snap_str_new(snap, name)));
+    vec_push(snap, r, *snap_vec_at(row, 1));
+    vec_push(snap, r, *snap_vec_at(row, 2));
+    vec_push(snap, r, *snap_vec_at(row, 3));
+  }
+  release(snap);
+  release(snap);
+  *result = create_obj(out);
+  return true;
+}
+
 // (err-trace <err>): see snap_err_trace()
 static bool builtin_err_trace(Snap* snap, const SValue* args, int num_args, SValue* result) {
   if (!err_arg(snap, args, num_args, result)) return false;
@@ -1550,6 +1612,7 @@ bool builtin_find_method(Snap* snap, const SValue* args, int num_args, SValue* r
 void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "print", builtin_print);
   snap_def_cfunc(snap, "println", builtin_println);
+  snap_def_cfunc(snap, "repr", builtin_repr);
   snap_def_cfunc(snap, "nil?", builtin_isnil);
   snap_def_cfunc(snap, "vector?", builtin_isvec);
   snap_def_cfunc(snap, "int?", builtin_isint);
@@ -1568,6 +1631,8 @@ void snap_init_builtins(Snap* snap) {
   snap_def_cfunc(snap, "err-msg", builtin_err_msg);
   snap_def_cfunc(snap, "err-where", builtin_err_where);
   snap_def_cfunc(snap, "err-trace", builtin_err_trace);
+  snap_def_cfunc(snap, "compile-report!", builtin_compile_report_set);
+  snap_def_cfunc(snap, "compile-report", builtin_compile_report);
   snap_def_cfunc(snap, "count", builtin_count);
   snap_def_cfunc(snap, "nth", builtin_nth);
   snap_def_cfunc(snap, "apply", builtin_apply);

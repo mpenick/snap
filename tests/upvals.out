@@ -1,6 +1,6 @@
-"shared:" 1 2 3 3
-"sibling let:" 1
-"loop:" 0 1 2
-"fn recur:" 0 1 2
-"let in loop:" 10
-"nested:" 15 25
+shared: 1 2 3 3
+sibling let: 1
+loop: 0 1 2
+fn recur: 0 1 2
+let in loop: 10
+nested: 15 25
