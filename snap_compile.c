@@ -1,7 +1,13 @@
 // The compiler, from values to bytecode, and the disassembler
-#include "snap_internal.h"
+#include "snap_compile.h"
+#include "snap_vm.h"
+#include "snap_object.h"
+#include "snap_builtins.h"
 
 /* Compiler */
+
+#define MAX_LOCALS 256
+#define MAX_UPVALS 256
 
 static void print_code(SCode* code, int indent);
 

@@ -1,7 +1,7 @@
 #include <string.h>
 #include <stdio.h>
 
-// The tokens and SnapLex are in snap_internal.h, which comes first
+// The tokens and SnapLex are in snap_parse.h, which comes first
 
 #define snap_lex_mark(lex) lex->mark = lex->p
 #define snap_lex_rewind(lex) lex->p = lex->mark

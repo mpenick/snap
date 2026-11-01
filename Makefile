@@ -11,7 +11,7 @@ SOURCES=$(wildcard *.c)
 OBJECTS=$(patsubst %.c,%.o,$(SOURCES))
 
 # The core, without main.c's REPL. Embedders link libsnap.a.
-CORE=snap.c snap_gc.c snap_vm.c snap_parse.c snap_compile.c snap_builtins.c
+CORE=snap.c snap_object.c snap_gc.c snap_vm.c snap_parse.c snap_compile.c snap_builtins.c
 CORE_OBJECTS=$(patsubst %.c,%.o,$(CORE))
 
 all: $(TARGET)
@@ -46,7 +46,7 @@ test: $(TARGET) tests/api
 	@tests/run.sh ./$(TARGET)
 	@tests/api
 
-tests/api: tests/api.c $(CORE) snap.h snap_internal.h stdlib_snap.h snap_lex.h
+tests/api: tests/api.c $(CORE) $(wildcard snap*.h) stdlib_snap.h snap_lex.h
 	$(CC) $(CFLAGS) -I. -o $@ tests/api.c $(CORE) -lm
 
 # Collect constantly, a few units of work per allocation, under ASan/UBSan to

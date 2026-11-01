@@ -475,21 +475,23 @@ first, by the end of the call or when an error unwinds.
 
 ## Implementation
 
-The core is split by job:
+The core is split by job, each `.c` with a header of the same name for what
+the other files use:
 
 | File | What's in it |
 |---|---|
-| `snap.c` | Values, hashing, objects, printing, `snap_init()` and the rest of the API |
+| `snap.c` | `snap_init()`, running code and defining globals: the API in `snap.h` |
+| `snap_object.c` | Values, hashing, objects (maps, vectors, lists, structs) and printing |
 | `snap_gc.c` | The collector, finalizers, pins and the allocation profile |
-| `snap_vm.c` | Frames, upvals and the bytecode interpreter |
+| `snap_vm.c` | The bytecode, frames, upvals and the interpreter |
 | `snap_parse.c` | The reader (the lexer is in `snap_lex.rh`) |
 | `snap_compile.c` | The compiler and the disassembler |
 | `snap_builtins.c` | The built-in functions |
 
-`snap.h` is the API. `snap_internal.h` is shared by the core's files only. It
-also holds, as `static inline`, the helpers the interpreter, allocator and
-collector need inlined, such as `gc_new()`, `map_get()` and `cached_field()`,
-so the split costs no calls. `make libsnap.a` builds the core for embedding,
+Embedders include only `snap.h`. The internal headers also hold, as `static
+inline`, the helpers the interpreter, allocator and collector need inlined,
+such as `gc_new()`, `map_get()` and `cached_field()`, so splitting the core
+costs no calls. `make libsnap.a` builds the core for embedding,
 and `main.c` runs a file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
 string in `repl_snap.h`: it reads lines until `compile` stops returning
 `:snap_eof_error`, then calls the result with `recover` and prints it.

@@ -1,6 +1,10 @@
 // The reader: source text to values
-#include "snap_internal.h"
+#include "snap_parse.h"
+#include "snap_object.h"
+#include "snap_builtins.h"
 #include "snap_lex.h"
+
+#include <errno.h>
 
 /* Parser */
 

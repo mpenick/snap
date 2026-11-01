@@ -1,5 +1,7 @@
 // Frames, upvals and the bytecode interpreter
-#include "snap_internal.h"
+#include "snap_vm.h"
+#include "snap_object.h"
+#include "snap_builtins.h"
 
 #define relocate(stack_old, stack_new, stack_curr) \
   stack_curr = ((stack_new) + ((stack_curr) - (stack_old)))

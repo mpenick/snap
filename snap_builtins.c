@@ -1,5 +1,7 @@
 // The built-in functions
-#include "snap_internal.h"
+#include "snap_builtins.h"
+#include "snap_vm.h"
+#include "snap_compile.h"
 
 /* Builtins */
 

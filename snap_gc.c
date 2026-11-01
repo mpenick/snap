@@ -1,6 +1,8 @@
 // The collector: allocation, marking, sweeping, finalizers, pins and the
 // allocation profile
-#include "snap_internal.h"
+#include "snap_gc.h"
+#include "snap_object.h"
+#include "snap_compile.h"
 
 static const uint16_t slot_sizes[SNAP_NUM_SLOT_SIZES] = { 16, 32, 48, 64, 96, 128, 192, 256 };
 
