@@ -1,48 +1,7 @@
 #include <string.h>
 #include <stdio.h>
 
-// Above 127, since characters like '(' are their own tokens
-enum {
-  TK_INVALID = 128,
-  TK_TOO_BIG,
-  TK_INT,
-  TK_FLOAT,
-  TK_STR,
-  TK_ID,
-  TK_KEY,
-  TK_TRUE,
-  TK_FALSE,
-  TK_NIL,
-  TK_BEGIN,
-  TK_DEF,
-  TK_DEFMACRO,
-  TK_ELLIPSIS,
-  TK_IF,
-  TK_FN,
-  TK_LET,
-  TK_LOOP,
-  TK_QUOTE,
-  TK_RECUR,
-  TK_SET,
-  TK_PANIC,
-  TK_TRY,
-  TK_RECOVER,
-  TK_ADD, TK_SUB, TK_MUL, TK_DIV, TK_MOD,
-  TK_LT, TK_LE, TK_GT, TK_GE, TK_EQ,
-  TK_AND, TK_OR, TK_NOT,
-  TK_UNQUOTE, // ~x, never lexed
-  TK_SPLICE,  // ~@x
-  TK_EOF
-};
-
-typedef struct {
-  const char* buf;
-  size_t buf_size;
-  const char* p;
-  const char* mark;
-  int line;
-  char val[128];
-} SnapLex;
+// The tokens and SnapLex are in snap_internal.h, which comes first
 
 #define snap_lex_mark(lex) lex->mark = lex->p
 #define snap_lex_rewind(lex) lex->p = lex->mark

@@ -468,15 +468,29 @@ snap_unpin(snap, on_frame);
 ```
 
 Pins can be unpinned in any order, and a value pinned twice needs two unpins.
-Errors don't undo them. Inside snap.c, `snap_anchor()` and `snap_release()`
+Errors don't undo them. Inside the core, `snap_anchor()` and `snap_release()`
 do the short-lived version of this: they keep an object alive while C is
 still building it (filling a new map allocates), and they come undone, last
 first, by the end of the call or when an error unwinds.
 
 ## Implementation
 
-Everything is in `snap.c`. The lexer is in `snap_lex.rh`, and `main.c` runs a
-file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
+The core is split by job:
+
+| File | What's in it |
+|---|---|
+| `snap.c` | Values, hashing, objects, printing, `snap_init()` and the rest of the API |
+| `snap_gc.c` | The collector, finalizers, pins and the allocation profile |
+| `snap_vm.c` | Frames, upvals and the bytecode interpreter |
+| `snap_parse.c` | The reader (the lexer is in `snap_lex.rh`) |
+| `snap_compile.c` | The compiler and the disassembler |
+| `snap_builtins.c` | The built-in functions |
+
+`snap.h` is the API. `snap_internal.h` is shared by the core's files only. It
+also holds, as `static inline`, the helpers the interpreter, allocator and
+collector need inlined, such as `gc_new()`, `map_get()` and `cached_field()`,
+so the split costs no calls. `make libsnap.a` builds the core for embedding,
+and `main.c` runs a file or the REPL. The REPL is `repl.snap`, which the Makefile turns into a C
 string in `repl_snap.h`: it reads lines until `compile` stops returning
 `:snap_eof_error`, then calls the result with `recover` and prints it.
 `stdlib.snap` is built in the same way, as `stdlib_snap.h`, and `snap_init()` runs
