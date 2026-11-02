@@ -11,8 +11,29 @@ void snap_def(Snap* snap, const char* name, SValue val) {
   sym->value = val;
 }
 
-void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc) {
-  snap_def(snap, name, create_cfunc(cfunc));
+// The usage is kept after the SnapCFunc, in the same allocation
+SValue snap_cfunc(Snap* snap, const char* usage, SCFunc fn) {
+  size_t len = strlen(usage);
+  SnapCFunc* f = (SnapCFunc*)malloc(sizeof(SnapCFunc) + len + 1);
+  char* copy = (char*)(f + 1);
+  memcpy(copy, usage, len + 1);
+  f->builtin = NULL;
+  f->fn = fn;
+  f->usage = copy;
+  snap_usage_arity(copy, &f->min, &f->max);
+  *mvec_push(&snap->cfuncs, SnapCFunc*) = f;
+  return create_cfunc(f);
+}
+
+void snap_def_cfunc(Snap* snap, const char* usage, SCFunc fn) {
+  char name[256];
+  snap_usage_fn_name(usage, name, sizeof(name));
+  snap_def(snap, name, snap_cfunc(snap, usage, fn));
+}
+
+void snap_def_cfuncs(Snap* snap, const SnapCFuncDef* defs, int n) {
+  int i;
+  for (i = 0; i < n; ++i) snap_def_cfunc(snap, defs[i].usage, defs[i].fn);
 }
 
 
@@ -139,6 +160,8 @@ void snap_init(Snap* snap) {
   mvec_init(&snap->frames, SnapFrame, 32);
   mvec_init(&snap->anchors, SObject*, 32);
   mvec_init(&snap->pins, SValue, 8);
+  mvec_init(&snap->cfuncs, SnapCFunc*, 8);
+  snap->empty_vec = NULL;
   snap->num_bytes_alloced = 0;
   snap->alloc_profile = false;
   snap->alloc_sites = NULL;
@@ -191,6 +214,8 @@ void snap_init(Snap* snap) {
       snap->inline_fns[i] = create_undef();
     }
   }
+  snap->empty_vec = snap_vec_new(snap, 0);
+  snap->empty_vec->read_only = true;
   snap_init_builtins(snap);
 
   {
@@ -258,6 +283,8 @@ void snap_destroy(Snap* snap) {
   mvec_destroy(&snap->frames);
   mvec_destroy(&snap->anchors);
   mvec_destroy(&snap->pins);
+  for (i = 0; i < snap->cfuncs.vsize; ++i) free(snap->cfuncs.vitems[i]);
+  mvec_destroy(&snap->cfuncs);
   mvec_destroy(&snap->gray);
   mvec_destroy(&snap->finobj);
   mvec_destroy(&snap->tobefnz);

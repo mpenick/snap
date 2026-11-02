@@ -137,7 +137,7 @@ static void return_vectors(SnapFnState* fs) {
   for (i = 1; i < fs->insts.vsize; ++i) {
     SnapInst inst = fs->insts.vitems[i], prev = fs->insts.vitems[i - 1];
     if (INST_OP(inst) == CALL && INST_OP(prev) == LOAD_CONSTANT &&
-        fs->constants.vitems[INST_ARG(prev)].bits == create_cfunc(builtin_vector).bits && returns_top(fs, i + 1)) {
+        fs->constants.vitems[INST_ARG(prev)].bits == create_builtin(builtin_vector).bits && returns_top(fs, i + 1)) {
       fs->insts.vitems[i] = INST(RETURN_VEC, INST_ARG(inst));
     }
   }
@@ -865,7 +865,7 @@ static void compile_defmacro(Snap* snap, SnapFnState* fs, SCons* args) {
     parse_raise(snap, "snap_compile_error", "defmacro must be at the top level");
   }
   compile_fn(snap, fs, as_cons(args->rest));
-  load_constant(snap, fs, create_cfunc(builtin_make_macro));
+  load_constant(snap, fs, create_builtin(builtin_make_macro));
   emit(fs, CALL, 1);
   store_global(snap, fs, as_sym(args->first));
   emit(fs, LOAD_NIL, 0); /* TODO: Hack */
@@ -1075,7 +1075,7 @@ static void check_hidden_globals(Snap* snap, SVec* names, int step) {
 
 // A global function, for the rewritten calls: its name, so the call gets the
 // instruction for it, unless a local of that name hides it
-static SValue global_fn(SnapFnState* fs, const char* name, SCFunc fn, Snap* snap) {
+static SValue global_fn(SnapFnState* fs, const char* name, const SnapCFunc* fn, Snap* snap) {
   SSym* sym = snap_sym_new(snap, name);
   if (rewrite_hides_globals) return create_cfunc(fn);
   for (; fs; fs = fs->up) {
@@ -1147,7 +1147,7 @@ static bool unpack_binding(Snap* snap, SnapFnState* fs, SVec* v, SValue form, SV
   if (!is_cons(form) || is_empty(form)) return false;
   head = as_cons(form)->first;
   if (!(is_cons(head) || (is_sym(head) && !find_macro(fs, head, &macro)))) return false;
-  if (snap_sym_new(snap, "nth")->value.bits != create_cfunc(builtin_nth).bits) return false;
+  if (snap_sym_new(snap, "nth")->value.bits != create_builtin(builtin_nth).bits) return false;
   for (i = 0; i < v->len; ++i) {
     SValue p = *snap_vec_at(v, i);
     if (is_sym(p) && as_sym(p) == snap_sym_new(snap, "&")) return false;
@@ -1213,7 +1213,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
         if (i + 1 >= v->len) parse_raise(snap, "snap_compile_error", "Expected a pattern after &");
         if (!is_ignore(snap, *snap_vec_at(v, ++i))) {
           destructure(snap, fs, *snap_vec_at(v, i),
-                      call2(snap, global_fn(fs, "nthnext", builtin_nthnext, snap), tmp, create_int(n)), out);
+                      call2(snap, global_fn(fs, "nthnext", &builtin_nthnext_cf, snap), tmp, create_int(n)), out);
         }
         if (i + 1 < v->len && !(is_obj(*snap_vec_at(v, i + 1)) && as_obj(*snap_vec_at(v, i + 1)) == (SObject*)as)) {
           parse_raise(snap, "snap_compile_error", "Expected only :as after & <pattern>");
@@ -1227,7 +1227,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
       } else if (is_ignore(snap, p)) {
         n++; // Skipped, not read
       } else {
-        destructure(snap, fs, p, call2(snap, global_fn(fs, "nth", builtin_nth, snap), tmp, create_int(n++)), out);
+        destructure(snap, fs, p, call2(snap, global_fn(fs, "nth", &builtin_nth_cf, snap), tmp, create_int(n++)), out);
       }
     }
   } else {
@@ -1253,7 +1253,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
         check_bindable(snap, name, true);
         if (!is_sym(name) || is_ignore(snap, name)) parse_raise(snap, "snap_compile_error", "Expected :keys [names]");
         push_binding(snap, out, name,
-                     call2(snap, global_fn(fs, "get", builtin_get, snap), tmp,
+                     call2(snap, global_fn(fs, "get", &builtin_get_cf, snap), tmp,
                            create_obj(snap_key_new(snap, as_sym(name)->data))));
         if (dflts && (d = map_get(dflts, name))) push_binding(snap, out, name, or_default(snap, name, *d));
       }
@@ -1272,7 +1272,7 @@ static void destructure(Snap* snap, SnapFnState* fs, SValue pattern, SValue form
         parse_raise(snap, "snap_compile_error", "Expected a keyword, string or int to look up after a name in a map pattern");
       }
       if (is_ignore(snap, target)) continue;
-      get = call2(snap, global_fn(fs, "get", builtin_get, snap), tmp, key);
+      get = call2(snap, global_fn(fs, "get", &builtin_get_cf, snap), tmp, key);
       if (is_sym(target)) {
         SValue* d;
         push_binding(snap, out, target, get);
@@ -1738,7 +1738,7 @@ static void compile_vec(Snap* snap, SnapFnState* fs, SVec* vec) {
   for (i = 0; i < vec->len; ++i) {
     compile(snap, fs, *snap_vec_at(vec, i), false);
   }
-  load_constant(snap, fs, create_cfunc(builtin_vector));
+  load_constant(snap, fs, create_builtin(builtin_vector));
   emit(fs, CALL, vec->len);
 }
 
@@ -1750,7 +1750,7 @@ static void compile_map(Snap* snap, SnapFnState* fs, SMap* map) {
     compile(snap, fs, map->entries[2 * i], false);
     compile(snap, fs, map->entries[2 * i + 1], false);
   }
-  load_constant(snap, fs, create_cfunc(builtin_map));
+  load_constant(snap, fs, create_builtin(builtin_map));
   emit(fs, CALL, 2 * map->len);
 }
 

@@ -199,4 +199,9 @@ static inline bool vec_from_args(Snap* snap, const SValue* args, int num_args, S
   return true;
 }
 
+// A C function's usage: how many arguments it takes (max is -1 for any), and
+// its name
+void snap_usage_arity(const char* usage, int* min, int* max);
+void snap_usage_fn_name(const char* usage, char* out, size_t size);
+
 #endif // SNAP_SNAP_OBJECT_H

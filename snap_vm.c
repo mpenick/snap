@@ -8,6 +8,27 @@
 
 static SValue exec(Snap* snap);
 
+// Calls a C function value: a built-in with its arguments as they are, or an
+// extension's with them as SnapArgs, after checking there are enough
+static inline bool cfunc_call(Snap* snap, const SnapCFunc* f, const SValue* args, int num_args, SValue* result) {
+  SnapArgs a;
+  if (f->builtin) return f->builtin(snap, args, num_args, result);
+  if (num_args < f->min || (f->max >= 0 && num_args > f->max)) {
+    *result = create_obj(snap_err_new_format(snap, "snap_arity_error", "%s: got %d argument%s", f->usage, num_args,
+                                             num_args == 1 ? "" : "s"));
+    return false;
+  }
+  a.snap = snap;
+  a.args = args;
+  a.num_args = num_args;
+  a.result = result;
+  a.cfunc = f;
+  a.failed = false;
+  a.arg = 0;
+  a.depth = 0;
+  return f->fn(&a);
+}
+
 /* VM */
 
 // Stack layout
@@ -479,7 +500,7 @@ static int vm_call(Snap* snap, SValue* a, int arg, SValue* result) {
       }
       *a = *fn;
       continue;
-    } else if (is_cfunc(*a) && as_cfunc(*a) == builtin_apply && arg >= 2 && is_seq(a[-1])) {
+    } else if (is_cfunc(*a) && as_cfunc(*a) == &builtin_apply_cf && arg >= 2 && is_seq(a[-1])) {
       // A bad call goes to builtin_apply() for its error
       if (!(a = vm_spread(snap, a, &arg))) return vm_fail(snap, frame->stack_top, result, "snap_stack_error", "Stack overflow");
       continue;
@@ -489,7 +510,7 @@ static int vm_call(Snap* snap, SValue* a, int arg, SValue* result) {
   *result = create_nil();
   frame->stack_top = a; // Keep the arguments rooted during the call
   if (is_cfunc(*a)) {
-    ok = as_cfunc(*a)(snap, a - arg, arg, result);
+    ok = cfunc_call(snap, as_cfunc(*a), a - arg, arg, result);
   } else if (is_type(*a)) {
     ok = struct_new(snap, as_type(*a), a - arg, arg, result); // Types are never freed
   } else if (is_key(*a)) {
@@ -539,7 +560,7 @@ static int vm_recover(Snap* snap, SValue* a, SValue* result) {
   if (is_cfunc(*a)) {
     *result = create_nil();
     frame->stack_top = a;
-    as_cfunc(*a)(snap, a, 0, result); // On failure result is the error
+    cfunc_call(snap, as_cfunc(*a), a, 0, result); // On failure result is the error
     frame = &mvec_back(&snap->frames);
     *frame->stack_top++ = *result;
     return VM_NEXT;
@@ -722,7 +743,7 @@ new_frame:
       // (nth v i), (count x) and (get m k) are calls to globals, as with
       // CALL_GLOBAL, that do the common cases themselves while the global is
       // still the built-in
-#define builtin_global(fn) (as_sym(constants[arg >> 8])->value.bits == create_cfunc(fn).bits)
+#define builtin_global(fn) (as_sym(constants[arg >> 8])->value.bits == create_builtin(fn).bits)
       OP(NTH) {
         a = stack - 2;
         b = stack - 1;
@@ -858,11 +879,11 @@ new_frame:
           }
         }
         // A C function, which returns here unless it fails or ran snap code
-        if (is_cfunc(*a) && as_cfunc(*a) != builtin_apply) {
+        if (is_cfunc(*a) && as_cfunc(*a) != &builtin_apply_cf) {
           bool ok;
           temp = create_nil();
           frame->stack_top = stack; // Keep the arguments rooted during the call
-          ok = as_cfunc(*a)(snap, stack - arg, arg, &temp);
+          ok = cfunc_call(snap, as_cfunc(*a), stack - arg, arg, &temp);
           if (ok && !snap->reentered) {
             stack -= arg; // Pop the arguments
             push_or_store(temp)
@@ -1076,7 +1097,7 @@ SValue snap_call(Snap* snap, SValue fn, const SValue* args, int num_args) {
   if (is_cfunc(fn) || is_type(fn) || is_key(fn)) {
     result = create_nil();
     // On failure result is the error
-    if (is_cfunc(fn)) as_cfunc(fn)(snap, args, num_args, &result);
+    if (is_cfunc(fn)) cfunc_call(snap, as_cfunc(fn), args, num_args, &result);
     else if (is_type(fn)) struct_new(snap, as_type(fn), args, num_args, &result);
     else key_call(snap, fn, args, num_args, &result);
     return result;

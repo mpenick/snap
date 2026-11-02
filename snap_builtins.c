@@ -1319,25 +1319,6 @@ static bool builtin_ne(Snap* snap, const SValue* args, int num_args, SValue* res
   return true;
 }
 
-// Sets *val to the C function for an operator. Returns false if the form
-// isn't one.
-bool op_value(int token, SValue* val) {
-  static const SCFunc ops[] = {
-    builtin_add, builtin_sub, builtin_mul, builtin_div, builtin_mod,
-    builtin_lt, builtin_le, builtin_gt, builtin_ge, builtin_eq
-  };
-  if (token == TK_NOT) {
-    *val = create_cfunc(builtin_not);
-  } else if (token == TK_NE) {
-    *val = create_cfunc(builtin_ne);
-  } else if (token >= TK_ADD && token <= TK_EQ) {
-    *val = create_cfunc(ops[token - TK_ADD]);
-  } else {
-    return false;
-  }
-  return true;
-}
-
 /* Math */
 
 // (sqrt x), (sin x), (cos x) and (atan2 y x) of ints or floats are floats
@@ -1608,99 +1589,142 @@ bool builtin_find_method(Snap* snap, const SValue* args, int num_args, SValue* r
   return true;
 }
 
+// Each built-in's C function value points to its SnapCFunc here
+#define XX(f) const SnapCFunc f##_cf = { f, NULL, 0, -1, NULL };
+XX(builtin_abs) XX(builtin_acos) XX(builtin_add) XX(builtin_add_method) XX(builtin_alloc_profile)
+XX(builtin_alloc_profile_set) XX(builtin_apply) XX(builtin_asin) XX(builtin_assoc) XX(builtin_atan2)
+XX(builtin_bit_and) XX(builtin_bit_or) XX(builtin_bit_shl) XX(builtin_bit_shr) XX(builtin_bit_xor)
+XX(builtin_ceil) XX(builtin_clock) XX(builtin_compile) XX(builtin_compile_report)
+XX(builtin_compile_report_set) XX(builtin_concat) XX(builtin_cons) XX(builtin_cos) XX(builtin_count)
+XX(builtin_cpu_time) XX(builtin_del) XX(builtin_dissoc) XX(builtin_div) XX(builtin_eq) XX(builtin_err)
+XX(builtin_err_kind) XX(builtin_err_msg) XX(builtin_err_trace) XX(builtin_err_where) XX(builtin_exp)
+XX(builtin_find_method) XX(builtin_first) XX(builtin_float) XX(builtin_floor) XX(builtin_format)
+XX(builtin_gc_stats) XX(builtin_gc_step) XX(builtin_ge) XX(builtin_gensym) XX(builtin_get) XX(builtin_gt)
+XX(builtin_int) XX(builtin_isbool) XX(builtin_iserr) XX(builtin_isfloat) XX(builtin_isfn) XX(builtin_isint)
+XX(builtin_iskey) XX(builtin_islist) XX(builtin_ismap) XX(builtin_isnil) XX(builtin_isnumber)
+XX(builtin_isstr) XX(builtin_isstruct) XX(builtin_issym) XX(builtin_istype) XX(builtin_isvec)
+XX(builtin_keys) XX(builtin_le) XX(builtin_list) XX(builtin_load) XX(builtin_log) XX(builtin_lt)
+XX(builtin_macroexpand) XX(builtin_make_macro) XX(builtin_make_type) XX(builtin_map) XX(builtin_max)
+XX(builtin_merge) XX(builtin_min) XX(builtin_mod) XX(builtin_mod_floor) XX(builtin_mul) XX(builtin_name)
+XX(builtin_ne) XX(builtin_next) XX(builtin_not) XX(builtin_nth) XX(builtin_nthnext) XX(builtin_pop)
+XX(builtin_pow) XX(builtin_print) XX(builtin_println) XX(builtin_push) XX(builtin_put) XX(builtin_rand)
+XX(builtin_rand_seed) XX(builtin_range) XX(builtin_repr) XX(builtin_rest) XX(builtin_round)
+XX(builtin_set_const) XX(builtin_set_gc) XX(builtin_sin) XX(builtin_sqrt) XX(builtin_str) XX(builtin_sub)
+XX(builtin_tan) XX(builtin_type) XX(builtin_vals) XX(builtin_vec) XX(builtin_vector)
+#undef XX
+
+// Sets *val to the C function for an operator. Returns false if the form
+// isn't one.
+bool op_value(int token, SValue* val) {
+  static const SnapCFunc* ops[] = {
+    &builtin_add_cf, &builtin_sub_cf, &builtin_mul_cf, &builtin_div_cf, &builtin_mod_cf,
+    &builtin_lt_cf, &builtin_le_cf, &builtin_gt_cf, &builtin_ge_cf, &builtin_eq_cf
+  };
+  if (token == TK_NOT) {
+    *val = create_builtin(builtin_not);
+  } else if (token == TK_NE) {
+    *val = create_builtin(builtin_ne);
+  } else if (token >= TK_ADD && token <= TK_EQ) {
+    *val = create_cfunc(ops[token - TK_ADD]);
+  } else {
+    return false;
+  }
+  return true;
+}
+
 // Defines the builtins as globals (snap_init() does this first)
 void snap_init_builtins(Snap* snap) {
-  snap_def_cfunc(snap, "print", builtin_print);
-  snap_def_cfunc(snap, "println", builtin_println);
-  snap_def_cfunc(snap, "repr", builtin_repr);
-  snap_def_cfunc(snap, "nil?", builtin_isnil);
-  snap_def_cfunc(snap, "vector?", builtin_isvec);
-  snap_def_cfunc(snap, "int?", builtin_isint);
-  snap_def_cfunc(snap, "float?", builtin_isfloat);
-  snap_def_cfunc(snap, "number?", builtin_isnumber);
-  snap_def_cfunc(snap, "str?", builtin_isstr);
-  snap_def_cfunc(snap, "key?", builtin_iskey);
-  snap_def_cfunc(snap, "bool?", builtin_isbool);
-  snap_def_cfunc(snap, "fn?", builtin_isfn);
-  snap_def_cfunc(snap, "struct?", builtin_isstruct);
-  snap_def_cfunc(snap, "type?", builtin_istype);
-  snap_def_cfunc(snap, "map?", builtin_ismap);
-  snap_def_cfunc(snap, "err", builtin_err);
-  snap_def_cfunc(snap, "err?", builtin_iserr);
-  snap_def_cfunc(snap, "err-kind", builtin_err_kind);
-  snap_def_cfunc(snap, "err-msg", builtin_err_msg);
-  snap_def_cfunc(snap, "err-where", builtin_err_where);
-  snap_def_cfunc(snap, "err-trace", builtin_err_trace);
-  snap_def_cfunc(snap, "compile-report!", builtin_compile_report_set);
-  snap_def_cfunc(snap, "compile-report", builtin_compile_report);
-  snap_def_cfunc(snap, "count", builtin_count);
-  snap_def_cfunc(snap, "nth", builtin_nth);
-  snap_def_cfunc(snap, "apply", builtin_apply);
-  snap_def_cfunc(snap, "range", builtin_range);
-  snap_def_cfunc(snap, "vector", builtin_vector);
-  snap_def_cfunc(snap, "assoc", builtin_assoc);
-  snap_def_cfunc(snap, "dissoc", builtin_dissoc);
-  snap_def_cfunc(snap, "merge", builtin_merge);
-  snap_def_cfunc(snap, "put!", builtin_put);
-  snap_def_cfunc(snap, "push!", builtin_push);
-  snap_def_cfunc(snap, "pop!", builtin_pop);
-  snap_def_cfunc(snap, "get", builtin_get);
-  snap_def_cfunc(snap, "del!", builtin_del);
-  snap_def_cfunc(snap, "keys", builtin_keys);
-  snap_def_cfunc(snap, "vals", builtin_vals);
-  snap_def_cfunc(snap, "str", builtin_str);
-  snap_def_cfunc(snap, "name", builtin_name);
-  snap_def_cfunc(snap, "format", builtin_format);
-  snap_def_cfunc(snap, "compile", builtin_compile);
-  snap_def_cfunc(snap, "gc-step", builtin_gc_step);
-  snap_def_cfunc(snap, "gc-stats", builtin_gc_stats);
-  snap_def_cfunc(snap, "clock", builtin_clock);
-  snap_def_cfunc(snap, "cpu-time", builtin_cpu_time);
-  snap_def_cfunc(snap, "alloc-profile!", builtin_alloc_profile_set);
-  snap_def_cfunc(snap, "alloc-profile", builtin_alloc_profile);
-  snap_def_cfunc(snap, "set-const!", builtin_set_const);
-  snap_def_cfunc(snap, "list", builtin_list);
-  snap_def_cfunc(snap, "cons", builtin_cons);
-  snap_def_cfunc(snap, "first", builtin_first);
-  snap_def_cfunc(snap, "rest", builtin_rest);
-  snap_def_cfunc(snap, "next", builtin_next);
-  snap_def_cfunc(snap, "nthnext", builtin_nthnext);
-  snap_def_cfunc(snap, "concat", builtin_concat);
-  snap_def_cfunc(snap, "vec", builtin_vec);
-  snap_def_cfunc(snap, "list?", builtin_islist);
-  snap_def_cfunc(snap, "sym?", builtin_issym);
-  snap_def_cfunc(snap, "gensym", builtin_gensym);
-  snap_def_cfunc(snap, "macroexpand", builtin_macroexpand);
-  snap_def_cfunc(snap, "type", builtin_type);
-  snap_def_cfunc(snap, "make-type", builtin_make_type);
-  snap_def_cfunc(snap, "add-method!", builtin_add_method);
-  snap_def_cfunc(snap, "find-method", builtin_find_method);
-  snap_def_cfunc(snap, "set-gc!", builtin_set_gc);
-  snap_def_cfunc(snap, "sqrt", builtin_sqrt);
-  snap_def_cfunc(snap, "sin", builtin_sin);
-  snap_def_cfunc(snap, "cos", builtin_cos);
-  snap_def_cfunc(snap, "atan2", builtin_atan2);
-  snap_def_cfunc(snap, "floor", builtin_floor);
-  snap_def_cfunc(snap, "mod", builtin_mod_floor);
-  snap_def_cfunc(snap, "int", builtin_int);
-  snap_def_cfunc(snap, "float", builtin_float);
-  snap_def_cfunc(snap, "abs", builtin_abs);
-  snap_def_cfunc(snap, "min", builtin_min);
-  snap_def_cfunc(snap, "max", builtin_max);
-  snap_def_cfunc(snap, "rand", builtin_rand);
-  snap_def_cfunc(snap, "rand-seed", builtin_rand_seed);
-  snap_def_cfunc(snap, "tan", builtin_tan);
-  snap_def_cfunc(snap, "asin", builtin_asin);
-  snap_def_cfunc(snap, "acos", builtin_acos);
-  snap_def_cfunc(snap, "exp", builtin_exp);
-  snap_def_cfunc(snap, "log", builtin_log);
-  snap_def_cfunc(snap, "pow", builtin_pow);
-  snap_def_cfunc(snap, "ceil", builtin_ceil);
-  snap_def_cfunc(snap, "round", builtin_round);
-  snap_def_cfunc(snap, "bit-and", builtin_bit_and);
-  snap_def_cfunc(snap, "bit-or", builtin_bit_or);
-  snap_def_cfunc(snap, "bit-xor", builtin_bit_xor);
-  snap_def_cfunc(snap, "bit-shl", builtin_bit_shl);
-  snap_def_cfunc(snap, "bit-shr", builtin_bit_shr);
-  snap_def_cfunc(snap, "load", builtin_load);
+  snap_def(snap, "print", create_builtin(builtin_print));
+  snap_def(snap, "println", create_builtin(builtin_println));
+  snap_def(snap, "repr", create_builtin(builtin_repr));
+  snap_def(snap, "nil?", create_builtin(builtin_isnil));
+  snap_def(snap, "vector?", create_builtin(builtin_isvec));
+  snap_def(snap, "int?", create_builtin(builtin_isint));
+  snap_def(snap, "float?", create_builtin(builtin_isfloat));
+  snap_def(snap, "number?", create_builtin(builtin_isnumber));
+  snap_def(snap, "str?", create_builtin(builtin_isstr));
+  snap_def(snap, "key?", create_builtin(builtin_iskey));
+  snap_def(snap, "bool?", create_builtin(builtin_isbool));
+  snap_def(snap, "fn?", create_builtin(builtin_isfn));
+  snap_def(snap, "struct?", create_builtin(builtin_isstruct));
+  snap_def(snap, "type?", create_builtin(builtin_istype));
+  snap_def(snap, "map?", create_builtin(builtin_ismap));
+  snap_def(snap, "err", create_builtin(builtin_err));
+  snap_def(snap, "err?", create_builtin(builtin_iserr));
+  snap_def(snap, "err-kind", create_builtin(builtin_err_kind));
+  snap_def(snap, "err-msg", create_builtin(builtin_err_msg));
+  snap_def(snap, "err-where", create_builtin(builtin_err_where));
+  snap_def(snap, "err-trace", create_builtin(builtin_err_trace));
+  snap_def(snap, "compile-report!", create_builtin(builtin_compile_report_set));
+  snap_def(snap, "compile-report", create_builtin(builtin_compile_report));
+  snap_def(snap, "count", create_builtin(builtin_count));
+  snap_def(snap, "nth", create_builtin(builtin_nth));
+  snap_def(snap, "apply", create_builtin(builtin_apply));
+  snap_def(snap, "range", create_builtin(builtin_range));
+  snap_def(snap, "vector", create_builtin(builtin_vector));
+  snap_def(snap, "assoc", create_builtin(builtin_assoc));
+  snap_def(snap, "dissoc", create_builtin(builtin_dissoc));
+  snap_def(snap, "merge", create_builtin(builtin_merge));
+  snap_def(snap, "put!", create_builtin(builtin_put));
+  snap_def(snap, "push!", create_builtin(builtin_push));
+  snap_def(snap, "pop!", create_builtin(builtin_pop));
+  snap_def(snap, "get", create_builtin(builtin_get));
+  snap_def(snap, "del!", create_builtin(builtin_del));
+  snap_def(snap, "keys", create_builtin(builtin_keys));
+  snap_def(snap, "vals", create_builtin(builtin_vals));
+  snap_def(snap, "str", create_builtin(builtin_str));
+  snap_def(snap, "name", create_builtin(builtin_name));
+  snap_def(snap, "format", create_builtin(builtin_format));
+  snap_def(snap, "compile", create_builtin(builtin_compile));
+  snap_def(snap, "gc-step", create_builtin(builtin_gc_step));
+  snap_def(snap, "gc-stats", create_builtin(builtin_gc_stats));
+  snap_def(snap, "clock", create_builtin(builtin_clock));
+  snap_def(snap, "cpu-time", create_builtin(builtin_cpu_time));
+  snap_def(snap, "alloc-profile!", create_builtin(builtin_alloc_profile_set));
+  snap_def(snap, "alloc-profile", create_builtin(builtin_alloc_profile));
+  snap_def(snap, "set-const!", create_builtin(builtin_set_const));
+  snap_def(snap, "list", create_builtin(builtin_list));
+  snap_def(snap, "cons", create_builtin(builtin_cons));
+  snap_def(snap, "first", create_builtin(builtin_first));
+  snap_def(snap, "rest", create_builtin(builtin_rest));
+  snap_def(snap, "next", create_builtin(builtin_next));
+  snap_def(snap, "nthnext", create_builtin(builtin_nthnext));
+  snap_def(snap, "concat", create_builtin(builtin_concat));
+  snap_def(snap, "vec", create_builtin(builtin_vec));
+  snap_def(snap, "list?", create_builtin(builtin_islist));
+  snap_def(snap, "sym?", create_builtin(builtin_issym));
+  snap_def(snap, "gensym", create_builtin(builtin_gensym));
+  snap_def(snap, "macroexpand", create_builtin(builtin_macroexpand));
+  snap_def(snap, "type", create_builtin(builtin_type));
+  snap_def(snap, "make-type", create_builtin(builtin_make_type));
+  snap_def(snap, "add-method!", create_builtin(builtin_add_method));
+  snap_def(snap, "find-method", create_builtin(builtin_find_method));
+  snap_def(snap, "set-gc!", create_builtin(builtin_set_gc));
+  snap_def(snap, "sqrt", create_builtin(builtin_sqrt));
+  snap_def(snap, "sin", create_builtin(builtin_sin));
+  snap_def(snap, "cos", create_builtin(builtin_cos));
+  snap_def(snap, "atan2", create_builtin(builtin_atan2));
+  snap_def(snap, "floor", create_builtin(builtin_floor));
+  snap_def(snap, "mod", create_builtin(builtin_mod_floor));
+  snap_def(snap, "int", create_builtin(builtin_int));
+  snap_def(snap, "float", create_builtin(builtin_float));
+  snap_def(snap, "abs", create_builtin(builtin_abs));
+  snap_def(snap, "min", create_builtin(builtin_min));
+  snap_def(snap, "max", create_builtin(builtin_max));
+  snap_def(snap, "rand", create_builtin(builtin_rand));
+  snap_def(snap, "rand-seed", create_builtin(builtin_rand_seed));
+  snap_def(snap, "tan", create_builtin(builtin_tan));
+  snap_def(snap, "asin", create_builtin(builtin_asin));
+  snap_def(snap, "acos", create_builtin(builtin_acos));
+  snap_def(snap, "exp", create_builtin(builtin_exp));
+  snap_def(snap, "log", create_builtin(builtin_log));
+  snap_def(snap, "pow", create_builtin(builtin_pow));
+  snap_def(snap, "ceil", create_builtin(builtin_ceil));
+  snap_def(snap, "round", create_builtin(builtin_round));
+  snap_def(snap, "bit-and", create_builtin(builtin_bit_and));
+  snap_def(snap, "bit-or", create_builtin(builtin_bit_or));
+  snap_def(snap, "bit-xor", create_builtin(builtin_bit_xor));
+  snap_def(snap, "bit-shl", create_builtin(builtin_bit_shl));
+  snap_def(snap, "bit-shr", create_builtin(builtin_bit_shr));
+  snap_def(snap, "load", create_builtin(builtin_load));
 }

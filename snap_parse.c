@@ -166,14 +166,14 @@ static SValue quasi_list(Snap* snap, SCons* elems) {
   for (curr = elems; curr; curr = as_cons(curr->rest)) {
     if (is_wrapped(curr->first, TK_SPLICE)) splice = true;
   }
-  *list_add(snap, &code) = create_cfunc(splice ? builtin_concat : builtin_list);
+  *list_add(snap, &code) = (splice ? create_builtin(builtin_concat) : create_builtin(builtin_list));
   for (curr = elems; curr; curr = as_cons(curr->rest)) {
     slot = list_add(snap, &code);
     if (is_wrapped(curr->first, TK_SPLICE)) {
       *slot = list_nth(as_cons(curr->first), 1);
     } else if (splice) {
       SnapList part = { NULL, NULL };
-      *list_add(snap, &part) = create_cfunc(builtin_list);
+      *list_add(snap, &part) = create_builtin(builtin_list);
       *list_add(snap, &part) = create_nil();
       part.tail->first = quasi(snap, curr->first);
       *slot = list_done(snap, &part);
@@ -210,7 +210,7 @@ static SValue quasi(Snap* snap, SValue expr) {
         elems = list_done(snap, &code);
         anchor(snap, as_obj(elems));
         code.head = NULL;
-        *list_add(snap, &code) = create_cfunc(builtin_vec);
+        *list_add(snap, &code) = create_builtin(builtin_vec);
         *list_add(snap, &code) = create_nil();
         code.tail->first = quasi_list(snap, as_cons(elems));
         expr = list_done(snap, &code);

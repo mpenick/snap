@@ -673,7 +673,7 @@ static void usage_name(const char* usage, int i, char* out, size_t size) {
 
 // The number of arguments the usage takes: at least *min, and at most *max
 // (-1 for any)
-static void usage_arity(const char* usage, int* min, int* max) {
+void snap_usage_arity(const char* usage, int* min, int* max) {
   const char *p = usage, *w, *name;
   size_t len, nlen;
   bool optional, rest;
@@ -696,17 +696,15 @@ bool snap_args_fail(SnapArgs* a, const char* msg) {
   int d;
   if (a->failed) return false;
   a->failed = true;
-  usage_name(a->usage, a->arg, path, sizeof(path));
+  usage_name(a->cfunc->usage, a->arg, path, sizeof(path));
   for (d = 1; d <= a->depth; ++d) {
     n = strlen(path);
     if (a->steps[d].field) snprintf(path + n, sizeof(path) - n, ", :%s", a->steps[d].field);
     else snprintf(path + n, sizeof(path) - n, ", item %d", a->steps[d].item);
   }
-  *a->result = create_obj(snap_err_new_format(a->snap, "snap_type_error", "%s: %s %s", a->usage, path, msg));
+  *a->result = create_obj(snap_err_new_format(a->snap, "snap_type_error", "%s: %s %s", a->cfunc->usage, path, msg));
   return false;
 }
-
-SVec snap_empty_vec; // What snap_vec() gives for something else
 
 void snap_args_wrong(SnapArgs* a, SValue v, const char* what) {
   char msg[128];
@@ -726,22 +724,29 @@ void snap_args_wrong(SnapArgs* a, SValue v, const char* what) {
   snap_args_fail(a, msg);
 }
 
-SnapArity snap_arities[256];
+// The function name in a usage, "(name args...)", into out
+void snap_usage_fn_name(const char* usage, char* out, size_t size) {
+  const char* p = usage;
+  size_t len;
+  while (*p == ' ' || *p == '(') ++p;
+  len = strcspn(p, " )");
+  snprintf(out, size, "%.*s", (int)len, p);
+}
 
-// Works out (and caches) the usage's arity, and checks it
-bool snap_args_slow(SnapArgs* a) {
-  SnapArity* ar = &snap_arities[((uintptr_t)a->usage >> 3) % 256];
-  if (ar->usage != a->usage) {
-    usage_arity(a->usage, &ar->min, &ar->max);
-    ar->usage = a->usage;
-  }
-  if (a->num_args < ar->min || (ar->max >= 0 && a->num_args > ar->max)) {
-    a->failed = true;
-    *a->result = create_obj(snap_err_new_format(a->snap, "snap_arity_error", "%s: got %d argument%s", a->usage,
-                                                a->num_args, a->num_args == 1 ? "" : "s"));
-    return false;
-  }
-  return true;
+void snap_arg_nums(SnapArgs* a, int from, int n, double* out) {
+  int i;
+  for (i = 0; i < n; ++i) out[i] = snap_num(a, snap_arg(a, from + i));
+}
+
+bool snap_args_fail_at(SnapArgs* a, int i, const char* msg) {
+  if (a->failed) return false;
+  snap_arg(a, i);
+  return snap_args_fail(a, msg);
+}
+
+void* snap_ptr(SnapArgs* a, void* p, const char* what) {
+  if (!p) snap_args_wrong(a, a->steps[a->depth].val, what);
+  return p;
 }
 
 SValue snap_get(SnapArgs* a, SValue obj, const char* k) {

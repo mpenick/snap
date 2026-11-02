@@ -283,6 +283,7 @@ static void gc_start(Snap* snap) {
   gc_mark_vals(snap, snap->tobefnz.vitems, snap->tobefnz.vsize); // Waiting for their finalizers
 
   gc_mark(snap, (SObject*)snap->cause);
+  gc_mark(snap, (SObject*)snap->empty_vec);
   gc_mark_val(snap, snap->report);
   gc_mark_vals(snap, snap->inline_fns, SNAP_NUM_INLINE_FNS);
 

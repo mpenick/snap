@@ -415,8 +415,8 @@ right after `defstruct`.
   that frees GPU resources in finalizers should call `snap_destroy()` before
   closing its window.
 
-In C, `snap_set_gc(snap, type, fn)` sets one, and `snap_run_finalizers()`
-runs any that are waiting.
+In C, `snap_set_gc(snap, type, fn)` sets one (`snap_cfunc()` makes a C
+function value for it), and `snap_run_finalizers()` runs any that are waiting.
 
 ## Macros
 
@@ -511,8 +511,8 @@ code that supervises other code, like the REPL:
 (recover (fn [] 42))        ; => 42
 ```
 
-C functions return `false` to panic, with `*result` set to the error. To
-return an error as a value, set `*result` to it and return `true`.
+C functions return `false` to panic, with `*a->result` set to the error. To
+return an error as a value, set `*a->result` to it and return `true`.
 
 A panic, or a compile or read error, remembers where it happened, and a
 script that stops (or the REPL) prints it, innermost first:
@@ -548,7 +548,7 @@ keeps after the call returns, such as a callback it calls every frame or a
 map in a C global, needs a pin:
 
 ```c
-SValue on_frame = snap_pin(snap, args[0]); // Kept until unpinned
+SValue on_frame = snap_pin(a->snap, a->args[0]); // Kept until unpinned
 ...
 snap_unpin(snap, on_frame);
 ```
@@ -559,35 +559,41 @@ do the short-lived version of this: they keep an object alive while C is
 still building it (filling a new map allocates), and they come undone, last
 first, by the end of the call or when an error unwinds.
 
-## Reading arguments in C
+## C functions
 
-A C function can take snap data the way snap code builds it, such as maps,
-structs and vectors of `[x z]` pairs, through `SnapArgs`:
+A C function gets its arguments through `SnapArgs`, which reads snap data the
+way snap code builds it, such as maps, structs and vectors of `[x z]` pairs.
+It's defined by its usage, which gives its name and how many arguments it
+takes:
 
 ```c
-static bool road_len(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  SnapArgs a;
-  SVec* pts;
+static bool road_len(SnapArgs* a) {
+  SVec* pts = snap_vec(a, snap_get(a, snap_arg(a, 0), "pts")); // (:pts road), a map or struct
+  double scale = snap_num_or(a, snap_arg(a, 1), 1.0);         // 1.0 if left out or nil
   float xz[2];
-  double scale;
   int i;
-  if (!snap_args(&a, snap, args, num_args, result, "(road-len road [scale])")) return false;
-  pts = snap_vec(&a, snap_get(&a, snap_arg(&a, 0), "pts")); // (:pts road), a map or struct
-  scale = snap_num_or(&a, snap_arg(&a, 1), 1.0);           // 1.0 if left out or nil
-  for (i = 0; i < pts->len; ++i) snap_nums(&a, snap_at(&a, pts, i), xz, 2);
-  if (a.failed) return false; // The first error is in *result
+  for (i = 0; i < pts->len; ++i) snap_nums(a, snap_at(a, pts, i), xz, 2);
+  if (a->failed) return false; // The first error is in *a->result
   ...
+  *a->result = create_float(a->snap, len * scale); // It starts as nil
+  return true;
 }
+
+snap_def_cfunc(snap, "(road-len road [scale])", road_len);
 ```
 
-The usage string sets the arity: a plain name (or `<name>`, which can hold
-spaces) is required, `[name]` is optional and `name...` takes the rest. Its
-arity is cached by its address, so it should be a literal. It also names
-what was wrong in the error, with the way there, as in `(road-len road
-[scale]): road, :pts, item 3 should be a vector of at most 2 numbers, not a
-vector`. The first error sticks. After it, reads
-give safe zero values (0, `""`, an empty vector, or NULL from `snap_handle`),
-so a function can read everything and check `a.failed` once, before using a
+In the usage, a plain name (or `<name>`, which can hold spaces) is a required
+argument, `[name]` an optional one and `name...` the rest. snap checks the
+number before the call, so the function never sees a wrong one. The usage is
+copied, so it can be built at run time, and `snap_def_cfuncs()` defines a
+table of `{ usage, fn }`. `snap_cfunc()` makes a function value without
+defining a global, such as for `snap_set_gc()`.
+
+Errors quote the usage and say what was wrong, with the way there, as in
+`(road-len road [scale]): road, :pts, item 3 should be a vector of at most 2
+numbers, not a vector`. The first error sticks. After it, reads give safe
+zero values (0, `""`, a read-only empty vector, or NULL for a handle), so a
+function can read everything and check `a->failed` once, before using a
 handle or changing anything.
 
 - Accessors: `snap_arg`, `snap_get` (a field of a map or struct; nil has none)
@@ -596,8 +602,17 @@ handle or changing anything.
   `snap_name` (a string, keyword or symbol), `snap_vec`, `snap_handle` (a
   struct of a given type) and `snap_nums` (a vector of numbers into a float
   array). The `_or` forms of `snap_num` and `snap_int` give a default for
-  something missing or nil.
-- `snap_args_fail` fails with a message of the function's own.
+  something missing or nil. `snap_arg_nums` reads a run of arguments as
+  numbers into a double array.
+- `snap_ptr(a, p, what)` checks a lookup of the binding's own, for handles:
+  `Mesh* m = snap_ptr(a, get_mesh(snap_arg(a, 0)), "a mesh")` fails for the
+  argument not being a mesh if `get_mesh` gives NULL.
+- `snap_args_fail` fails with a message of the function's own, about what was
+  read last, and `snap_args_fail_at` about argument i.
+
+The built-in functions are C functions too, but they take their arguments
+as they are, `(snap, args, num_args, result)`, and check them themselves,
+which saves filling in a `SnapArgs` for each call of `+` or `int?`.
 
 Reading doesn't allocate, so pointers it gives stay valid without pins. A
 field read is a string hash and a map lookup, which is fine for a function's

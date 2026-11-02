@@ -50,8 +50,22 @@ typedef struct SValue_ SValue;
 
 typedef int64_t SnapInt;
 typedef double SnapFloat;
-// Returns false to panic, with *result set to the error
-typedef bool (*SCFunc)(Snap* snap, const SValue* args, int num_args, SValue* result);
+// A built-in function, which checks its own arguments. Returns false to
+// panic, with *result set to the error.
+typedef bool (*SBuiltin)(Snap* snap, const SValue* args, int num_args, SValue* result);
+typedef struct SnapArgs_ SnapArgs;
+// A C function (see snap_def_cfunc() and SnapArgs). Returns false to panic,
+// with *a->result set to the error.
+typedef bool (*SCFunc)(SnapArgs* a);
+
+// What a C function value points to: a built-in, or an extension's function
+// with its usage
+typedef struct SnapCFunc_ {
+  SBuiltin builtin;  // NULL for an extension's, which is called with SnapArgs
+  SCFunc fn;
+  int min, max;      // The arguments fn takes, from the usage (max is -1 for any)
+  const char* usage;
+} SnapCFunc;
 
 // Opcode in the low 8 bits, signed argument in the high 24 bits
 typedef uint32_t SnapInst;
@@ -359,6 +373,8 @@ struct Snap_ {
   int line;                 // compiled, and the line it's at (see compile())
   struct { MVEC_FIELDS(SObject*); } anchors;
   struct { MVEC_FIELDS(SValue); } pins; // See snap_pin()
+  struct { MVEC_FIELDS(SnapCFunc*); } cfuncs; // Extensions' functions (see snap_cfunc())
+  SVec* empty_vec; // Read-only, what snap_vec() gives for something else
   size_t num_bytes_alloced;
   size_t next_gc; // Start a collection when num_bytes_alloced reaches this
   SnapPage* pages;
@@ -437,7 +453,7 @@ struct Snap_ {
 #define as_int(v) check(is_int(v), (SnapInt)(v).bits >> 1)
 #define as_float(v) check(is_float(v), is_imm_float(v) ? snap_imm_float_val(v) : ((SFloat*)as_obj(v))->f)
 #define as_form(v) check(is_form(v), (int)((v).bits >> 3) - SV_FORMS)
-#define as_cfunc(v) check(is_cfunc(v), (SCFunc)(uintptr_t)((v).bits >> 3))
+#define as_cfunc(v) check(is_cfunc(v), (const SnapCFunc*)(uintptr_t)((v).bits >> 3))
 #define as_str(v) check(is_str(v), (SStr*)as_obj(v))
 #define as_sym(v) check(is_sym(v), (SSym*)as_obj(v))
 #define as_key(v) check(is_key(v), (SKeyword*)as_obj(v))
@@ -463,7 +479,7 @@ static inline SValue create_empty(void) { return snap_val(SV_EMPTY); }
 static inline SValue create_bool(bool b) { return snap_val(b ? SV_TRUE : SV_FALSE); }
 static inline SValue create_int(SnapInt i) { return snap_val(((uint64_t)i << 1) | 1); }
 static inline SValue create_form(int token) { return snap_val(SV_SPECIAL(SV_FORMS + token)); }
-static inline SValue create_cfunc(SCFunc c) { return snap_val(((uint64_t)(uintptr_t)c << 3) | TAG_CFUNC); }
+static inline SValue create_cfunc(const SnapCFunc* f) { return snap_val(((uint64_t)(uintptr_t)f << 3) | TAG_CFUNC); }
 static inline SValue create_object(SObject* o) { return snap_val((uint64_t)(uintptr_t)o); }
 #define create_obj(o) create_object((SObject*)(o))
 SValue create_float(Snap* snap, SnapFloat f); // Allocates if f can't be immediate
@@ -533,21 +549,23 @@ bool snap_map_del(Snap* snap, SMap* map, SValue key);
 // and numbers, with the first error kept (sticky) so reads chain without a
 // check after each one:
 //
-//   SnapArgs a;
-//   snap_args(&a, snap, args, num_args, result, "(road-len road [scale])");
-//   SVec* pts = snap_vec(&a, snap_get(&a, snap_arg(&a, 0), "pts"));
-//   double scale = snap_num_or(&a, snap_arg(&a, 1), 1.0);
-//   for (i = 0; i < pts->len; ++i) n = snap_nums(&a, snap_at(&a, pts, i), xz, 2);
-//   if (a.failed) return false; // *result holds the error
+//   static bool road_len(SnapArgs* a) {
+//     SVec* pts = snap_vec(a, snap_get(a, snap_arg(a, 0), "pts"));
+//     double scale = snap_num_or(a, snap_arg(a, 1), 1.0);
+//     for (i = 0; i < pts->len; ++i) n = snap_nums(a, snap_at(a, pts, i), xz, 2);
+//     if (a->failed) return false; // *a->result holds the error
+//     ...
+//   }
+//   snap_def_cfunc(snap, "(road-len road [scale])", road_len);
 //
-// The usage gives the arity and the names in errors: a plain name is an
-// argument, [name] an optional one and name... the rest ("<name>" is the
-// same as "name"). The accessors (snap_arg, snap_get, snap_at) give undef
-// for a missing value, which the converters report, or the _or ones replace.
-// After a failure, reads give safe zero values: 0, "", an empty vector, or
-// NULL for a handle, so check failed before using a handle or changing
-// anything. Reading doesn't allocate, so what's read stays valid; only the
-// error does, once.
+// The usage gives the name, the arity, which snap checks before the call,
+// and the names in errors: a plain name is an argument, [name] an optional
+// one and name... the rest ("<name>" is the same as "name"). The accessors
+// (snap_arg, snap_get, snap_at) give undef for a missing value, which the
+// converters report, or the _or ones replace. After a failure, reads give
+// safe zero values: 0, "", an empty vector, or NULL for a handle, so check
+// failed before using a handle or changing anything. Reading doesn't
+// allocate, so what's read stays valid; only the error does, once.
 #define SNAP_ARGS_DEPTH 6
 
 // A step of the way to what was read, for errors: a field or item, and what
@@ -558,48 +576,33 @@ typedef struct SnapArgStep_ {
   int item;
 } SnapArgStep;
 
-typedef struct SnapArgs_ {
+struct SnapArgs_ {
   Snap* snap;
   const SValue* args;
   int num_args;
-  SValue* result;
-  const char* usage;
+  SValue* result;         // nil to start with
+  const SnapCFunc* cfunc; // The function called, for its usage
   bool failed;
   int arg;   // The argument read last
   int depth; // and the steps from it to what was read last (steps[0] is the argument)
   SnapArgStep steps[SNAP_ARGS_DEPTH];
-} SnapArgs;
+};
 
-// Usages' arities, cached by the usage's address (see snap_args)
-typedef struct SnapArity_ { const char* usage; int min, max; } SnapArity;
-extern SnapArity snap_arities[256];
-bool snap_args_slow(SnapArgs* a);
-
-// Starts reading. Returns false (with the error in *result) for a wrong
-// number of arguments. The usage must last as long as the program (it's
-// usually a literal), as its arity is cached by its address.
-static inline bool snap_args(SnapArgs* a, Snap* snap, const SValue* args, int num_args, SValue* result,
-                             const char* usage) {
-  const SnapArity* ar = &snap_arities[((uintptr_t)usage >> 3) % 256];
-  a->snap = snap;
-  a->args = args;
-  a->num_args = num_args;
-  a->result = result;
-  a->usage = usage;
-  a->failed = false;
-  a->arg = 0;
-  a->depth = 0;
-  a->steps[0].val = create_undef();
-  if (ar->usage == usage && num_args >= ar->min && (ar->max < 0 || num_args <= ar->max)) return true;
-  return snap_args_slow(a);
-}
 SValue snap_get(SnapArgs* a, SValue obj, const char* k); // Field :k of a map or struct (nil has none)
 const char* snap_name(SnapArgs* a, SValue v);            // A string's, keyword's or symbol's text
 SStruct* snap_handle(SnapArgs* a, SValue v, SType* t);   // A struct of type t
 // A vector of up to max numbers into out; returns how many
 int snap_nums(SnapArgs* a, SValue v, float* out, int max);
+// Arguments from to from + n - 1, as numbers, into out
+void snap_arg_nums(SnapArgs* a, int from, int n, double* out);
 // Fails with a message of the caller's, after the usage; returns false
 bool snap_args_fail(SnapArgs* a, const char* msg);
+// The same, about argument i
+bool snap_args_fail_at(SnapArgs* a, int i, const char* msg);
+// p, or if it's NULL, fails for the value read last not being what. For
+// handles, with the binding's own lookup:
+//   Mesh* m = snap_ptr(a, get_mesh(snap_arg(a, 0)), "a mesh");
+void* snap_ptr(SnapArgs* a, void* p, const char* what);
 // Fails for v not being what (e.g. "a number")
 void snap_args_wrong(SnapArgs* a, SValue v, const char* what);
 
@@ -664,10 +667,9 @@ static inline bool snap_truthy(SnapArgs* a, SValue v) {
 }
 
 static inline SVec* snap_vec(SnapArgs* a, SValue v) {
-  extern SVec snap_empty_vec;
   if (is_vec(v)) return as_vec(v);
   snap_args_wrong(a, v, "a vector");
-  return &snap_empty_vec;
+  return a->snap->empty_vec;
 }
 
 SObject* snap_anchor(Snap* snap, SObject* obj);
@@ -679,7 +681,19 @@ SValue snap_pin(Snap* snap, SValue val);
 void snap_unpin(Snap* snap, SValue val);
 
 void snap_def(Snap* snap, const char* name, SValue val);
-void snap_def_cfunc(Snap* snap, const char* name, SCFunc cfunc);
+// Defines a C function by its usage, "(name args...)", which gives its name
+// and how many arguments it takes, which snap checks before calling it (see
+// SnapArgs). The usage is copied.
+void snap_def_cfunc(Snap* snap, const char* usage, SCFunc fn);
+typedef struct SnapCFuncDef_ {
+  const char* usage;
+  SCFunc fn;
+} SnapCFuncDef;
+// Defines n of them
+void snap_def_cfuncs(Snap* snap, const SnapCFuncDef* defs, int n);
+// A C function value, without defining it, such as for snap_set_gc(). It
+// lasts as long as the Snap.
+SValue snap_cfunc(Snap* snap, const char* usage, SCFunc fn);
 // Compiles the forms in str into a function without arguments. Returns an
 // error value if they don't parse or compile, or nil if there aren't any.
 SValue snap_compile(Snap* snap, const char* str);

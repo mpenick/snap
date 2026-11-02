@@ -24,6 +24,26 @@ bool builtin_put(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_vec(Snap* snap, const SValue* args, int num_args, SValue* result);
 bool builtin_vector(Snap* snap, const SValue* args, int num_args, SValue* result);
 
+// The C function values of the built-ins, which the compiler and VM know
+// them by
+#define create_builtin(f) create_cfunc(&f##_cf)
+extern const SnapCFunc builtin_apply_cf;
+extern const SnapCFunc builtin_concat_cf;
+extern const SnapCFunc builtin_count_cf;
+extern const SnapCFunc builtin_gensym_cf;
+extern const SnapCFunc builtin_get_cf;
+extern const SnapCFunc builtin_int_cf;
+extern const SnapCFunc builtin_list_cf;
+extern const SnapCFunc builtin_make_macro_cf;
+extern const SnapCFunc builtin_map_cf;
+extern const SnapCFunc builtin_max_cf;
+extern const SnapCFunc builtin_min_cf;
+extern const SnapCFunc builtin_nth_cf;
+extern const SnapCFunc builtin_nthnext_cf;
+extern const SnapCFunc builtin_put_cf;
+extern const SnapCFunc builtin_vec_cf;
+extern const SnapCFunc builtin_vector_cf;
+
 // A keyword called as a function: (:k x) is (get x :k), (:k x d) is
 // (get x :k d)
 static inline bool key_call(Snap* snap, SValue key, const SValue* args, int num_args, SValue* result) {

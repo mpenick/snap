@@ -13,48 +13,37 @@
 // editing and history) and shows the prompt; otherwise there's no prompt.
 // It's defined here rather than in snap.c so that the core doesn't need
 // readline.
-static bool read_line(Snap* snap, const SValue* args, int num_args, SValue* result) {
+static bool read_line(SnapArgs* a) {
   static char* line = NULL;
   static size_t cap = 0;
   ssize_t len;
-  if (num_args > 1 || (num_args == 1 && !is_str(args[0]))) {
-    *result = create_obj(snap_err_new_format(snap, "snap_type_error", "Expected (read-line <prompt>)"));
-    return false;
-  }
+  const char* prompt = a->num_args == 1 ? snap_name(a, snap_arg(a, 0)) : "";
+  if (a->failed) return false;
 
   if (isatty(STDIN_FILENO)) {
-    char* input = readline(num_args == 1 ? as_str(args[0])->data : "");
+    char* input = readline(prompt);
     if (!input) {
       printf("\n");
-      *result = create_nil();
       return true;
     }
     if (input[strspn(input, " \t")]) add_history(input);
-    *result = create_obj(snap_str_new(snap, input));
+    *a->result = create_obj(snap_str_new(a->snap, input));
     free(input);
     return true;
   }
 
-  if ((len = getline(&line, &cap, stdin)) < 0) {
-    *result = create_nil();
-    return true;
-  }
+  if ((len = getline(&line, &cap, stdin)) < 0) return true;
   while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) len--;
   line[len] = '\0';
-  *result = create_obj(snap_str_new(snap, line));
+  *a->result = create_obj(snap_str_new(a->snap, line));
   return true;
 }
 
 // (repl-print x) prints x and a newline, as println does, and an error's
 // trace (see snap_print_err()), which snap code can't print itself
-static bool repl_print(Snap* snap, const SValue* args, int num_args, SValue* result) {
-  if (num_args != 1) {
-    *result = create_obj(snap_err_new_format(snap, "snap_type_error", "Expected (repl-print <x>)"));
-    return false;
-  }
-  snap_print_err(snap, stdout, args[0]);
+static bool repl_print(SnapArgs* a) {
+  snap_print_err(a->snap, stdout, a->args[0]);
   printf("\n");
-  *result = create_nil();
   return true;
 }
 
@@ -95,8 +84,8 @@ int main(int argc, char** argv) {
   SVec* args;
   Snap snap;
   snap_init(&snap);
-  snap_def_cfunc(&snap, "read-line", read_line);
-  snap_def_cfunc(&snap, "repl-print", repl_print);
+  snap_def_cfunc(&snap, "(read-line [prompt])", read_line);
+  snap_def_cfunc(&snap, "(repl-print x)", repl_print);
   rl_bind_key('\t', rl_insert); // Tab inserts a tab instead of completing file names
 
   if (argc > first && strcmp(argv[first], "-d") == 0) {
